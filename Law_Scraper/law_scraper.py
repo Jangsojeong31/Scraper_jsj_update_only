@@ -43,12 +43,145 @@ from common.base_scraper import BaseScraper
 class LawGoKrScraper(BaseScraper):
     """법제처 - 국가법령정보센터 스크래퍼"""
     
-    def __init__(self, delay: float = 1.0):
+    # CSV 파일 경로 (기본값)
+    DEFAULT_CSV_PATH = "Law_Scraper/input/list.csv"
+    
+    def __init__(self, delay: float = 1.0, csv_path: str = None):
         """
         Args:
             delay: 요청 간 대기 시간 (초)
+            csv_path: 법령명 목록이 있는 CSV 파일 경로 (None이면 기본 경로 사용)
         """
         super().__init__(delay)
+        
+        # CSV 파일에서 법령명과 구분 정보 읽기
+        self.law_items = self._load_target_laws_from_csv(csv_path or self.DEFAULT_CSV_PATH)
+        self.law_name_lookup = {
+            item.get('법령명', '').strip()
+            for item in self.law_items
+            if isinstance(item, dict)
+        }
+    
+    def _remove_parentheses(self, text: str) -> str:
+        """
+        법령명에서 괄호와 그 내용을 제거하여 검색 키워드로 사용
+        
+        Args:
+            text: 원본 법령명
+            
+        Returns:
+            괄호가 제거된 검색 키워드
+        """
+        import re
+        # 괄호와 그 내용 제거 (예: "국민연금법(제124조...)" -> "국민연금법")
+        # 한글 괄호와 영문 괄호 모두 처리
+        cleaned = re.sub(r'[\(（].*?[\)）]', '', text)
+        return cleaned.strip()
+    
+    def _load_target_laws_from_csv(self, csv_path: str) -> List[Dict]:
+        """
+        CSV 파일에서 법령명과 구분 정보를 읽어옵니다.
+        
+        Args:
+            csv_path: CSV 파일 경로 (형식: 구분,법령명)
+            
+        Returns:
+            법령 정보 리스트 (각 항목은 {'법령명': str, '검색_키워드': str, '구분': str, '검색_URL': str} 형태)
+        """
+        import csv
+        from pathlib import Path
+        from urllib.parse import quote
+        
+        # 검색 URL 매핑
+        search_urls = {
+            '법령': 'https://www.law.go.kr/lsSc.do?menuId=1&subMenuId=15&tabMenuId=81&query=',
+            '감독규정': 'https://www.law.go.kr/admRulSc.do?menuId=5&subMenuId=41&tabMenuId=183&query=',
+        }
+        
+        # 프로젝트 루트 기준으로 경로 해석
+        csv_file = Path(csv_path)
+        if not csv_file.is_absolute():
+            # 상대 경로인 경우 프로젝트 루트 기준으로 변환
+            project_root = find_project_root()
+            csv_file = project_root / csv_path
+        
+        if not csv_file.exists():
+            print(f"⚠ CSV 파일을 찾을 수 없습니다: {csv_file}")
+            print(f"  기본값을 사용합니다: 예금자보호법, 국세징수법, 부가가치세법")
+            return [
+                {'법령명': '예금자보호법', '검색_키워드': '예금자보호법', '구분': '법령', '검색_URL': search_urls['법령']},
+                {'법령명': '국세징수법', '검색_키워드': '국세징수법', '구분': '법령', '검색_URL': search_urls['법령']},
+                {'법령명': '부가가치세법', '검색_키워드': '부가가치세법', '구분': '법령', '검색_URL': search_urls['법령']},
+            ]
+        
+        target_laws = []
+        try:
+            with open(csv_file, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                
+                for row in reader:
+                    law_name = row.get('법령명', '').strip()
+                    division = row.get('구분', '').strip()
+                    
+                    if law_name:
+                        # 구분에 맞는 검색 URL 선택
+                        search_url = search_urls.get(division, search_urls['법령'])
+                        
+                        # 괄호 제거하여 검색 키워드 생성
+                        search_keyword = self._remove_parentheses(law_name)
+                        
+                        target_laws.append({
+                            '법령명': law_name,  # 원본 법령명 (괄호 포함)
+                            '검색_키워드': search_keyword,  # 검색용 키워드 (괄호 제거)
+                            '구분': division,
+                            '검색_URL': search_url
+                        })
+            
+            if target_laws:
+                print(f"✓ CSV 파일에서 {len(target_laws)}개의 법령 정보를 읽었습니다: {csv_file}")
+                division_counts = {}
+                for item in target_laws:
+                    div = item.get('구분', '')
+                    division_counts[div] = division_counts.get(div, 0) + 1
+                print(f"  구분별 통계: {', '.join([f'{k}: {v}개' for k, v in division_counts.items()])}")
+            else:
+                print(f"⚠ CSV 파일이 비어있습니다: {csv_file}")
+                print(f"  기본값을 사용합니다: 예금자보호법, 국세징수법, 부가가치세법")
+                return [
+                    {'법령명': '예금자보호법', '검색_키워드': '예금자보호법', '구분': '법령', '검색_URL': search_urls['법령']},
+                    {'법령명': '국세징수법', '검색_키워드': '국세징수법', '구분': '법령', '검색_URL': search_urls['법령']},
+                    {'법령명': '부가가치세법', '검색_키워드': '부가가치세법', '구분': '법령', '검색_URL': search_urls['법령']},
+                ]
+        except Exception as e:
+            print(f"⚠ CSV 파일 읽기 실패: {csv_file} - {e}")
+            print(f"  기본값을 사용합니다: 예금자보호법, 국세징수법, 부가가치세법")
+            return [
+                {'법령명': '예금자보호법', '검색_키워드': '예금자보호법', '구분': '법령', '검색_URL': search_urls['법령']},
+                {'법령명': '국세징수법', '검색_키워드': '국세징수법', '구분': '법령', '검색_URL': search_urls['법령']},
+                {'법령명': '부가가치세법', '검색_키워드': '부가가치세법', '구분': '법령', '검색_URL': search_urls['법령']},
+            ]
+        
+        return target_laws
+    
+    def is_target_law(self, law_name: str) -> bool:
+        """
+        법령명이 대상 법령 목록에 있는지 확인
+        
+        Args:
+            law_name: 법령명
+            
+        Returns:
+            대상 법령이면 True, 아니면 False
+        """
+        if not law_name:
+            return False
+        
+        law_name_clean = law_name.strip()
+        for target_name in self.law_name_lookup:
+            # 정확히 일치하거나 포함되는 경우
+            if target_name and (target_name in law_name_clean or law_name_clean in target_name):
+                return True
+        return False
     
     def fetch_page(self, url: str, use_selenium: bool = False, driver: Optional[webdriver.Chrome] = None) -> Optional[BeautifulSoup]:
         """
@@ -219,13 +352,14 @@ class LawGoKrScraper(BaseScraper):
         
         return content.strip()
     
-    def extract_law_search_results(self, soup: BeautifulSoup, base_url: str = None) -> Dict:
+    def extract_law_search_results(self, soup: BeautifulSoup, base_url: str = None, is_adm_rul: bool = False, skip_target_filter: bool = False) -> Dict:
         """
         국가법령정보센터 검색 결과 페이지에서 법령 목록 추출
         
         Args:
             soup: BeautifulSoup 객체
             base_url: 기본 URL (상대 경로를 절대 경로로 변환하기 위해)
+            is_adm_rul: 행정규칙 검색 페이지 여부 (True면 admRulSc.do 형식)
             
         Returns:
             법령 정보 리스트 (각 항목은 딕셔너리)
@@ -244,12 +378,17 @@ class LawGoKrScraper(BaseScraper):
             except:
                 pass
         
+        # 행정규칙 검색 페이지와 법령 검색 페이지의 구조가 다를 수 있음
         # #viewHeightDiv > table > tbody > tr 구조로 검색 결과 추출
         # CSS 선택자로 직접 찾기: #viewHeightDiv > table > tbody > tr > td.tl > a
         view_height_div = soup.find('div', id='viewHeightDiv')
         if not view_height_div:
             # 다른 방법으로 찾기
             view_height_div = soup.select_one('#viewHeightDiv')
+        
+        # 행정규칙 검색 페이지의 경우 다른 선택자도 시도
+        if not view_height_div and is_adm_rul:
+            view_height_div = soup.find('div', class_='result_list') or soup.find('div', class_='list_area')
         
         if view_height_div:
             table = view_height_div.find('table')
@@ -297,10 +436,31 @@ class LawGoKrScraper(BaseScraper):
                             item['law_name'] = law_name_link.get_text(strip=True)
                             # 링크 추출
                             link = law_name_link.get('href', '')
-                            if link and base_url:
+                            
+                            # href가 '#'이거나 빈 문자열인 경우, onclick 속성 확인
+                            if not link or link == '#' or link.startswith('javascript:'):
+                                onclick = law_name_link.get('onclick', '')
+                                if onclick:
+                                    # onclick에서 URL 추출 시도
+                                    import re
+                                    url_match = re.search(r"['\"]([^'\"]*lsInfoP[^'\"]*)['\"]", onclick)
+                                    if url_match:
+                                        link = url_match.group(1)
+                                    else:
+                                        # 검색 URL을 기본값으로 사용
+                                        link = base_url if base_url else ""
+                                else:
+                                    # 링크가 없으면 검색 URL을 기본값으로 사용
+                                    link = base_url if base_url else ''
+                            # else: link가 이미 유효한 경우 그대로 사용
+                            
+                            if link and base_url and not link.startswith('http'):
                                 item['link'] = urljoin(base_url, link)
-                            else:
+                            elif link:
                                 item['link'] = link
+                            else:
+                                # 링크가 없으면 검색 URL 사용
+                                item['link'] = base_url if base_url else ''
                         
                         # 각 셀에서 정보 추출 (테이블 구조에 맞게)
                         # 구조: 인덱스 | 법령명 | 공포일자 | 법령종류 | 법령번호 | 시행일자 | 타법개정 | 소관부처
@@ -327,7 +487,17 @@ class LawGoKrScraper(BaseScraper):
                                     item['ministry'] = cell_text
                         
                         if item.get('law_name'):  # 법령명이 있는 경우만 추가
-                            results.append(item)
+                            # skip_target_filter가 True이면 필터링 건너뛰기 (엑셀 파일에서 읽은 법령 처리 시)
+                            if skip_target_filter:
+                                results.append(item)
+                            else:
+                                # 대상 법령인지 확인 (목록이 정의되어 있고 비어있지 않은 경우만 필터링)
+                                if self.law_items:
+                                    if self.is_target_law(item['law_name']):
+                                        results.append(item)
+                                else:
+                                    # 목록이 비어있으면 모든 결과 포함
+                                    results.append(item)
         
         # 위 방법으로 추출이 안 되면 기존 방법 시도
         if not results:
@@ -359,7 +529,12 @@ class LawGoKrScraper(BaseScraper):
                             item['ministry'] = cells[4].get_text(strip=True)
                         
                         if item.get('law_name'):
-                            results.append(item)
+                            # 대상 법령인지 확인
+                            if self.law_items:
+                                if self.is_target_law(item['law_name']):
+                                    results.append(item)
+                            else:
+                                results.append(item)
         
         return {
             'total_count': total_count,
@@ -385,10 +560,10 @@ class LawGoKrScraper(BaseScraper):
 
     def save_results_csv(self, records: List[Dict], meta: Dict, filename: str = 'results.csv'):
         """
-        스크래핑 결과를 CSV 파일로 저장
+        스크래핑 결과를 CSV 파일로 저장 (KFB_Scraper와 동일한 컬럼 구조)
         
         Args:
-            records: 행 단위 데이터 리스트 (예: 검색 결과 항목들)
+            records: 행 단위 데이터 리스트 (이미 한글 필드명으로 정리된 데이터)
             meta: 메타 정보 딕셔너리 (예: url, crawled_at, total_count 등)
             filename: 저장할 파일명
         """
@@ -401,34 +576,18 @@ class LawGoKrScraper(BaseScraper):
             print(f"저장할 데이터가 없습니다.")
             return
 
-        # 모든 필드명 수집
-        fieldnames = set()
-        for item in records:
-            fieldnames.update(item.keys())
-        fieldnames = sorted(list(fieldnames))
+        # KFB_Scraper와 동일한 헤더 정의
+        headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]
 
         with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
-            # 메타 정보를 주석으로 저장
-            f.write('# 메타 정보\n')
-            for k, v in meta.items():
-                f.write(f'# {k}: {v}\n')
-            f.write('#\n')
-            
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
             
-            for item in records:
-                csv_item = {}
-                for key in fieldnames:
-                    value = item.get(key, '')
-                    # 문자열로 변환 (None은 빈 문자열로)
-                    if value is None:
-                        value = ''
-                    elif not isinstance(value, str):
-                        value = str(value)
-                    # 줄바꿈을 공백으로 변환 (CSV 호환성)
-                    value = value.replace('\n', ' ').replace('\r', ' ')
-                    csv_item[key] = value
+            for law_item in records:
+                # records는 이미 한글 필드명으로 정리된 데이터이므로 그대로 사용
+                # CSV 저장 시 본문의 줄바꿈 처리만 추가
+                csv_item = law_item.copy()
+                csv_item["본문"] = csv_item.get("본문", "").replace("\n", " ").replace("\r", " ")
                 writer.writerow(csv_item)
 
         print(f"\nCSV로 저장되었습니다: {filepath}")
@@ -438,14 +597,17 @@ class LawGoKrScraper(BaseScraper):
         검색 키워드를 쿼리 파라미터에 넣어 검색 URL 생성
         
         Args:
-            base_url: 기본 검색 URL
+            base_url: 기본 검색 URL (query=까지 포함)
             keyword: 검색 키워드
             page: 페이지 번호 (기본값: 1)
         """
         if not keyword:
+            # 키워드가 없으면 base_url 그대로 반환 (페이지 번호만 추가)
+            if page > 1:
+                return f"{base_url}&pageNo={page}"
             return base_url
         
-        # URL에 이미 query=가 있으므로 키워드만 추가
+        # URL에 이미 query=가 있으므로 키워드를 URL 인코딩하여 추가
         url = f"{base_url}{quote_plus(keyword)}"
         
         # 페이지 번호 추가 (국가법령정보센터는 여러 파라미터 형식 사용 가능)
@@ -541,12 +703,10 @@ def main():
 
     crawler = LawGoKrScraper(delay=1.0)
     
-    # 국가법령정보센터 검색 페이지 베이스 URL
-    base_search_url = "https://www.law.go.kr/lsSc.do?menuId=1&subMenuId=15&tabMenuId=81&query="
+    # 국가법령정보센터 검색 페이지 베이스 URL (기본값)
+    default_base_search_url = "https://www.law.go.kr/LSW/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query="
     
     print("=== 국가법령정보센터 검색 결과 스크래핑 시작 ===")
-    if keyword:
-        print(f"검색 키워드: {keyword}")
     
     # Selenium 드라이버 생성 (재사용)
     chrome_options = Options()
@@ -557,7 +717,185 @@ def main():
     chrome_options.add_argument('--lang=ko-KR')
     driver = webdriver.Chrome(options=chrome_options)
     
+    all_results = []
+    total_count = 0
+    first_page_url = None  # 초기화
+    total_pages = 1  # 초기화
+    law_info = {}  # 초기화
+    
     try:
+        # CSV 파일에서 읽은 법령 정보 사용
+        if crawler.law_items and len(crawler.law_items) > 0:
+            print(f"대상 법령: {len(crawler.law_items)}개")
+            
+            for i, target_item in enumerate(crawler.law_items, 1):
+                # CSV 목록 항목인 경우
+                if isinstance(target_item, dict):
+                    original_law_name = target_item.get('법령명', '')  # 원본 법령명 (괄호 포함)
+                    search_keyword = target_item.get('검색_키워드', original_law_name)  # 검색용 키워드 (괄호 제거)
+                    division = target_item.get('구분', '')
+                    base_search_url = target_item.get('검색_URL', default_base_search_url)
+                else:
+                    # 기존 호환성: 문자열인 경우
+                    original_law_name = str(target_item)
+                    search_keyword = crawler._remove_parentheses(original_law_name)
+                    division = '법령'
+                    base_search_url = default_base_search_url
+                
+                if not search_keyword:
+                    continue
+                
+                print(f"\n[{i}/{len(crawler.law_items)}] '{original_law_name}' 검색 중... (검색 키워드: '{search_keyword}', 구분: {division})")
+                
+                # 검색 키워드로 검색 URL 생성 (괄호 제거된 키워드 사용)
+                search_url = crawler.build_search_url(base_search_url, search_keyword, page=1)
+                if first_page_url is None:
+                    first_page_url = search_url  # 첫 번째 검색 URL 저장
+                    # 첫 번째 검색에서 페이지 정보 추출
+                    temp_soup = crawler.fetch_page(search_url, use_selenium=True, driver=driver)
+                    if temp_soup:
+                        law_info = crawler.extract_law_info(temp_soup)
+                
+                soup = crawler.fetch_page(search_url, use_selenium=True, driver=driver)
+                
+                if not soup:
+                    print(f"  ⚠ '{original_law_name}' 검색 페이지를 가져오는데 실패했습니다.")
+                    continue
+                
+                # 첫 번째 페이지에서 검색 결과 추출 (목록만 가져오기)
+                # CSV에서 읽은 법령이므로 목록 필터링 건너뛰기
+                is_adm_rul = 'admRulSc.do' in base_search_url
+                search_results = crawler.extract_law_search_results(soup, search_url, is_adm_rul=is_adm_rul, skip_target_filter=True)
+                page_results = search_results.get('results', [])
+                
+                # 검색 결과가 없으면 다음으로
+                if not page_results:
+                    print(f"  ✗ '{original_law_name}' 검색 결과를 찾을 수 없습니다. (결과 개수: 0)")
+                    continue
+                
+                # 디버깅: 검색 결과 확인
+                print(f"  검색 결과 {len(page_results)}개 발견")
+                
+                # 검색 결과에서 정확히 일치하거나 유사한 항목 찾기
+                target_item = None
+                
+                # 법령명 정규화 함수 (띄어쓰기, 특수문자 제거)
+                def normalize_law_name(name: str) -> str:
+                    import re
+                    # 띄어쓰기 제거, 특수문자 제거
+                    normalized = re.sub(r'[\s\W]+', '', name)
+                    return normalized.lower()
+                
+                # 검색 키워드를 정규화하여 비교
+                normalized_target = normalize_law_name(search_keyword)
+                
+                # 정확히 일치하는 항목 찾기
+                for result in page_results:
+                    law_name = result.get('law_name', '')
+                    if not law_name:
+                        continue
+                    normalized_result = normalize_law_name(law_name)
+                    
+                    # 정확히 일치하거나 포함 관계 확인
+                    if normalized_result == normalized_target or normalized_target in normalized_result or normalized_result in normalized_target:
+                        target_item = result
+                        print(f"  ✓ 법령 찾음: {law_name}")
+                        break
+                
+                # 정확히 일치하는 항목이 없으면 첫 번째 항목 사용
+                if not target_item and page_results:
+                    target_item = page_results[0]
+                    print(f"  ⚠ 정확히 일치하는 항목을 찾지 못해 첫 번째 결과를 사용합니다: {target_item.get('law_name', 'N/A')}")
+                
+                if target_item:
+                    law_link = target_item.get('link', '')
+                    if law_link:
+                        print(f"  ✓ 법령 링크 찾음: {target_item.get('law_name', 'N/A')}")
+                        print(f"  → 상세 페이지로 이동하여 본문 추출 중...")
+                        
+                        detail_soup = None
+                        law_content = ""
+                        
+                        # 링크가 검색 URL이거나 JavaScript 링크인 경우, Selenium으로 직접 클릭
+                        if 'lsSc.do' in law_link or 'javascript:' in law_link or not law_link.startswith('http'):
+                            try:
+                                # 검색 페이지로 이동
+                                driver.get(search_url)
+                                time.sleep(2)
+                                
+                                # 검색 결과 테이블 대기
+                                WebDriverWait(driver, 10).until(
+                                    EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a"))
+                                )
+                                
+                                # 정확히 일치하는 법령명 링크 찾기 (검색 키워드로 비교)
+                                anchors = driver.find_elements(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
+                                target_anchor = None
+                                
+                                # 검색 키워드로 정규화하여 비교
+                                normalized_search_keyword = normalize_law_name(search_keyword)
+                                
+                                for anchor in anchors:
+                                    anchor_text = anchor.text.strip()
+                                    normalized_anchor = normalize_law_name(anchor_text)
+                                    # 검색 키워드가 앵커 텍스트에 포함되거나 일치하는 경우
+                                    if normalized_search_keyword in normalized_anchor or normalized_anchor in normalized_search_keyword:
+                                        target_anchor = anchor
+                                        break
+                                
+                                # 정확히 일치하는 항목이 없으면 첫 번째 항목 사용
+                                if not target_anchor and anchors:
+                                    target_anchor = anchors[0]
+                                
+                                if target_anchor:
+                                    # JavaScript로 클릭 시도
+                                    driver.execute_script("arguments[0].click();", target_anchor)
+                                    time.sleep(2)
+                                    
+                                    # 상세 페이지 로드 대기
+                                    WebDriverWait(driver, 10).until(
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view"))
+                                    )
+                                    time.sleep(1)
+                                    detail_soup = BeautifulSoup(driver.page_source, 'lxml')
+                                else:
+                                    print(f"  ⚠ 클릭할 링크를 찾을 수 없습니다.")
+                            except Exception as e:
+                                print(f"  ⚠ Selenium 클릭 실패: {str(e)[:100]}")
+                        else:
+                            # 일반 링크인 경우 직접 접근
+                            detail_soup = crawler.fetch_page(law_link, use_selenium=True, driver=driver)
+                        
+                        if detail_soup:
+                            law_content = crawler.extract_law_detail(detail_soup)
+                            target_item['law_content'] = law_content
+                            if law_content and len(law_content.strip()) > 100:  # 의미있는 내용인지 확인
+                                print(f"  ✓ 본문 추출 완료 ({len(law_content)}자)")
+                            else:
+                                print(f"  ⚠ 본문 추출 실패 또는 빈 내용")
+                        else:
+                            print(f"  ✗ 상세 페이지 가져오기 실패")
+                            target_item['law_content'] = ""
+                        
+                        # 구분 정보 추가
+                        target_item['division'] = division
+                        
+                        # 원본 법령명 저장 (결과에 표시할 원본 법령명)
+                        target_item['original_law_name'] = original_law_name
+                        
+                        # 결과에 추가
+                        all_results.append(target_item)
+                        total_count += 1
+                    else:
+                        print(f"  ✗ '{original_law_name}' 링크를 찾을 수 없습니다.")
+                else:
+                    print(f"  ✗ '{original_law_name}' 검색 결과를 찾을 수 없습니다.")
+        
+        # law_items가 비어있으면 기존 방식 (키워드 검색 또는 전체 목록)
+        else:
+            if keyword:
+                print(f"검색 키워드: {keyword}")
+            
         # 첫 번째 페이지 가져오기
         first_page_url = crawler.build_search_url(base_search_url, keyword, page=1)
         soup = crawler.fetch_page(first_page_url, use_selenium=True, driver=driver)
@@ -590,7 +928,8 @@ def main():
                 page_soup = crawler.fetch_page(page_url, use_selenium=True, driver=driver)
                 
                 if page_soup:
-                    page_results = crawler.extract_law_search_results(page_soup, page_url)
+                    is_adm_rul = 'admRulSc.do' in page_url
+                    page_results = crawler.extract_law_search_results(page_soup, page_url, is_adm_rul=is_adm_rul)
                     page_data = page_results.get('results', [])
                     all_results.extend(page_data)
                     print(f"  페이지 {page_num}/{total_pages} 완료: {len(page_data)}개 추출 (누적: {len(all_results)}개)")
@@ -611,8 +950,11 @@ def main():
         print(f"검색 결과 총 개수: {total_count}")
         print(f"추출된 결과 수: {len(all_results)}")
         
-        # 각 법령의 상세 내용 추출
-        print(f"\n=== 법령 상세 내용 추출 시작 ===")
+        # CSV 목록을 사용한 경우 이미 상세 내용을 추출했으므로 중복 추출하지 않음
+        # CSV 목록이 없고 키워드 검색을 사용한 경우에만 상세 내용 추출
+        if not (crawler.law_items and len(crawler.law_items) > 0):
+            # 각 법령의 상세 내용 추출
+            print(f"\n=== 법령 상세 내용 추출 시작 ===")
         print(f"총 {len(all_results)}개 법령의 상세 내용을 추출합니다...")
         
         # 상세 스크래핑 개수 제한 계산
@@ -630,8 +972,8 @@ def main():
                         driver.get(first_page_url)
                         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")))
                         first_anchor = driver.find_element(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
-                        first_anchor.click()
-                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content")))
+                        driver.execute_script("arguments[0].click();", first_anchor)
+                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view")))
                         time.sleep(1)
                         detail_soup = BeautifulSoup(driver.page_source, 'lxml')
                     except Exception as _:
@@ -652,7 +994,7 @@ def main():
         
         print(f"\n=== 법령 상세 내용 추출 완료 ===")
 
-        # 상세 스크래핑 제한 적용 (테스트용): 상단 루프에서 이미 처리되었으나, 메시지 출력 목적
+            # 상세 스크래핑 제한 적용 (테스트용)
         if details_limit > 0:
             print(f"상세 제한: 처음 {details_limit}개만 상세 스크래핑")
     finally:
@@ -674,30 +1016,47 @@ def main():
                 print(f"   내용: 없음")
         
         # 결과 저장
+        # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
+        law_results = []
+        for item in all_results:
+            # 원본 법령명 우선 사용 (괄호 포함), 없으면 검색 결과의 법령명 사용
+            regulation_name = item.get('original_law_name', '') or item.get('regulation_name', '') or item.get('law_name', '')
+            
+            law_item = {
+                '번호': item.get('no', ''),
+                '규정명': regulation_name,  # 원본 법령명 (괄호 포함) 사용
+                '기관명': item.get('organization', '법제처'),
+                '본문': item.get('content', item.get('law_content', '')),
+                '제정일': item.get('enactment_date', item.get('promulgation_date', '')),
+                '최근 개정일': item.get('revision_date', item.get('enforcement_date', '')),
+                '소관부서': item.get('department', item.get('ministry', '')),
+                '파일 다운로드 링크': item.get('file_download_link', item.get('download_link', '')),
+                '파일 이름': item.get('file_name', '')
+            }
+            law_results.append(law_item)
+        
     output_data = {
         'url': first_page_url,
             'crawled_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'total_pages': total_pages,
         'page_info': law_info,
-        'search_results': {
-            'total_count': total_count,
-            'results': all_results
-        }
+            'total_count': len(law_results),
+            'results': law_results
     }
     json_name = 'law_search_results.json' if not keyword else f"law_search_results_{keyword}.json"
     crawler.save_results(output_data, json_name)
 
-    # 엑셀 저장
+        # CSV 저장 (정리된 law_results 사용)
     meta_for_excel = {
         'url': first_page_url,
         'crawled_at': output_data['crawled_at'],
-        'total_count': total_count,
+            'total_count': len(law_results),
         'total_pages': total_pages,
-        'extracted_count': len(all_results),
+            'extracted_count': len(law_results),
         'keyword': keyword
     }
     csv_name = 'law_search_results.csv' if not keyword else f"law_search_results_{keyword}.csv"
-    crawler.save_results_csv(all_results, meta_for_excel, csv_name)
+    crawler.save_results_csv(law_results, meta_for_excel, csv_name)
     
     print("\n=== 스크래핑 완료 ===")
 
