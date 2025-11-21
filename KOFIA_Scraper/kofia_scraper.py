@@ -892,7 +892,7 @@ def save_kofia_results(records: List[Dict]):
     json_dir = os.path.join("output", "json")
     os.makedirs(json_dir, exist_ok=True)
 
-    json_path = os.path.join(json_dir, "kofia_law.json")
+    json_path = os.path.join(json_dir, "kofia_scraper.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -920,7 +920,7 @@ def save_kofia_results(records: List[Dict]):
     # CSV 저장 - output/csv 디렉토리에 저장
     csv_dir = os.path.join("output", "csv")
     os.makedirs(csv_dir, exist_ok=True)
-    csv_path = os.path.join(csv_dir, "kofia_law.csv")
+    csv_path = os.path.join(csv_dir, "kofia_scraper.csv")
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_headers)
         writer.writeheader()

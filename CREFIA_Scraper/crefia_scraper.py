@@ -250,7 +250,7 @@ def save_crefia_results(records: List[Dict]):
     json_dir = os.path.join("output", "json")
     os.makedirs(json_dir, exist_ok=True)
     
-    json_path = os.path.join(json_dir, "crefia_self_regulation.json")
+    json_path = os.path.join(json_dir, "crefia_scraper.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -269,7 +269,7 @@ def save_crefia_results(records: List[Dict]):
     csv_dir = os.path.join("output", "csv")
     os.makedirs(csv_dir, exist_ok=True)
     
-    csv_path = os.path.join(csv_dir, "crefia_self_regulation.csv")
+    csv_path = os.path.join(csv_dir, "crefia_scraper.csv")
     
     # 헤더 정의 (kfb_crawler.py와 동일)
     headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]

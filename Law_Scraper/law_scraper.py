@@ -1043,7 +1043,8 @@ def main():
             'total_count': len(law_results),
             'results': law_results
     }
-    json_name = 'law_search_results.json' if not keyword else f"law_search_results_{keyword}.json"
+    # 파일명을 스크래퍼 이름에 맞춰 통일성 있게 변경
+    json_name = 'law_scraper.json'
     crawler.save_results(output_data, json_name)
 
         # CSV 저장 (정리된 law_results 사용)
@@ -1055,7 +1056,7 @@ def main():
             'extracted_count': len(law_results),
         'keyword': keyword
     }
-    csv_name = 'law_search_results.csv' if not keyword else f"law_search_results_{keyword}.csv"
+    csv_name = 'law_scraper.csv'
     crawler.save_results_csv(law_results, meta_for_excel, csv_name)
     
     print("\n=== 스크래핑 완료 ===")

@@ -521,7 +521,7 @@ def save_bok_results(records: List[Dict]):
         law_results.append(law_item)
     
     # JSON 저장 (한글 필드명으로)
-    json_path = os.path.join(json_dir, "bok_regulations.json")
+    json_path = os.path.join(json_dir, "bok_scraper.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -549,7 +549,7 @@ def save_bok_results(records: List[Dict]):
         "파일 다운로드 링크",
         "파일 이름",
     ]
-    csv_path = os.path.join(csv_dir, "bok_regulations.csv")
+    csv_path = os.path.join(csv_dir, "bok_scraper.csv")
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_headers)
         writer.writeheader()

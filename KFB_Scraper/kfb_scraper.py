@@ -1393,7 +1393,7 @@ if __name__ == "__main__":
             'results': law_results
         }
         
-        json_path = os.path.join(json_dir, 'kfb_self_regulation.json')
+        json_path = os.path.join(json_dir, 'kfb_scraper.json')
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(law_json_data, f, ensure_ascii=False, indent=2)
         print(f"\nJSON 저장 완료: {json_path}")
@@ -1402,7 +1402,7 @@ if __name__ == "__main__":
         import csv
         csv_dir = os.path.join('output', 'csv')
         os.makedirs(csv_dir, exist_ok=True)
-        csv_path = os.path.join(csv_dir, 'kfb_self_regulation.csv')
+        csv_path = os.path.join(csv_dir, 'kfb_scraper.csv')
         
         # 헤더 정의 (번호, 규정명, 기관명, 본문, 제정일, 최근 개정일, 소관부서, 파일 다운로드 링크, 파일 이름)
         headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]
