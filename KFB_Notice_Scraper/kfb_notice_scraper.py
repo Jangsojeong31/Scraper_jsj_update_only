@@ -516,7 +516,22 @@ def save_notice_results(records: List[Dict]):
     import json
     import csv
 
-    # JSON 저장 - output/json 디렉토리에 저장
+    # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
+    law_results = []
+    for item in records:
+        law_item = {
+            "규정명": item.get("regulation_name", item.get("title", "")),
+            "기관명": item.get("organization", "은행연합회"),
+            "본문": item.get("content", ""),
+            "제정일": item.get("enactment_date", ""),
+            "최근 개정일": item.get("revision_date", ""),
+            "소관부서": item.get("department", ""),
+            "첨부파일링크": item.get("file_download_link", item.get("download_link", "")),
+            "첨부파일이름": item.get("file_name", ""),
+        }
+        law_results.append(law_item)
+    
+    # JSON 저장 (한글 필드명으로) - output/json 디렉토리에 저장
     json_dir = os.path.join("output", "json")
     os.makedirs(json_dir, exist_ok=True)
 
@@ -526,8 +541,8 @@ def save_notice_results(records: List[Dict]):
             {
                 "crawled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "url": KfbNoticeScraper.LIST_URL,
-                "total_count": len(records),
-                "results": records,
+                "total_count": len(law_results),
+                "results": law_results,
             },
             f,
             ensure_ascii=False,
@@ -552,19 +567,11 @@ def save_notice_results(records: List[Dict]):
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_headers)
         writer.writeheader()
-        for item in records:
-            writer.writerow(
-                {
-                    "규정명": item.get("regulation_name", item.get("title", "")),
-                    "기관명": item.get("organization", "은행연합회"),
-                    "본문": (item.get("content", "") or "").replace("\n", " "),
-                    "제정일": item.get("enactment_date", ""),
-                    "최근 개정일": item.get("revision_date", ""),
-                    "소관부서": item.get("department", ""),
-                    "첨부파일링크": item.get("file_download_link", item.get("download_link", "")),
-                    "첨부파일이름": item.get("file_name", ""),
-                }
-            )
+        for law_item in law_results:
+            # CSV 저장 시 본문의 줄바꿈 처리
+            csv_item = law_item.copy()
+            csv_item["본문"] = csv_item.get("본문", "").replace("\n", " ").replace("\r", " ")
+            writer.writerow(csv_item)
     print(f"CSV 저장 완료: {csv_path}")
 
 

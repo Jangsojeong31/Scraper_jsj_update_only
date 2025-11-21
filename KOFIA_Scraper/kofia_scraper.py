@@ -859,7 +859,36 @@ def save_kofia_results(records: List[Dict]):
     import json
     import csv
 
-    # JSON 저장 - output/json 디렉토리에 저장
+    # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
+    law_results = []
+    for item in records:
+        # 여러 첨부파일 처리
+        file_names = item.get("file_names", [])
+        download_links = item.get("download_links", [])
+        
+        # 하위 호환성: 기존 file_name, download_link도 확인
+        if not file_names and item.get("file_name"):
+            file_names = [item.get("file_name")]
+        if not download_links and item.get("download_link"):
+            download_links = [item.get("download_link")]
+        
+        # 여러 첨부파일을 세미콜론으로 구분하여 저장
+        file_names_str = "; ".join(file_names) if file_names else ""
+        download_links_str = "; ".join(download_links) if download_links else ""
+        
+        law_item = {
+            "규정명": item.get("regulation_name", item.get("title", "")),
+            "기관명": item.get("organization", "금융투자협회"),
+            "본문": item.get("content", ""),
+            "제정일": item.get("enactment_date", ""),
+            "최근 개정일": item.get("revision_date", ""),
+            "소관부서": item.get("department", ""),
+            "첨부파일링크": download_links_str,
+            "첨부파일이름": file_names_str,
+        }
+        law_results.append(law_item)
+    
+    # JSON 저장 (한글 필드명으로) - output/json 디렉토리에 저장
     json_dir = os.path.join("output", "json")
     os.makedirs(json_dir, exist_ok=True)
 
@@ -869,8 +898,8 @@ def save_kofia_results(records: List[Dict]):
             {
                 "crawled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "url": KofiaScraper.LIST_URL,
-                "total_count": len(records),
-                "results": records,
+                "total_count": len(law_results),
+                "results": law_results,
             },
             f,
             ensure_ascii=False,
@@ -895,33 +924,11 @@ def save_kofia_results(records: List[Dict]):
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_headers)
         writer.writeheader()
-        for item in records:
-            # 여러 첨부파일 처리
-            file_names = item.get("file_names", [])
-            download_links = item.get("download_links", [])
-            
-            # 하위 호환성: 기존 file_name, download_link도 확인
-            if not file_names and item.get("file_name"):
-                file_names = [item.get("file_name")]
-            if not download_links and item.get("download_link"):
-                download_links = [item.get("download_link")]
-            
-            # 여러 첨부파일을 세미콜론으로 구분하여 저장
-            file_names_str = "; ".join(file_names) if file_names else ""
-            download_links_str = "; ".join(download_links) if download_links else ""
-            
-            writer.writerow(
-                {
-                    "규정명": item.get("regulation_name", item.get("title", "")),
-                    "기관명": item.get("organization", "금융투자협회"),
-                    "본문": (item.get("content", "") or "").replace("\n", " "),
-                    "제정일": item.get("enactment_date", ""),
-                    "최근 개정일": item.get("revision_date", ""),
-                    "소관부서": item.get("department", ""),
-                    "첨부파일링크": download_links_str,
-                    "첨부파일이름": file_names_str,
-                }
-            )
+        for law_item in law_results:
+            # CSV 저장 시 본문의 줄바꿈 처리
+            csv_item = law_item.copy()
+            csv_item["본문"] = csv_item.get("본문", "").replace("\n", " ").replace("\r", " ")
+            writer.writerow(csv_item)
     print(f"CSV 저장 완료: {csv_path}")
 
 

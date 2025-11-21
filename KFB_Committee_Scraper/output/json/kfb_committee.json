@@ -1,22 +1,57 @@
 {
-  "crawled_at": "2025-11-14 14:40:18",
+  "crawled_at": "2025-11-17 14:23:13",
   "url": "https://www.kfb.or.kr/publicdata/reform_result.php",
-  "total_count": 1,
+  "total_count": 5,
   "results": [
     {
-      "no": "37",
-      "title": "제2025-4차 규제심의위원회 의사록",
-      "detail_link": "Javascript:readRun(39);",
-      "posted_date": "",
-      "download_link": "https://www.kfb.or.kr/include/download.php?enc_para=xvObvK0batuxwWn9qX/dETImOAoHkOwRfPcIcm33RiPQmvjHWJwfF2AH*RiYf9SwZU1Zd1G*ERty4No=",
-      "content": "ㅇ안건 (심의안건) - 제1호 : ｢새희망홀씨 운용규약｣ 개정(안) ㅇ회의 주요내용 : 첨부 의사록 참조. 끝.",
-      "department": "상생금융부",
-      "file_name": "제2025-4차 규제심의위원회 의사록 1부.pdf",
-      "file_download_link": "https://www.kfb.or.kr/include/download.php?enc_para=xvObvK0batuxwWn9qX/dETImOAoHkOwRfPcIcm33RiPQmvjHWJwfF2AH*RiYf9SwZU1Zd1G*ERty4No=",
-      "organization": "은행연합회",
-      "regulation_name": "제2025-4차 규제심의위원회 의사록",
-      "enactment_date": "",
-      "revision_date": ""
+      "규정명": "제2025-4차 규제심의위원회 의사록",
+      "기관명": "은행연합회",
+      "본문": "ㅇ안건 (심의안건) - 제1호 : ｢새희망홀씨 운용규약｣ 개정(안) ㅇ회의 주요내용 : 첨부 의사록 참조. 끝.",
+      "제정일": "",
+      "최근 개정일": "",
+      "소관부서": "상생금융부",
+      "첨부파일링크": "https://www.kfb.or.kr/include/download.php?enc_para=xvObvK0batuxwWn9qX/dETImOAoHkOwRfPcIcm33RiPQmvjHWJwfKHou0iOJVuOOYf5kDX44ig2fHZc=",
+      "첨부파일이름": "제2025-4차 규제심의위원회 의사록 1부.pdf"
+    },
+    {
+      "규정명": "제2025-4차 규제심의위원회 의사록",
+      "기관명": "은행연합회",
+      "본문": "ㅇ안건 (심의안건) - 제1호 : ｢부동산 프로젝트 파이낸싱 리스크관리 지침｣ 개정(안) ㅇ회의 주요내용 : 첨부 의사록 참조. 끝.",
+      "제정일": "",
+      "최근 개정일": "",
+      "소관부서": "상생금융부",
+      "첨부파일링크": "https://www.kfb.or.kr/include/download.php?enc_para=xvKbvK0batuxwWn9qX/dEeRF2sJYM6UWfkd2HKZLUGG83mpauzUOkr8xttn*r/5H3LdtNfmxiz7eE/0=",
+      "첨부파일이름": "제2025-4차 규제심의위원회 의사록 1부.pdf"
+    },
+    {
+      "규정명": "제2025-3차 규제심의위원회 의사록",
+      "기관명": "은행연합회",
+      "본문": "ㅇ안건 (심의안건) - 제1호 : ｢금융사고 예방지침｣ 개정(안) - 제2호 : ｢가상자산 실명계정 운영지침｣ 개정(안) (보고안건) - 제1호 : ｢은행권 자율규제 운영규정｣ 개정 결과 - 제2호 : 은행권 자율규제 정기점검 결과 ㅇ회의 주요내용 : 첨부 의사록 참조. 끝.",
+      "제정일": "",
+      "최근 개정일": "",
+      "소관부서": "준법지원부",
+      "첨부파일링크": "https://www.kfb.or.kr/include/download.php?enc_para=xv2bvK0batuxwWn9qX/dERcXOKq8SmkX6ttxHhfzA21U3v8rdeIimHssV9XMAwpTLGcE8BJ31inwBzs=",
+      "첨부파일이름": "제2025-3차 규제심의위원회 의사록 1부.pdf"
+    },
+    {
+      "규정명": "제2025-2차 규제심의위원회 의사록",
+      "기관명": "은행연합회",
+      "본문": "ㅇ안건 (심의안건) - 제1호 : ｢부동산 프로젝트 파이낸싱 리스크관리 지침｣ 개정(안) ㅇ회의 주요내용 : 첨부 의사록 참조. 끝.",
+      "제정일": "",
+      "최근 개정일": "",
+      "소관부서": "상생금융부",
+      "첨부파일링크": "https://www.kfb.or.kr/include/download.php?enc_para=xvybvK0batuxwWn9qX/dETSlgnF5G6nQD6Rdp1o5nFIjOSZz1U6fyX0Sl5/WmorR8yyCmHLSD3pk4WE=",
+      "첨부파일이름": "제2025-2차 규제심의위원회 의사록 1부.pdf"
+    },
+    {
+      "규정명": "제2025-1차 규제심의위원회 의사록",
+      "기관명": "은행연합회",
+      "본문": "ㅇ안건 (심의안건) - 제1호 : ｢개인사업자대출119 운영 모범규준｣ 전면개정(안) - 제2호 : ｢가계대출 프리워크아웃 활성화를 위한 모범규준｣ 개정(안) ㅇ회의 주요내용 : 첨부 의사록 참조. 끝.",
+      "제정일": "",
+      "최근 개정일": "",
+      "소관부서": "상생금융부",
+      "첨부파일링크": "https://www.kfb.or.kr/include/download.php?enc_para=xv*bvK0batuxwWn9qX/dEUA2J22N03CzX7TazE3zwpQgGgGxco*oGE1Ct4aouLBZwRtgELmcXftCc8M=",
+      "첨부파일이름": "제2025-1차 규제심의위원회 의사록 1부.pdf"
     }
   ]
 }

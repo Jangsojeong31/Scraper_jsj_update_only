@@ -1366,19 +1366,19 @@ if __name__ == "__main__":
         import os
         os.makedirs('output', exist_ok=True)
         
-        # 법규 정보 데이터 정리 (번호, 규정명, 기관명, 본문, 제정일, 최근 개정일, 소관부서, 파일 다운로드 링크, 파일 이름)
+        # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
         law_results = []
         for item in results:
             law_item = {
-                'no': item.get('no', ''),
-                'regulation_name': item.get('regulation_name', item.get('title', '')),
-                'organization': '은행연합회',  # 항상 은행연합회
-                'content': item.get('content', ''),
-                'enactment_date': item.get('enactment_date', ''),
-                'revision_date': item.get('revision_date', ''),
-                'department': item.get('department', ''),
-                'file_download_link': item.get('file_download_link', item.get('download_link', '')),
-                'file_name': item.get('file_name', '')
+                '번호': item.get('no', ''),
+                '규정명': item.get('regulation_name', item.get('title', '')),
+                '기관명': '은행연합회',  # 항상 은행연합회
+                '본문': item.get('content', ''),
+                '제정일': item.get('enactment_date', ''),
+                '최근 개정일': item.get('revision_date', ''),
+                '소관부서': item.get('department', ''),
+                '파일 다운로드 링크': item.get('file_download_link', item.get('download_link', '')),
+                '파일 이름': item.get('file_name', '')
             }
             law_results.append(law_item)
         
@@ -1411,19 +1411,11 @@ if __name__ == "__main__":
             writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
             
-            for item in law_results:
-                row_data = {
-                    "번호": item.get('no', ''),
-                    "규정명": item.get('regulation_name', ''),
-                    "기관명": item.get('organization', '은행연합회'),
-                    "본문": item.get('content', '').replace('\n', ' ').replace('\r', ' '),
-                    "제정일": item.get('enactment_date', ''),
-                    "최근 개정일": item.get('revision_date', ''),
-                    "소관부서": item.get('department', ''),
-                    "파일 다운로드 링크": item.get('file_download_link', ''),
-                    "파일 이름": item.get('file_name', '')
-                }
-                writer.writerow(row_data)
+            for law_item in law_results:
+                # CSV 저장 시 본문의 줄바꿈 처리
+                csv_item = law_item.copy()
+                csv_item['본문'] = csv_item.get('본문', '').replace('\n', ' ').replace('\r', ' ')
+                writer.writerow(csv_item)
         
         print(f"CSV 저장 완료: {csv_path}")
 
