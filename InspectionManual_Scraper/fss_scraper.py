@@ -239,26 +239,50 @@ def normalize_cell(text: str) -> str:
 
 
 def parse_table_from_text(text: str) -> List[Dict[str, str]]:
+    """
+    텍스트에서 표(항목, 점검사항, 점검방식)만 파싱
+    표 헤더를 찾으면 그 이후만 파싱하여 불필요한 처리 최소화
+    """
     if not text:
         return []
-    cleaned_lines = [normalize_cell(line) for line in text.splitlines()]
-    lines = [line for line in cleaned_lines if line]
+    
+    # 표 헤더를 찾기 위해 줄 단위로 처리 (전체를 한 번에 처리하지 않음)
+    lines = text.splitlines()
     header_index = None
-    for idx, line in enumerate(lines):
-        if is_header_line(line):
+    
+    # 표 헤더 찾기 (처음 1000줄만 확인하여 빠르게 찾기)
+    for idx, line in enumerate(lines[:1000]):
+        normalized = normalize_cell(line)
+        if is_header_line(normalized):
             header_index = idx
             break
+    
     if header_index is None:
         return []
 
+    # 표 헤더 이후부터만 파싱 (표가 끝나면 중단)
     rows: List[Dict[str, str]] = []
     current_row: Optional[Dict[str, str]] = None
-    for line in lines[header_index + 1 :]:
-        if is_header_line(line):
-            current_row = None
+    empty_row_count = 0  # 연속된 빈 행 카운트
+    
+    for line in lines[header_index + 1:]:
+        normalized = normalize_cell(line)
+        if not normalized:
+            empty_row_count += 1
+            # 연속된 빈 행이 5개 이상이면 표가 끝난 것으로 간주
+            if empty_row_count >= 5 and rows:
+                break
             continue
-        parts = re.split(r"\s{2,}|\t|\|", line)
+        
+        empty_row_count = 0
+        
+        # 또 다른 표 헤더가 나오면 중단 (다른 표 시작)
+        if is_header_line(normalized) and rows:
+            break
+            
+        parts = re.split(r"\s{2,}|\t|\|", normalized)
         parts = [normalize_cell(p) for p in parts if normalize_cell(p)]
+        
         if len(parts) >= 3:
             row = {
                 "항 목": parts[0],
@@ -268,7 +292,8 @@ def parse_table_from_text(text: str) -> List[Dict[str, str]]:
             rows.append(row)
             current_row = row
         elif current_row:
-            current_row["점 검 방 식"] = normalize_cell(current_row["점 검 방 식"] + " " + line)
+            current_row["점 검 방 식"] = normalize_cell(current_row["점 검 방 식"] + " " + normalized)
+    
     return rows
 
 
@@ -333,25 +358,61 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
             check = strip_bullets(check)
             method = strip_bullets(method)
 
+            # "①", "②", "③"로 시작하는 텍스트는 항상 점검사항 (항목 열에 있어도 점검사항으로 처리)
+            check_item_pattern = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]")
+            if check_item_pattern.match(item) and not check:
+                # 항목 열에 점검사항이 들어가 있고 점검사항 열이 비어있으면 교체
+                check = item
+                item = ""
+
             item_is_valid = item and item not in noise_items and item not in bullet_tokens
+            check_is_valid = check and check not in bullet_tokens
+            
+            # 항목이 있으면 새 항목 시작 (이전 entry 저장)
             if item_is_valid:
-                if current_entry and current_entry.get("점 검 방 식"):
+                if current_entry and current_entry.get("점 검 방 식") and current_entry.get("점 검 사 항"):
                     parsed_rows.append(current_entry)
                 current_entry = {
                     "항 목": item,
                     "점 검 사 항": "",
                     "점 검 방 식": "",
                 }
-            elif not current_entry:
-                continue
-
-            if check and check not in bullet_tokens:
-                current_entry["점 검 사 항"] = check
+            
+            # 점검사항이 있으면 반드시 새 entry 생성
+            if check_is_valid:
+                # 이전 entry가 완성되어 있으면 저장
+                if current_entry and current_entry.get("점 검 방 식") and current_entry.get("점 검 사 항"):
+                    parsed_rows.append(current_entry)
+                
+                # 새 entry 생성 (항목이 비어있으면 이전 항목 유지)
+                if current_entry and current_entry.get("항 목"):
+                    # 이전 항목이 있으면 유지
+                    current_entry = {
+                        "항 목": current_entry.get("항 목"),
+                        "점 검 사 항": check,
+                        "점 검 방 식": "",
+                    }
+                elif item_is_valid:
+                    # 새 항목이 있으면 사용
+                    current_entry = {
+                        "항 목": item,
+                        "점 검 사 항": check,
+                        "점 검 방 식": "",
+                    }
+                else:
+                    # 항목이 없으면 빈 값 (이상한 경우지만 처리)
+                    current_entry = {
+                        "항 목": "",
+                        "점 검 사 항": check,
+                        "점 검 방 식": "",
+                    }
                 method_for_entry = method
+            elif not current_entry:
+                # current_entry가 없고 점검사항도 없으면 건너뜀
+                continue
             elif method:
-                # 일부 문서는 점검사항이 방법 열에 합쳐져 있는 경우가 있어 첫 문장을 할당
-                current_entry["점 검 사 항"] = method.split(" [")[0].strip()
-                method_for_entry = method[len(current_entry["점 검 사 항"]):].strip()
+                # 점검사항이 없고 점검방식만 있으면 현재 entry에 추가
+                method_for_entry = method
             else:
                 method_for_entry = ""
 
@@ -362,7 +423,8 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
                 else:
                     current_entry["점 검 방 식"] = method_for_entry
 
-        if current_entry and current_entry.get("점 검 방 식"):
+        # 마지막 entry 저장
+        if current_entry and current_entry.get("점 검 방 식") and current_entry.get("점 검 사 항"):
             parsed_rows.append(current_entry)
 
         if parsed_rows:
@@ -372,10 +434,49 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
 
 
 def extract_table_rows_from_hwp(path: Path) -> List[Dict[str, str]]:
-    text_rows = parse_table_from_text(extract_text_from_hwp(path))
-    if text_rows:
-        return text_rows
+    """
+    HWP 파일에서 표(항목, 점검사항, 점검방식)만 빠르게 추출
+    표를 찾으면 즉시 파싱하고 중단하여 전체 문서 파싱을 피함
+    """
+    # 1. 빠른 방법: olefile로 텍스트 추출 시도 (가장 빠름)
+    if olefile is not None:
+        try:
+            with olefile.OleFileIO(str(path)) as ole:
+                if ole.exists("BodyText/Section0"):
+                    with ole.openstream("BodyText/Section0") as stream:
+                        data = stream.read()
+                        try:
+                            decompressed = zlib.decompress(data, -15)
+                        except zlib.error:
+                            decompressed = data
+                        text = decompressed.decode("utf-16-le", errors="ignore")
+                        # 표 헤더가 있는지 확인하고 바로 파싱
+                        rows = parse_table_from_text(text)
+                        if rows:
+                            return rows
+        except Exception:
+            pass
 
+    # 2. hwp5 텍스트 변환 시도 (olefile보다 느리지만 더 정확)
+    if _Hwp5File and _Hwp5TextTransform and closing and io:
+        try:
+            text_transform = _Hwp5TextTransform()
+            buffer = io.BytesIO()
+            with closing(_Hwp5File(str(path))) as hwp:
+                text_transform.transform_hwp5_to_text(hwp, buffer)
+            raw_bytes = buffer.getvalue()
+            try:
+                text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw_bytes.decode("cp949", errors="ignore")
+            rows = parse_table_from_text(text)
+            if rows:
+                return rows
+        except Exception:
+            pass
+
+    # 3. 마지막 수단: HTML 변환 (가장 느리지만 가장 정확)
+    # HTML 변환은 전체 변환이 필요하지만, 표를 찾으면 즉시 중단
     if HTML_TRANSFORM and _Hwp5File and closing:
         try:
             with closing(_Hwp5File(str(path))) as hwp:
@@ -512,19 +613,19 @@ def parse_detail(
     *,
     skip_table_extraction: bool = False,
     log: Optional[Callable[[str], None]] = None,
-) -> Tuple[Dict[str, str], List[Dict[str, str]]]:
+) -> Tuple[Dict[str, str], List[Dict[str, str]], List[Dict[str, str]]]:
     try:
         soup = fetch_soup(session, detail_url)
         if log:
             log(f"[정보] 상세 페이지 응답 수신: {detail_url}")
     except ScraperError as exc:
         print(f"[경고] 상세 페이지 요청 실패: {exc}")
-        return {}, []
+        return {}, [], []
 
     view = soup.select_one("div.bd-view")
     if not view:
         print(f"[경고] 상세 영역을 찾을 수 없습니다: {detail_url}")
-        return {}, []
+        return {}, [], []
 
     detail_data: Dict[str, str] = {}
 
@@ -541,24 +642,13 @@ def parse_detail(
     if sizes:
         detail_data["상세첨부파일크기"] = " | ".join(sizes)
 
-    if skip_table_extraction:
-        detail_data["항 목"] = "-"
-        detail_data["점 검 사 항"] = "-"
-        detail_data["점 검 방 식"] = "-"
-    else:
+    table_rows: List[Dict[str, str]] = []
+    if not skip_table_extraction:
         table_rows = extract_table_from_attachments(
             session,
             attachments,
             log=log,
         )
-        if table_rows:
-            detail_data["항 목"] = " || ".join(row.get("항 목", "") for row in table_rows if row.get("항 목")) or "-"
-            detail_data["점 검 사 항"] = " || ".join(row.get("점 검 사 항", "") for row in table_rows if row.get("점 검 사 항")) or "-"
-            detail_data["점 검 방 식"] = " || ".join(row.get("점 검 방 식", "") for row in table_rows if row.get("점 검 방 식")) or "-"
-        else:
-            detail_data["항 목"] = "-"
-            detail_data["점 검 사 항"] = "-"
-            detail_data["점 검 방 식"] = "-"
 
     for dl in view.find_all("dl", recursive=False):
         if "file-list" in (dl.get("class") or []):
@@ -570,7 +660,7 @@ def parse_detail(
             mapped_key = DETAIL_KEY_MAP.get(normalized_key) or DETAIL_KEY_MAP.get(dt_text) or dt_text
             detail_data[mapped_key] = dd_text
 
-    return detail_data, attachments
+    return detail_data, attachments, table_rows
 
 
 def scrape_all(
@@ -617,7 +707,7 @@ def scrape_all(
                 continue
 
             log(f"[정보] 상세 수집 시작: nttId={ntt_id} | 제목={row.get('제목', '-')}")
-            detail_data, attachments = parse_detail(
+            detail_data, attachments, table_rows = parse_detail(
                 session,
                 row["상세페이지URL"],
                 skip_table_extraction=skip_table_extraction,
@@ -629,7 +719,8 @@ def scrape_all(
             attach_urls = [att["url"] for att in attachments if att.get("url")]
             attach_sizes = detail_data.get("상세첨부파일크기", "")
 
-            record = {
+            # 기본 레코드 정보 (공통 필드)
+            base_record = {
                 "번호": row["번호"] or "-",
                 "구분": row["구분"] or "-",
                 "제목": row["제목"] or "-",
@@ -648,16 +739,48 @@ def scrape_all(
                 "상세담당자": detail_data.get("상세담당자", "-"),
                 "상세문의": detail_data.get("상세문의", "-"),
                 "상세문의이메일": detail_data.get("상세문의이메일", "-"),
-                "항 목": detail_data.get("항 목", "-"),
-                "점 검 사 항": detail_data.get("점 검 사 항", "-"),
-                "점 검 방 식": detail_data.get("점 검 방 식", "-"),
             }
             if "상세조회수" in detail_data:
-                record["상세조회수"] = detail_data["상세조회수"]
+                base_record["상세조회수"] = detail_data["상세조회수"]
 
-            results.append(record)
-            new_records += 1
-            log(f"[정보] 상세 수집 완료: nttId={ntt_id}")
+            # 점검사항이 있으면 각 점검사항마다 별도의 레코드 생성
+            if table_rows and not skip_table_extraction:
+                for table_row in table_rows:
+                    # 점검사항이 " || "로 구분되어 있는 경우 분리
+                    items = [item.strip() for item in table_row.get("항 목", "-").split(" || ") if item.strip()]
+                    checks = [check.strip() for check in table_row.get("점 검 사 항", "-").split(" || ") if check.strip()]
+                    methods = [method.strip() for method in table_row.get("점 검 방 식", "-").split(" || ") if method.strip()]
+                    
+                    # 점검사항이 없으면 항목과 점검방식만 있는 경우 처리
+                    if not checks:
+                        # 점검사항이 없으면 하나의 레코드만 생성
+                        record = base_record.copy()
+                        record["항 목"] = items[0] if items else "-"
+                        record["점 검 사 항"] = "-"
+                        record["점 검 방 식"] = methods[0] if methods else "-"
+                        results.append(record)
+                        new_records += 1
+                    else:
+                        # 각 점검사항마다 별도의 레코드 생성 (점검사항 개수를 기준으로)
+                        for i in range(len(checks)):
+                            record = base_record.copy()
+                            # 항목은 첫 번째 항목을 사용 (같은 항목에 여러 점검사항이 있을 수 있음)
+                            record["항 목"] = items[0] if items else "-"
+                            record["점 검 사 항"] = checks[i]
+                            # 점검방식은 인덱스에 맞는 것을 사용, 없으면 첫 번째 또는 빈 값
+                            record["점 검 방 식"] = methods[i] if i < len(methods) else (methods[0] if methods else "-")
+                            results.append(record)
+                            new_records += 1
+            else:
+                # 점검사항이 없으면 기본 레코드 하나만 추가
+                record = base_record.copy()
+                record["항 목"] = "-"
+                record["점 검 사 항"] = "-"
+                record["점 검 방 식"] = "-"
+                results.append(record)
+                new_records += 1
+
+            log(f"[정보] 상세 수집 완료: nttId={ntt_id} (점검사항 {len(table_rows) if table_rows else 0}건)")
 
             if limit is not None and len(results) >= limit:
                 break
