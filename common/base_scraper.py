@@ -1,6 +1,8 @@
 """
 기본 크롤러 클래스 - 모든 크롤러의 공통 기능 제공
 """
+import os
+import shutil
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
@@ -12,6 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 import urllib3
 import ssl
 from requests.adapters import HTTPAdapter
@@ -46,12 +49,18 @@ class SSLAdapter(HTTPAdapter):
 class BaseScraper:
     """모든 스크래퍼의 기본 클래스"""
     
-    def __init__(self, delay: float = 1.0):
+    def __init__(self, delay: float = 1.0, selenium_driver_path: Optional[str] = None):
         """
         Args:
             delay: 요청 간 대기 시간 (초)
+            selenium_driver_path: 수동으로 설치한 ChromeDriver 경로
+                (미지정 시 환경변수 → PATH 순으로 자동 탐지)
         """
         self.delay = delay
+        self.selenium_driver_path = self._resolve_driver_path(selenium_driver_path)
+        if self.selenium_driver_path:
+            # 외부망 차단 환경에서는 Selenium Manager 호출을 건너뛴다
+            os.environ.setdefault('SELENIUM_MANAGER_SKIP', '1')
         self.session = requests.Session()
         # SSL 어댑터 마운트
         self.session.mount('https://', SSLAdapter())
@@ -81,14 +90,8 @@ class BaseScraper:
             if use_selenium:
                 # 기존 드라이버가 있으면 재사용, 없으면 새로 생성
                 if driver is None:
-                    chrome_options = Options()
-                    chrome_options.add_argument('--headless')
-                    chrome_options.add_argument('--no-sandbox')
-                    chrome_options.add_argument('--disable-dev-shm-usage')
-                    chrome_options.add_argument('--disable-gpu')
-                    chrome_options.add_argument('--lang=ko-KR')
-                    
-                    driver = webdriver.Chrome(options=chrome_options)
+                    chrome_options = self._build_default_chrome_options()
+                    driver = self._create_webdriver(chrome_options)
                     created_driver = True
                 else:
                     created_driver = False
@@ -132,6 +135,42 @@ class BaseScraper:
         except Exception as e:
             print(f"에러 발생: {url} - {e}")
             return None
+
+    def _build_default_chrome_options(self) -> Options:
+        """내부망 호환을 고려한 기본 Chrome 옵션 생성"""
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--lang=ko-KR')
+        return chrome_options
+
+    def _create_webdriver(self, chrome_options: Options) -> webdriver.Chrome:
+        """
+        Selenium Manager를 우회하기 위해 명시적으로 드라이버 경로를 지정하여 WebDriver 생성
+        """
+        if self.selenium_driver_path:
+            service = Service(executable_path=self.selenium_driver_path)
+            return webdriver.Chrome(service=service, options=chrome_options)
+        return webdriver.Chrome(options=chrome_options)
+
+    def _resolve_driver_path(self, explicit_path: Optional[str]) -> Optional[str]:
+        """
+        드라이버 경로 우선순위
+        1) 명시적 인자
+        2) 환경변수 SELENIUM_DRIVER_PATH
+        3) PATH 내 chromedriver 바이너리
+        """
+        if explicit_path:
+            return explicit_path
+
+        env_path = os.getenv('SELENIUM_DRIVER_PATH')
+        if env_path:
+            return env_path
+
+        auto_path = shutil.which('chromedriver')
+        return auto_path
     
     def save_results(self, data: Dict, filename: str = 'crawl_results.json'):
         """
