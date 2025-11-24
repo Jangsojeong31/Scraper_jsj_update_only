@@ -892,59 +892,59 @@ def main():
                     print(f"  ✗ '{original_law_name}' 검색 결과를 찾을 수 없습니다.")
         
         # law_items가 비어있으면 기존 방식 (키워드 검색 또는 전체 목록)
-        else:
+        if not (crawler.law_items and len(crawler.law_items) > 0):
             if keyword:
                 print(f"검색 키워드: {keyword}")
             
-        # 첫 번째 페이지 가져오기
-        first_page_url = crawler.build_search_url(base_search_url, keyword, page=1)
-        soup = crawler.fetch_page(first_page_url, use_selenium=True, driver=driver)
-        
-        if not soup:
-            print("페이지를 가져오는데 실패했습니다.")
-            return
-        
-        # 기본 페이지 정보 추출
-        law_info = crawler.extract_law_info(soup)
-        print(f"\n페이지 제목: {law_info.get('title', 'N/A')}")
-        
-        # 총 페이지 수 확인
-        total_pages = crawler.get_total_pages(soup)
-        print(f"총 페이지 수: {total_pages}")
-        
-        # 첫 번째 페이지 결과 추출
-        search_results = crawler.extract_law_search_results(soup, first_page_url)
-        total_count = search_results.get('total_count', 0)
-        all_results = search_results.get('results', [])
-        
-        print(f"\n검색 결과 총 개수: {total_count}")
-        print(f"페이지 1/{total_pages} 완료: {len(all_results)}개 추출")
-        
-        # 나머지 페이지들 순회
-        if total_pages > 1:
-            for page_num in range(2, total_pages + 1):
-                print(f"페이지 {page_num}/{total_pages} 스크래핑 중...")
-                page_url = crawler.build_search_url(base_search_url, keyword, page=page_num)
-                page_soup = crawler.fetch_page(page_url, use_selenium=True, driver=driver)
-                
-                if page_soup:
-                    is_adm_rul = 'admRulSc.do' in page_url
-                    page_results = crawler.extract_law_search_results(page_soup, page_url, is_adm_rul=is_adm_rul)
-                    page_data = page_results.get('results', [])
-                    all_results.extend(page_data)
-                    print(f"  페이지 {page_num}/{total_pages} 완료: {len(page_data)}개 추출 (누적: {len(all_results)}개)")
-                else:
-                    print(f"  페이지 {page_num}/{total_pages} 가져오기 실패")
-        
-        # 법령명 키워드 필터링 (대소문자 무시)
-        if keyword:
-            lowered = keyword.lower()
-            all_results = [r for r in all_results if str(r.get('law_name', '')).lower().find(lowered) != -1]
-        
-        # 목록 제한 적용 (테스트용)
-        if list_limit > 0 and len(all_results) > list_limit:
-            all_results = all_results[:list_limit]
-            print(f"목록 제한 적용: 처음 {list_limit}개 항목만 사용")
+            # 첫 번째 페이지 가져오기
+            first_page_url = crawler.build_search_url(base_search_url, keyword, page=1)
+            soup = crawler.fetch_page(first_page_url, use_selenium=True, driver=driver)
+            
+            if not soup:
+                print("페이지를 가져오는데 실패했습니다.")
+                return
+            
+            # 기본 페이지 정보 추출
+            law_info = crawler.extract_law_info(soup)
+            print(f"\n페이지 제목: {law_info.get('title', 'N/A')}")
+            
+            # 총 페이지 수 확인
+            total_pages = crawler.get_total_pages(soup)
+            print(f"총 페이지 수: {total_pages}")
+            
+            # 첫 번째 페이지 결과 추출
+            search_results = crawler.extract_law_search_results(soup, first_page_url)
+            total_count = search_results.get('total_count', 0)
+            all_results = search_results.get('results', [])
+            
+            print(f"\n검색 결과 총 개수: {total_count}")
+            print(f"페이지 1/{total_pages} 완료: {len(all_results)}개 추출")
+            
+            # 나머지 페이지들 순회
+            if total_pages > 1:
+                for page_num in range(2, total_pages + 1):
+                    print(f"페이지 {page_num}/{total_pages} 스크래핑 중...")
+                    page_url = crawler.build_search_url(base_search_url, keyword, page=page_num)
+                    page_soup = crawler.fetch_page(page_url, use_selenium=True, driver=driver)
+                    
+                    if page_soup:
+                        is_adm_rul = 'admRulSc.do' in page_url
+                        page_results = crawler.extract_law_search_results(page_soup, page_url, is_adm_rul=is_adm_rul)
+                        page_data = page_results.get('results', [])
+                        all_results.extend(page_data)
+                        print(f"  페이지 {page_num}/{total_pages} 완료: {len(page_data)}개 추출 (누적: {len(all_results)}개)")
+                    else:
+                        print(f"  페이지 {page_num}/{total_pages} 가져오기 실패")
+            
+            # 법령명 키워드 필터링 (대소문자 무시)
+            if keyword:
+                lowered = keyword.lower()
+                all_results = [r for r in all_results if str(r.get('law_name', '')).lower().find(lowered) != -1]
+            
+            # 목록 제한 적용 (테스트용)
+            if list_limit > 0 and len(all_results) > list_limit:
+                all_results = all_results[:list_limit]
+                print(f"목록 제한 적용: 처음 {list_limit}개 항목만 사용")
 
         print(f"\n=== 최종 결과 ===")
         print(f"검색 결과 총 개수: {total_count}")
@@ -955,29 +955,29 @@ def main():
         if not (crawler.law_items and len(crawler.law_items) > 0):
             # 각 법령의 상세 내용 추출
             print(f"\n=== 법령 상세 내용 추출 시작 ===")
-        print(f"총 {len(all_results)}개 법령의 상세 내용을 추출합니다...")
-        
-        # 상세 스크래핑 개수 제한 계산
-        max_details = len(all_results) if details_limit == 0 else min(details_limit, len(all_results))
+            print(f"총 {len(all_results)}개 법령의 상세 내용을 추출합니다...")
+            
+            # 상세 스크래핑 개수 제한 계산
+            max_details = len(all_results) if details_limit == 0 else min(details_limit, len(all_results))
 
-        for idx, item in enumerate(all_results[:max_details], 1):
-            law_link = item.get('link', '')
-            if law_link:
-                print(f"[{idx}/{len(all_results)}] {item.get('law_name', 'N/A')[:50]}... 스크래핑 중")
-                detail_soup = crawler.fetch_page(law_link, use_selenium=True, driver=driver)
-                # 링크가 검색 URL로 보이는 등 상세로 이동하지 못한 경우, 목록 첫 행을 클릭하여 이동 시도
-                if detail_soup and ('lsSc.do' in law_link or not crawler.extract_law_detail(detail_soup)):
-                    try:
-                        # 목록 페이지로 이동 후 첫 번째 결과 클릭
-                        driver.get(first_page_url)
-                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")))
-                        first_anchor = driver.find_element(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
-                        driver.execute_script("arguments[0].click();", first_anchor)
-                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view")))
-                        time.sleep(1)
-                        detail_soup = BeautifulSoup(driver.page_source, 'lxml')
-                    except Exception as _:
-                        pass
+            for idx, item in enumerate(all_results[:max_details], 1):
+                law_link = item.get('link', '')
+                if law_link:
+                    print(f"[{idx}/{len(all_results)}] {item.get('law_name', 'N/A')[:50]}... 스크래핑 중")
+                    detail_soup = crawler.fetch_page(law_link, use_selenium=True, driver=driver)
+                    # 링크가 검색 URL로 보이는 등 상세로 이동하지 못한 경우, 목록 첫 행을 클릭하여 이동 시도
+                    if detail_soup and first_page_url and ('lsSc.do' in law_link or not crawler.extract_law_detail(detail_soup)):
+                        try:
+                            # 목록 페이지로 이동 후 첫 번째 결과 클릭
+                            driver.get(first_page_url)
+                            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")))
+                            first_anchor = driver.find_element(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
+                            driver.execute_script("arguments[0].click();", first_anchor)
+                            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view")))
+                            time.sleep(1)
+                            detail_soup = BeautifulSoup(driver.page_source, 'lxml')
+                        except Exception as _:
+                            pass
                 if detail_soup:
                     law_content = crawler.extract_law_detail(detail_soup)
                     item['law_content'] = law_content
@@ -1000,6 +1000,9 @@ def main():
     finally:
         driver.quit()
     
+    # 결과 저장
+    # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
+    law_results = []
     if all_results:
         print("\n=== 추출된 법령 정보 (처음 5개) ===")
         for i, item in enumerate(all_results[:5], 1):
@@ -1015,9 +1018,6 @@ def main():
             else:
                 print(f"   내용: 없음")
         
-        # 결과 저장
-        # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
-        law_results = []
         for item in all_results:
             # 원본 법령명 우선 사용 (괄호 포함), 없으면 검색 결과의 법령명 사용
             regulation_name = item.get('original_law_name', '') or item.get('regulation_name', '') or item.get('law_name', '')
@@ -1034,26 +1034,26 @@ def main():
                 '파일 이름': item.get('file_name', '')
             }
             law_results.append(law_item)
-        
+    
     output_data = {
-        'url': first_page_url,
+        'url': first_page_url or '',
             'crawled_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'total_pages': total_pages,
         'page_info': law_info,
-            'total_count': len(law_results),
-            'results': law_results
-    }
+        'total_count': len(law_results),
+        'results': law_results
+        }
     # 파일명을 스크래퍼 이름에 맞춰 통일성 있게 변경
     json_name = 'law_scraper.json'
     crawler.save_results(output_data, json_name)
 
-        # CSV 저장 (정리된 law_results 사용)
+    # CSV 저장 (정리된 law_results 사용)
     meta_for_excel = {
-        'url': first_page_url,
+        'url': first_page_url or '',
         'crawled_at': output_data['crawled_at'],
-            'total_count': len(law_results),
+        'total_count': len(law_results),
         'total_pages': total_pages,
-            'extracted_count': len(law_results),
+        'extracted_count': len(law_results),
         'keyword': keyword
     }
     csv_name = 'law_scraper.csv'
