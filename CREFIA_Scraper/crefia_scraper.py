@@ -26,6 +26,7 @@ def find_project_root():
 project_root = find_project_root()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
 from urllib.parse import urljoin
@@ -175,7 +176,7 @@ class CrefiaScraper(BaseScraper):
         
         try:
             chrome_options = Options()
-            chrome_options.add_argument("--headless")
+            # chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-gpu")
@@ -243,6 +244,7 @@ def save_crefia_results(records: List[Dict]):
             "소관부서": item.get("department", ""),
             "파일 다운로드 링크": item.get("file_download_link", ""),
             "파일 이름": item.get("file_name", ""),
+            # 시행여부 추가 
         }
         law_results.append(law_item)
     
