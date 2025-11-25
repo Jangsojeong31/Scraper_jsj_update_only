@@ -250,8 +250,8 @@ def parse_table_from_text(text: str) -> List[Dict[str, str]]:
     lines = text.splitlines()
     header_index = None
     
-    # 표 헤더 찾기 (처음 1000줄만 확인하여 빠르게 찾기)
-    for idx, line in enumerate(lines[:1000]):
+    # 표 헤더 찾기 (처음 2000줄만 확인하여 빠르게 찾기)
+    for idx, line in enumerate(lines[:2000]):
         normalized = normalize_cell(line)
         if is_header_line(normalized):
             header_index = idx
@@ -263,6 +263,7 @@ def parse_table_from_text(text: str) -> List[Dict[str, str]]:
     # 표 헤더 이후부터만 파싱 (표가 끝나면 중단)
     rows: List[Dict[str, str]] = []
     current_row: Optional[Dict[str, str]] = None
+    current_item: str = ""  # 현재 항목 추적
     empty_row_count = 0  # 연속된 빈 행 카운트
     
     for line in lines[header_index + 1:]:
@@ -284,10 +285,22 @@ def parse_table_from_text(text: str) -> List[Dict[str, str]]:
         parts = [normalize_cell(p) for p in parts if normalize_cell(p)]
         
         if len(parts) >= 3:
+            item = parts[0]
+            check = parts[1]
+            method = " ".join(parts[2:]).strip()
+            
+            # 항목이 있으면 업데이트
+            if item and item not in {"", "-", "☑", "□", "◦", "•"}:
+                current_item = item
+            
+            # 항목이 비어있으면 이전 항목 유지
+            if not item or item in {"", "-", "☑", "□", "◦", "•"}:
+                item = current_item
+            
             row = {
-                "항 목": parts[0],
-                "점 검 사 항": parts[1],
-                "점 검 방 식": " ".join(parts[2:]).strip(),
+                "항 목": item,
+                "점 검 사 항": check,
+                "점 검 방 식": method,
             }
             rows.append(row)
             current_row = row
@@ -297,7 +310,10 @@ def parse_table_from_text(text: str) -> List[Dict[str, str]]:
     return rows
 
 
-def parse_table_from_html(html: str) -> List[Dict[str, str]]:
+def parse_table_from_html(html: str, *, stop_when_found: bool = True) -> List[Dict[str, str]]:
+    """
+    HTML에서 표를 파싱. 표를 찾으면 즉시 파싱하고 중단하여 불필요한 처리 최소화
+    """
     if not html:
         return []
     try:
@@ -337,6 +353,10 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
         noise_items = {"필 수", "필수", "선 택", "선택", "구 분", "구분"}
 
         current_entry: Optional[Dict[str, str]] = None
+        current_item: str = ""  # 현재 항목을 별도로 추적
+
+        def strip_bullets(text: str) -> str:
+            return text.strip("□☑◦• ·").strip()
 
         for row in raw_rows[1:]:
             item = row[idx_item] if idx_item < len(row) else ""
@@ -350,9 +370,6 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
                     continue
                 method_parts.append(cell)
             method = normalize_cell(" ".join(part for part in method_parts if part))
-
-            def strip_bullets(text: str) -> str:
-                return text.strip("□☑◦• ·").strip()
 
             item = strip_bullets(item)
             check = strip_bullets(check)
@@ -368,32 +385,31 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
             item_is_valid = item and item not in noise_items and item not in bullet_tokens
             check_is_valid = check and check not in bullet_tokens
             
-            # 항목이 있으면 새 항목 시작 (이전 entry 저장)
+            # 1. 항목이 있으면 현재 항목 업데이트 (이전 entry 저장)
             if item_is_valid:
+                # 이전 entry가 완성되어 있으면 저장
                 if current_entry and current_entry.get("점 검 방 식") and current_entry.get("점 검 사 항"):
                     parsed_rows.append(current_entry)
-                current_entry = {
-                    "항 목": item,
-                    "점 검 사 항": "",
-                    "점 검 방 식": "",
-                }
+                current_item = item  # 현재 항목 저장
+                current_entry = None  # 새 항목이 시작되므로 entry 초기화
             
-            # 점검사항이 있으면 반드시 새 entry 생성
+            # 2. 점검사항이 있으면 반드시 새 entry 생성
             if check_is_valid:
                 # 이전 entry가 완성되어 있으면 저장
                 if current_entry and current_entry.get("점 검 방 식") and current_entry.get("점 검 사 항"):
                     parsed_rows.append(current_entry)
                 
                 # 새 entry 생성 (항목이 비어있으면 이전 항목 유지)
-                if current_entry and current_entry.get("항 목"):
-                    # 이전 항목이 있으면 유지
+                if current_item:
+                    # 현재 항목이 있으면 사용
                     current_entry = {
-                        "항 목": current_entry.get("항 목"),
+                        "항 목": current_item,
                         "점 검 사 항": check,
                         "점 검 방 식": "",
                     }
                 elif item_is_valid:
-                    # 새 항목이 있으면 사용
+                    # 새 항목이 있으면 사용하고 저장
+                    current_item = item
                     current_entry = {
                         "항 목": item,
                         "점 검 사 항": check,
@@ -417,7 +433,7 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
                 method_for_entry = ""
 
             method_for_entry = strip_bullets(method_for_entry)
-            if method_for_entry:
+            if method_for_entry and current_entry:
                 if current_entry["점 검 방 식"]:
                     current_entry["점 검 방 식"] += " " + method_for_entry
                 else:
@@ -427,7 +443,8 @@ def parse_table_from_html(html: str) -> List[Dict[str, str]]:
         if current_entry and current_entry.get("점 검 방 식") and current_entry.get("점 검 사 항"):
             parsed_rows.append(current_entry)
 
-        if parsed_rows:
+        if parsed_rows and stop_when_found:
+            # 표를 찾으면 즉시 중단
             break
 
     return parsed_rows
@@ -438,7 +455,7 @@ def extract_table_rows_from_hwp(path: Path) -> List[Dict[str, str]]:
     HWP 파일에서 표(항목, 점검사항, 점검방식)만 빠르게 추출
     표를 찾으면 즉시 파싱하고 중단하여 전체 문서 파싱을 피함
     """
-    # 1. 빠른 방법: olefile로 텍스트 추출 시도 (가장 빠름)
+    # 1. 가장 빠른 방법: olefile로 텍스트 추출 시도
     if olefile is not None:
         try:
             with olefile.OleFileIO(str(path)) as ole:
@@ -457,7 +474,7 @@ def extract_table_rows_from_hwp(path: Path) -> List[Dict[str, str]]:
         except Exception:
             pass
 
-    # 2. hwp5 텍스트 변환 시도 (olefile보다 느리지만 더 정확)
+    # 2. hwp5 텍스트 변환 시도 (HTML 변환보다 빠름)
     if _Hwp5File and _Hwp5TextTransform and closing and io:
         try:
             text_transform = _Hwp5TextTransform()
@@ -475,15 +492,16 @@ def extract_table_rows_from_hwp(path: Path) -> List[Dict[str, str]]:
         except Exception:
             pass
 
-    # 3. 마지막 수단: HTML 변환 (가장 느리지만 가장 정확)
-    # HTML 변환은 전체 변환이 필요하지만, 표를 찾으면 즉시 중단
+    # 3. 마지막 수단: HTML 변환 (가장 느리므로 최후의 수단)
+    # HTML 변환은 전체 변환이 필요하지만, 표를 찾으면 즉시 파싱하고 중단
     if HTML_TRANSFORM and _Hwp5File and closing:
         try:
             with closing(_Hwp5File(str(path))) as hwp:
                 buffer = io.BytesIO()
                 HTML_TRANSFORM.transform_hwp5_to_xhtml(hwp, buffer)
             html = buffer.getvalue().decode("utf-8", errors="ignore")
-            rows = parse_table_from_html(html)
+            # 표를 찾으면 즉시 파싱하고 중단
+            rows = parse_table_from_html(html, stop_when_found=True)
             if rows:
                 return rows
         except Exception as exc:
@@ -550,8 +568,10 @@ def extract_table_rows_from_path(
         )
     if ext == "hwp":
         if log:
-            log(f"[정보] HWP 텍스트 추출 시작: {path.name}")
+            log(f"[정보] HWP 파싱 시작: {path.name}")
         rows = extract_table_rows_from_hwp(path)
+        if log and rows:
+            log(f"[정보] HWP 파싱 완료: {len(rows)}개 행 발견")
     else:
         rows = extract_table_rows_from_file(path)
     if stop_when_found and rows:
