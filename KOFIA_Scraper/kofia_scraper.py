@@ -32,6 +32,7 @@ if str(project_root) not in sys.path:
 import os
 import time
 import re
+import csv
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -50,11 +51,23 @@ class KofiaScraper(BaseScraper):
     
     BASE_URL = "https://law.kofia.or.kr"
     LIST_URL = "https://law.kofia.or.kr/service/law/lawCurrentMain.do"
+    DEFAULT_CSV_PATH = "KOFIA_Scraper/input/list.csv"
     
-    def __init__(self, delay: float = 1.0):
+    def __init__(self, delay: float = 1.0, csv_path: Optional[str] = None):
         super().__init__(delay)
         self.download_dir = os.path.join("output", "downloads")
         os.makedirs(self.download_dir, exist_ok=True)
+        self.csv_path = csv_path or self.DEFAULT_CSV_PATH
+        self.target_laws = self._load_target_laws(self.csv_path)
+        self.target_lookup = {
+            self._normalize_title(item["law_name"]): item
+            for item in self.target_laws
+            if item.get("law_name")
+        }
+        if self.target_laws:
+            print(f"✓ CSV에서 {len(self.target_laws)}개의 대상 규정을 불러왔습니다: {self.csv_path}")
+        else:
+            print("⚠ 대상 CSV를 찾지 못했거나 비어 있습니다. 트리 전체를 대상으로 진행합니다.")
 
     # ------------------------------------------------------------------
     # 트리 구조에서 규정 링크 추출
@@ -265,6 +278,111 @@ class KofiaScraper(BaseScraper):
                 pass
 
         return links
+
+    # ------------------------------------------------------------------
+    # CSV 대상 규정 로드 및 필터링
+    # ------------------------------------------------------------------
+    def _load_target_laws(self, csv_path: str) -> List[Dict]:
+        """
+        CSV 파일에서 스크래핑 대상 규정명을 로드한다.
+        기대 컬럼: 구분, 법령명
+        """
+        if not csv_path:
+            return []
+        csv_file = Path(csv_path)
+        if not csv_file.is_absolute():
+            csv_file = find_project_root() / csv_path
+        if not csv_file.exists():
+            print(f"⚠ KOFIA 대상 CSV를 찾을 수 없습니다: {csv_file}")
+            return []
+
+        targets: List[Dict] = []
+        try:
+            with open(csv_file, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    name = (row.get("법령명") or "").strip()
+                    category = (row.get("구분") or "").strip()
+                    if not name:
+                        continue
+                    targets.append({"law_name": name, "category": category})
+        except Exception as exc:
+            print(f"⚠ KOFIA 대상 CSV 로드 실패: {exc}")
+            return []
+        return targets
+
+    def _normalize_title(self, text: Optional[str]) -> str:
+        """비교를 위한 규정명 정규화"""
+        if not text:
+            return ""
+        cleaned = re.sub(r"[\s\W]+", "", text)
+        return cleaned.lower()
+
+    def _filter_tree_links_by_targets(self, tree_links: List[Dict]) -> Tuple[List[Dict], List[str]]:
+        """
+        CSV 대상 목록에 포함된 규정만 순서대로 반환한다.
+        Returns:
+            (선택된 링크 리스트, 매칭 실패한 규정명 리스트)
+        """
+        if not self.target_laws:
+            return tree_links, []
+
+        normalized_tree: Dict[str, List[Dict]] = {}
+        # 디버깅: 트리에서 추출한 이름들을 저장
+        tree_names_map: Dict[str, str] = {}  # 정규화된 키 -> 원본 이름
+        
+        for link in tree_links:
+            original_name = link.get("regulation_name") or link.get("title", "")
+            key = self._normalize_title(original_name)
+            if not key:
+                continue
+            normalized_tree.setdefault(key, []).append(link)
+            if key not in tree_names_map:
+                tree_names_map[key] = original_name
+
+        selected_links: List[Dict] = []
+        missing_targets: List[str] = []
+        # 디버깅: 매칭 실패한 항목의 유사한 이름 찾기
+        missing_with_similar: List[Tuple[str, List[str]]] = []
+
+        for target in self.target_laws:
+            target_name = target["law_name"]
+            key = self._normalize_title(target_name)
+            matches = normalized_tree.get(key)
+            if matches and len(matches) > 0:
+                # 같은 이름의 링크가 여러 개 있을 수 있으므로 첫 번째 사용
+                # 링크를 복사해서 사용 (원본은 유지하여 중복 항목도 처리 가능)
+                original_link = matches[0]
+                link = dict(original_link)  # 딕셔너리 복사
+                if target.get("law_name"):
+                    link["regulation_name"] = target["law_name"]
+                link["target_name"] = target["law_name"]
+                link["target_category"] = target.get("category", "")
+                selected_links.append(link)
+                # 첫 번째 링크를 제거하지 않고 유지 (중복 항목 처리)
+                # matches.pop(0) 대신 그대로 두어서 같은 이름이 여러 번 나와도 처리 가능
+            else:
+                missing_targets.append(target_name)
+                # 유사한 이름 찾기 (부분 문자열 매칭)
+                similar_names = []
+                target_normalized = key
+                for tree_key, tree_original in tree_names_map.items():
+                    # 정규화된 이름이 정확히 일치하는지 확인
+                    if target_normalized == tree_key:
+                        similar_names.append(tree_original)
+                if similar_names:
+                    missing_with_similar.append((target_name, similar_names[:3]))  # 최대 3개만
+
+        # 디버깅: 매칭 실패한 항목과 유사한 이름 출력
+        if missing_with_similar:
+            print(f"\n⚠ 매칭 실패한 항목과 정확히 일치하는 트리 이름 (이미 사용됨):")
+            for target_name, similar in missing_with_similar:
+                print(f"  CSV: {target_name}")
+                print(f"    트리 이름 (이미 사용됨): {similar}")
+                print(f"    → CSV에 중복 항목이 있어서 이미 매칭된 링크를 재사용합니다.")
+                print()
+
+        return selected_links, missing_targets
 
     # ------------------------------------------------------------------
     # 트리 링크 클릭 및 콘텐츠 추출
@@ -686,12 +804,18 @@ class KofiaScraper(BaseScraper):
         self,
         limit: int = 0,
         download_files: bool = False,
+        content_limit: int = 0,
     ) -> List[Dict]:
         """
         법규정보시스템 스크래핑
         URL: https://law.kofia.or.kr/service/law/lawCurrentMain.do
         
         트리 구조에서 규정을 선택하여 스크래핑하는 방식
+        
+        Args:
+            limit: 가져올 개수 제한 (0=전체)
+            download_files: 파일 다운로드 여부
+            content_limit: 본문 길이 제한 (0=제한 없음, 문자 수)
         """
         all_results: List[Dict] = []
         driver: Optional[webdriver.Chrome] = None
@@ -729,6 +853,18 @@ class KofiaScraper(BaseScraper):
             tree_links = self.extract_tree_links(driver)
             print(f"트리에서 {len(tree_links)}개의 규정 링크를 발견했습니다.")
 
+            missing_targets: List[str] = []
+            if self.target_laws:
+                tree_links, missing_targets = self._filter_tree_links_by_targets(tree_links)
+                print(f"CSV 대상과 매칭된 규정: {len(tree_links)}개")
+                if missing_targets:
+                    print(f"⚠ CSV에 있으나 트리에서 찾지 못한 규정: {len(missing_targets)}개")
+                    for name in missing_targets[:5]:
+                        print(f"   - {name}")
+                    if len(missing_targets) > 5:
+                        print("   ...")
+                    print(f"   (찾지 못한 항목은 결과에 빈 내용으로 포함됩니다)")
+
             if not tree_links:
                 print("⚠ 트리에서 규정 링크를 찾지 못했습니다.")
                 # 트리 iframe 직접 접근 시도
@@ -753,7 +889,8 @@ class KofiaScraper(BaseScraper):
             print(f"※ 본문 내용이 있는 항목만 저장합니다.\n")
             
             for idx, item in enumerate(tree_links, 1):
-                print(f"[{idx}/{len(tree_links)}] {item.get('title', 'N/A')[:50]}... 처리 중")
+                display_name = item.get("target_name") or item.get("regulation_name") or item.get("title") or "N/A"
+                print(f"[{idx}/{len(tree_links)}] {display_name[:50]}... 처리 중")
 
                 # 트리 링크 클릭 및 콘텐츠 추출
                 content_soup = self.click_tree_link_and_extract(driver, item)
@@ -764,6 +901,14 @@ class KofiaScraper(BaseScraper):
 
                     # 콘텐츠에서 정보 추출
                     content_info = self.extract_content_from_iframe(content_soup)
+                    
+                    # 본문 길이 제한 적용
+                    if content_limit > 0 and content_info.get("content"):
+                        original_length = len(content_info["content"])
+                        content_info["content"] = content_info["content"][:content_limit]
+                        if original_length > content_limit:
+                            print(f"  ⚠ 본문 길이 제한 적용: {original_length}자 → {content_limit}자")
+                    
                     item.update(content_info)
 
                     # 본문 내용이 있는지 확인 (20자 이상이면 본문이 있다고 판단)
@@ -788,7 +933,10 @@ class KofiaScraper(BaseScraper):
                         all_results.append(item)
                         print(f"  ✓ 저장 대상으로 추가됨")
                     else:
-                        print(f"  ⚠ 본문 내용 없음 (디렉토리 또는 빈 페이지) - 건너뜀")
+                        # 본문이 없거나 짧은 경우에도 결과에 추가 (본문은 빈 문자열로 유지)
+                        # 이렇게 하면 save_kofia_results에서 찾지 못한 항목과 구분 가능
+                        all_results.append(item)
+                        print(f"  ⚠ 본문 내용 없음 (디렉토리 또는 빈 페이지) - 빈 본문으로 저장")
                 else:
                     print(f"  ✗ 콘텐츠 추출 실패 - 건너뜀")
 
@@ -850,14 +998,63 @@ class KofiaScraper(BaseScraper):
         return enactment_date, revision_date
 
 
-def save_kofia_results(records: List[Dict]):
-    """JSON 및 CSV로 금융투자협회 법규정보 데이터를 저장한다."""
+def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = None):
+    """JSON 및 CSV로 금융투자협회 법규정보 데이터를 저장한다.
+    
+    Args:
+        records: 스크래핑된 법규정보 리스트
+        crawler: KofiaScraper 인스턴스 (CSV의 모든 항목을 포함하기 위해 사용)
+    """
+    import json
+    import csv
+
+    # CSV의 모든 항목을 포함하도록 정렬 (CSV 순서 유지)
+    if crawler and crawler.target_laws:
+        # CSV 항목 순서대로 정렬하기 위한 딕셔너리 생성
+        records_dict = {}
+        for item in records:
+            # target_name을 우선적으로 사용, 없으면 regulation_name, title 순서로 확인
+            reg_name = item.get("target_name") or item.get("regulation_name") or item.get("title", "")
+            if reg_name:
+                records_dict[reg_name] = item
+        
+        print(f"디버깅: records_dict에 {len(records_dict)}개 항목이 있습니다.")
+        print(f"디버깅: CSV에는 {len(crawler.target_laws)}개 항목이 있습니다.")
+        
+        # CSV 순서대로 정렬된 결과 생성
+        ordered_records = []
+        missing_count = 0
+        for target in crawler.target_laws:
+            target_name = target["law_name"]
+            if target_name in records_dict:
+                ordered_records.append(records_dict[target_name])
+            else:
+                # CSV에 있지만 결과에 없는 경우 빈 항목 추가
+                missing_count += 1
+                empty_item: Dict[str, str] = {
+                    "title": target_name,
+                    "regulation_name": target_name,
+                    "organization": "금융투자협회",
+                    "target_name": target_name,
+                    "target_category": target.get("category", ""),
+                    "content": "",  # 빈 본문
+                    "department": "",
+                    "file_names": [],
+                    "download_links": [],
+                    "enactment_date": "",
+                    "revision_date": "",
+                }
+                ordered_records.append(empty_item)
+                print(f"디버깅: 찾지 못한 항목 추가 - {target_name}")
+        
+        if missing_count > 0:
+            print(f"디버깅: 총 {missing_count}개 항목을 빈 본문으로 추가했습니다.")
+        
+        records = ordered_records
+
     if not records:
         print("저장할 법규정보 데이터가 없습니다.")
         return
-
-    import json
-    import csv
 
     # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
     law_results = []
@@ -938,14 +1135,30 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="금융투자협회 법규정보시스템 스크래퍼")
     parser.add_argument("--limit", type=int, default=0, help="가져올 개수 제한 (0=전체)")
     parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="대상 규정 목록 CSV 경로 (기본: KOFIA_Scraper/input/list.csv)",
+    )
+    parser.add_argument(
         "--no-download",
         action="store_true",
         help="파일 다운로드를 건너뜁니다.",
     )
+    parser.add_argument(
+        "--content",
+        type=int,
+        default=0,
+        help="본문 길이 제한 (0=제한 없음, 문자 수)",
+    )
     args = parser.parse_args()
 
-    crawler = KofiaScraper()
-    results = crawler.crawl_law_info(limit=args.limit, download_files=not args.no_download)
+    crawler = KofiaScraper(csv_path=args.csv)
+    results = crawler.crawl_law_info(
+        limit=args.limit,
+        download_files=not args.no_download,
+        content_limit=args.content,
+    )
 
     print(f"\n총 {len(results)}개의 법규정보를 수집했습니다.")
-    save_kofia_results(results)
+    save_kofia_results(results, crawler=crawler)

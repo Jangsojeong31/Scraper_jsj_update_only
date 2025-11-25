@@ -1,6 +1,6 @@
 """
 한국은행 스크래퍼
-특정 법규 항목만 스크래핑: 전자방식 외상매출채권담보대출 관련 규정
+CSV 목록 기반으로 법규 정보 스크래핑
 """
 from __future__ import annotations
 
@@ -34,7 +34,8 @@ import os
 import json
 import csv
 import time
-from urllib.parse import urljoin
+import re
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
 from common.base_scraper import BaseScraper
@@ -43,19 +44,14 @@ from common.file_comparator import FileComparator
 
 
 class BokScraper(BaseScraper):
-    """한국은행 스크래퍼 - 전자방식 외상매출채권담보대출 관련 규정만 수집"""
+    """한국은행 스크래퍼 - CSV 목록 기반으로 법규 정보 수집"""
     
     BASE_URL = "https://www.bok.or.kr"
-    # 검색어가 포함된 URL 사용 (금융기관 전자방식으로 검색하면 대상 규정 2개만 나옴)
-    LIST_URL = "https://www.bok.or.kr/portal/singl/law/listSearch.do?menuNo=200200&parentlawseq=&detaillawseq=&lawseq=&search_text=%EA%B8%88%EC%9C%B5%EA%B8%B0%EA%B4%80+%EC%A0%84%EC%9E%90%EB%B0%A9%EC%8B%9D"
+    # 검색 URL 템플릿 (검색어를 파라미터로 받음)
+    SEARCH_URL_TEMPLATE = "https://www.bok.or.kr/portal/singl/law/listSearch.do?menuNo=200200&parentlawseq=&detaillawseq=&lawseq=&search_text={search_text}"
+    DEFAULT_CSV_PATH = "BOK_Scraper/input/list.csv"
     
-    # 스크래핑할 대상 규정명 (정확히 일치하거나 포함되는 항목)
-    TARGET_REGULATIONS = [
-        "금융기관 전자방식 외상매출채권담보대출 취급절차",
-        "금융기관 전자방식 외상매출채권담보대출 취급세칙",
-    ]
-    
-    def __init__(self, delay: float = 1.0):
+    def __init__(self, delay: float = 1.0, csv_path: Optional[str] = None):
         super().__init__(delay)
         self.download_dir = os.path.join("output", "downloads")
         self.previous_dir = os.path.join("output", "downloads", "previous", "bok")
@@ -65,15 +61,57 @@ class BokScraper(BaseScraper):
         self.file_extractor = FileExtractor(download_dir=self.download_dir, session=self.session)
         # 파일 비교기 초기화
         self.file_comparator = FileComparator(base_dir=self.download_dir)
+        # CSV에서 대상 규정 목록 로드
+        self.csv_path = csv_path or self.DEFAULT_CSV_PATH
+        self.target_laws = self._load_target_laws(self.csv_path)
+        if self.target_laws:
+            print(f"✓ CSV에서 {len(self.target_laws)}개의 대상 규정을 불러왔습니다: {self.csv_path}")
+        else:
+            print("⚠ 대상 CSV를 찾지 못했거나 비어 있습니다. 전체 목록을 대상으로 진행합니다.")
+    
+    def _load_target_laws(self, csv_path: str) -> List[Dict]:
+        """CSV 파일에서 스크래핑 대상 규정명을 로드한다."""
+        if not csv_path:
+            return []
+        csv_file = Path(csv_path)
+        if not csv_file.is_absolute():
+            csv_file = find_project_root() / csv_path
+        if not csv_file.exists():
+            print(f"⚠ BOK 대상 CSV를 찾을 수 없습니다: {csv_file}")
+            return []
+
+        targets: List[Dict] = []
+        try:
+            with open(csv_file, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    name = (row.get("법령명") or "").strip()
+                    category = (row.get("구분") or "").strip()
+                    if not name:
+                        continue
+                    targets.append({"law_name": name, "category": category})
+        except Exception as exc:
+            print(f"⚠ BOK 대상 CSV 로드 실패: {exc}")
+            return []
+        return targets
+    
+    def _normalize_title(self, text: Optional[str]) -> str:
+        """비교를 위한 규정명 정규화"""
+        if not text:
+            return ""
+        cleaned = re.sub(r"[\s\W]+", "", text)
+        return cleaned.lower()
     
     def is_target_regulation(self, title: str) -> bool:
-        """제목이 대상 규정인지 확인"""
-        if not title:
-            return False
+        """제목이 대상 규정인지 확인 (CSV 목록 기반)"""
+        if not title or not self.target_laws:
+            return True  # CSV가 없으면 모든 항목 허용
         
-        title_clean = title.strip()
-        for target in self.TARGET_REGULATIONS:
-            if target in title_clean or title_clean in target:
+        title_normalized = self._normalize_title(title)
+        for target in self.target_laws:
+            target_normalized = self._normalize_title(target["law_name"])
+            # 정규화된 이름이 일치하거나 포함 관계인지 확인
+            if target_normalized == title_normalized or target_normalized in title_normalized or title_normalized in target_normalized:
                 return True
         return False
     
@@ -147,11 +185,8 @@ class BokScraper(BaseScraper):
                 if not title or len(title) < 5:
                     continue
                 
-                # 대상 규정인지 확인
-                if not self.is_target_regulation(title):
-                    continue
-                
-                print(f"  ✓ 대상 규정 발견: {title}")
+                # 모든 규정을 추출 (필터링은 나중에 _filter_regulations_by_targets에서 수행)
+                # print(f"  ✓ 규정 발견: {title}")
                 
                 # 상세 링크 추출
                 detail_link = ""
@@ -219,10 +254,12 @@ class BokScraper(BaseScraper):
     def extract_regulation_detail(self, url: str, regulation_name: str = "") -> Dict:
         """상세 페이지에서 규정 내용 추출"""
         detail_info = {
-            "content": "",  # 본문 내용은 비워둠
+            "content": "",  # PDF에서 추출한 본문 내용
             "file_names": [],
             "download_links": [],
             "revision_date": "",
+            "enactment_date": "",  # 제정일
+            "department": "",  # 소관부서
         }
         
         try:
@@ -289,7 +326,28 @@ class BokScraper(BaseScraper):
                     print(f"    링크: {file_url}")
                     
                     # 파일 다운로드 및 비교
-                    self._download_and_compare_file(file_url, file_name, regulation_name=regulation_name)
+                    downloaded_file_path = self._download_and_compare_file(file_url, file_name, regulation_name=regulation_name)
+                    
+                    # PDF 파일이면 내용 추출
+                    if downloaded_file_path and downloaded_file_path.get('file_path'):
+                        file_path = downloaded_file_path['file_path']
+                        if file_path.lower().endswith('.pdf'):
+                            print(f"  PDF 내용 추출 중...")
+                            pdf_content = self.file_extractor.extract_pdf_content(file_path)
+                            if pdf_content:
+                                detail_info["content"] = pdf_content
+                                print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
+                                
+                                # PDF에서 소관부서와 제정일 추출
+                                extracted_info = self._extract_info_from_pdf_content(pdf_content)
+                                if extracted_info.get("department"):
+                                    detail_info["department"] = extracted_info["department"]
+                                    print(f"  ✓ 소관부서: {extracted_info['department']}")
+                                if extracted_info.get("enactment_date"):
+                                    detail_info["enactment_date"] = extracted_info["enactment_date"]
+                                    print(f"  ✓ 제정일: {extracted_info['enactment_date']}")
+                            else:
+                                print(f"  ⚠ PDF 내용 추출 실패")
             else:
                 print(f"  ⚠ 파일 링크를 찾지 못했습니다 (셀렉터: {file_selector})")
             
@@ -311,6 +369,63 @@ class BokScraper(BaseScraper):
             traceback.print_exc()
         
         return detail_info
+    
+    def _extract_info_from_pdf_content(self, content: str) -> Dict[str, str]:
+        """PDF 내용에서 소관부서와 제정일 추출"""
+        result = {
+            "department": "",
+            "enactment_date": "",
+        }
+        
+        if not content:
+            return result
+        
+        # 제정일 패턴 찾기 (YYYY년 MM월 DD일 또는 YYYY-MM-DD 형식)
+        # 예: "2023년 1월 12일", "2023-01-12", "제정일: 2023.01.12"
+        date_patterns = [
+            r'제정일[:\s]*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일',
+            r'제정일[:\s]*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})',
+            r'제정일[:\s]*(\d{4})-(\d{1,2})-(\d{1,2})',
+            r'제정[:\s]*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일',
+            r'제정[:\s]*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})',
+            r'제정[:\s]*(\d{4})-(\d{1,2})-(\d{1,2})',
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, content)
+            if match:
+                year, month, day = match.groups()
+                # YYYY-MM-DD 형식으로 변환
+                result["enactment_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                break
+        
+        # 소관부서 패턴 찾기 (마지막 개정일 부분에서 추출)
+        # 예: "개정 2025. 6. 24. 국장결재 국제총괄팀- 793"
+        # 예: "개정2023.12.20.총재결재 외환정보팀-1028"
+        # 패턴: 개정 + 날짜 + 결재 + 팀명 + "-" + 숫자
+        department_patterns = [
+            r'개정\s*\d{4}\.?\s*\d{1,2}\.?\s*\d{1,2}\.?\s*[가-힣]*결재\s+([가-힣]+팀)\s*-',  # 공백 포함
+            r'개정\s*\d{4}\.?\s*\d{1,2}\.?\s*\d{1,2}\.?\s*[가-힣]*결재\s+([가-힣]+팀)-',  # 공백 없음
+            r'개정\d{4}\.?\d{1,2}\.?\d{1,2}\.?\s*[가-힣]*결재\s+([가-힣]+팀)\s*-',  # 공백 없음 (날짜 부분)
+            r'개정\d{4}\.?\d{1,2}\.?\d{1,2}\.?\s*[가-힣]*결재\s+([가-힣]+팀)-',  # 공백 없음 (전체)
+        ]
+        
+        # 모든 개정일 패턴을 찾아서 마지막 것을 사용
+        all_matches = []
+        for pattern in department_patterns:
+            matches = re.finditer(pattern, content)
+            for match in matches:
+                team_name = match.group(1).strip()
+                if team_name:
+                    all_matches.append((match.start(), team_name))
+        
+        # 마지막 개정일에서 추출한 팀명 사용
+        if all_matches:
+            # 위치 기준으로 정렬하여 마지막 것 선택
+            all_matches.sort(key=lambda x: x[0])
+            result["department"] = all_matches[-1][1]
+        
+        return result
     
     def _get_safe_filename(self, filename: str, regulation_name: str = "") -> str:
         """
@@ -388,6 +503,7 @@ class BokScraper(BaseScraper):
                 print(f"  ✓ 파일 저장: {new_file_path}")
             
             # 이전 파일과 비교
+            comparison_result = None
             if os.path.exists(previous_file_path):
                 print(f"  이전 파일과 비교 중...")
                 comparison_result = self.file_comparator.compare_and_report(
@@ -418,7 +534,7 @@ class BokScraper(BaseScraper):
             return {
                 'file_path': new_file_path,
                 'previous_file_path': previous_file_path if os.path.exists(previous_file_path) else None,
-                'comparison': comparison_result if os.path.exists(previous_file_path) else None,
+                'comparison': comparison_result,
             }
             
         except Exception as e:
@@ -430,54 +546,110 @@ class BokScraper(BaseScraper):
     def crawl_regulations(self) -> List[Dict]:
         """
         법규정보 - 규정 스크래핑
-        대상 규정만 필터링하여 수집
+        CSV 목록 기반으로 각 규정명을 검색어로 사용하여 수집
         """
         print(f"\n=== 한국은행 법규 스크래핑 시작 ===")
-        print(f"대상 규정: {len(self.TARGET_REGULATIONS)}개")
-        for i, reg in enumerate(self.TARGET_REGULATIONS, 1):
-            print(f"  {i}. {reg}")
+        if not self.target_laws:
+            print("⚠ CSV 목록이 없습니다.")
+            return []
+        
+        print(f"대상 규정: {len(self.target_laws)}개")
+        for i, target in enumerate(self.target_laws, 1):
+            print(f"  {i}. {target['law_name']}")
         print()
         
         results = []
         
         try:
-            # 목록 페이지 접근
-            print(f"[1단계] 목록 페이지 접근: {self.LIST_URL}")
-            soup = self.fetch_page(self.LIST_URL, use_selenium=True)
-            
-            # 디버깅 HTML 저장
-            self.save_debug_html(soup, filename="debug_bok_list.html")
-            
-            # 대상 규정 목록 추출
-            print(f"[2단계] 대상 규정 목록 추출 중...")
-            regulation_list = self.extract_regulation_list(soup)
-            
-            if not regulation_list:
-                print("  ⚠ 대상 규정을 찾지 못했습니다.")
-                return results
-            
-            print(f"  ✓ {len(regulation_list)}개 규정 발견")
-            
-            # 각 규정의 상세 정보 추출
-            print(f"[3단계] 상세 정보 추출 중...")
-            for idx, regulation in enumerate(regulation_list, 1):
-                title = regulation.get("title", "")
-                detail_link = regulation.get("detail_link", "")
+            # 각 규정명을 검색어로 사용하여 검색 및 추출
+            for idx, target in enumerate(self.target_laws, 1):
+                regulation_name = target["law_name"]
+                print(f"\n[{idx}/{len(self.target_laws)}] {regulation_name}")
                 
-                print(f"\n[{idx}/{len(regulation_list)}] {title}")
+                # 검색어를 URL 인코딩
+                search_text_encoded = quote(regulation_name)
+                search_url = self.SEARCH_URL_TEMPLATE.format(search_text=search_text_encoded)
                 
-                if detail_link:
-                    print(f"  상세 페이지 접근: {detail_link}")
-                    regulation_name = regulation.get("regulation_name", regulation.get("title", ""))
-                    detail_info = self.extract_regulation_detail(detail_link, regulation_name=regulation_name)
-                    regulation.update(detail_info)
+                print(f"  검색 URL: {search_url}")
+                
+                # 검색 결과 페이지 접근
+                soup = self.fetch_page(search_url, use_selenium=True)
+                
+                # 디버깅 HTML 저장 (첫 번째 검색만)
+                if idx == 1:
+                    self.save_debug_html(soup, filename="debug_bok_search.html")
+                
+                # 검색 결과에서 규정 목록 추출
+                regulation_list = self.extract_regulation_list(soup)
+                
+                if not regulation_list:
+                    print(f"  ⚠ 검색 결과에서 규정을 찾지 못했습니다.")
+                    # 빈 항목으로 추가 (나중에 save_bok_results에서 처리)
+                    empty_item = {
+                        "title": regulation_name,
+                        "regulation_name": regulation_name,
+                        "organization": "한국은행",
+                        "target_name": regulation_name,
+                        "target_category": target.get("category", ""),
+                        "detail_link": "",
+                        "content": "",
+                        "department": "",
+                        "file_names": [],
+                        "download_links": [],
+                        "enactment_date": "",
+                        "revision_date": "",
+                    }
+                    results.append(empty_item)
+                    continue
+                
+                # 검색 결과에서 정확히 일치하는 규정 찾기
+                matched_regulation = None
+                for reg in regulation_list:
+                    reg_name = reg.get("regulation_name") or reg.get("title", "")
+                    if self._normalize_title(reg_name) == self._normalize_title(regulation_name):
+                        matched_regulation = reg
+                        break
+                
+                # 정확히 일치하는 것이 없으면 첫 번째 결과 사용
+                if not matched_regulation and regulation_list:
+                    matched_regulation = regulation_list[0]
+                    print(f"  ⚠ 정확히 일치하는 규정을 찾지 못해 첫 번째 결과 사용: {matched_regulation.get('title', '')}")
+                
+                if matched_regulation:
+                    matched_regulation["target_name"] = regulation_name
+                    matched_regulation["target_category"] = target.get("category", "")
+                    if target.get("law_name"):
+                        matched_regulation["regulation_name"] = target["law_name"]
                     
-                    # 첨부파일 정보는 이미 detail_info에 포함되어 있음
-                    # 본문 내용은 비워두므로 파일 다운로드 및 추출은 생략
+                    # 상세 정보 추출
+                    detail_link = matched_regulation.get("detail_link", "")
+                    if detail_link:
+                        print(f"  상세 페이지 접근: {detail_link}")
+                        detail_info = self.extract_regulation_detail(detail_link, regulation_name=regulation_name)
+                        matched_regulation.update(detail_info)
+                    else:
+                        print(f"  ⚠ 상세 링크가 없습니다.")
+                    
+                    results.append(matched_regulation)
                 else:
-                    print(f"  ⚠ 상세 링크가 없습니다.")
+                    print(f"  ⚠ 검색 결과에서 규정을 찾지 못했습니다.")
+                    # 빈 항목으로 추가
+                    empty_item = {
+                        "title": regulation_name,
+                        "regulation_name": regulation_name,
+                        "organization": "한국은행",
+                        "target_name": regulation_name,
+                        "target_category": target.get("category", ""),
+                        "detail_link": "",
+                        "content": "",
+                        "department": "",
+                        "file_names": [],
+                        "download_links": [],
+                        "enactment_date": "",
+                        "revision_date": "",
+                    }
+                    results.append(empty_item)
                 
-                results.append(regulation)
                 time.sleep(self.delay)
             
         except Exception as e:
@@ -486,10 +658,96 @@ class BokScraper(BaseScraper):
             traceback.print_exc()
         
         return results
+    
+    def _filter_regulations_by_targets(self, regulation_list: List[Dict]) -> List[Dict]:
+        """CSV 목록에 포함된 규정만 순서대로 반환한다."""
+        if not self.target_laws:
+            return regulation_list
+
+        normalized_tree: Dict[str, List[Dict]] = {}
+        for reg in regulation_list:
+            reg_name = reg.get("regulation_name") or reg.get("title", "")
+            key = self._normalize_title(reg_name)
+            if not key:
+                continue
+            normalized_tree.setdefault(key, []).append(reg)
+
+        selected_regulations: List[Dict] = []
+        missing_targets: List[str] = []
+
+        for target in self.target_laws:
+            target_name = target["law_name"]
+            key = self._normalize_title(target_name)
+            matches = normalized_tree.get(key)
+            if matches and len(matches) > 0:
+                # 같은 이름의 규정이 여러 개 있을 수 있으므로 첫 번째 사용
+                reg = dict(matches[0])  # 딕셔너리 복사
+                reg["target_name"] = target_name
+                reg["target_category"] = target.get("category", "")
+                if target.get("law_name"):
+                    reg["regulation_name"] = target["law_name"]
+                selected_regulations.append(reg)
+            else:
+                missing_targets.append(target_name)
+
+        if missing_targets:
+            print(f"  ⚠ CSV에 있으나 목록에서 찾지 못한 규정: {len(missing_targets)}개")
+            for name in missing_targets[:5]:
+                print(f"     - {name}")
+            if len(missing_targets) > 5:
+                print("     ...")
+            print(f"     (찾지 못한 항목은 결과에 빈 내용으로 포함됩니다)")
+
+        return selected_regulations
 
 
-def save_bok_results(records: List[Dict]):
-    """JSON 및 CSV로 한국은행 법규 데이터를 저장한다."""
+def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
+    """JSON 및 CSV로 한국은행 법규 데이터를 저장한다.
+    
+    Args:
+        records: 스크래핑된 법규정보 리스트
+        crawler: BokScraper 인스턴스 (CSV의 모든 항목을 포함하기 위해 사용)
+    """
+    # CSV의 모든 항목을 포함하도록 정렬 (CSV 순서 유지)
+    if crawler and crawler.target_laws:
+        # CSV 항목 순서대로 정렬하기 위한 딕셔너리 생성
+        records_dict = {}
+        for item in records:
+            reg_name = item.get("target_name") or item.get("regulation_name") or item.get("title", "")
+            if reg_name:
+                records_dict[reg_name] = item
+        
+        # CSV 순서대로 정렬된 결과 생성
+        ordered_records = []
+        missing_count = 0
+        for target in crawler.target_laws:
+            target_name = target["law_name"]
+            if target_name in records_dict:
+                ordered_records.append(records_dict[target_name])
+            else:
+                # CSV에 있지만 결과에 없는 경우 빈 항목 추가
+                missing_count += 1
+                empty_item: Dict[str, str] = {
+                    "title": target_name,
+                    "regulation_name": target_name,
+                    "organization": "한국은행",
+                    "target_name": target_name,
+                    "target_category": target.get("category", ""),
+                    "content": "",  # 빈 본문
+                    "department": "",
+                    "file_names": [],
+                    "download_links": [],
+                    "enactment_date": "",
+                    "revision_date": "",
+                }
+                ordered_records.append(empty_item)
+                print(f"디버깅: 찾지 못한 항목 추가 - {target_name}")
+        
+        if missing_count > 0:
+            print(f"디버깅: 총 {missing_count}개 항목을 빈 본문으로 추가했습니다.")
+        
+        records = ordered_records
+    
     if not records:
         print("저장할 법규 데이터가 없습니다.")
         return
@@ -526,9 +784,8 @@ def save_bok_results(records: List[Dict]):
         json.dump(
             {
                 "crawled_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "url": BokScraper.LIST_URL,
+                "url": BokScraper.SEARCH_URL_TEMPLATE,
                 "total_count": len(law_results),
-                "target_regulations": BokScraper.TARGET_REGULATIONS,
                 "results": law_results,
             },
             f,
@@ -561,13 +818,19 @@ def save_bok_results(records: List[Dict]):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="한국은행 법규정보 스크래퍼 (전자방식 외상매출채권담보대출 관련 규정)")
-    parser.add_argument("--limit", type=int, default=0, help="가져올 개수 제한 (0=전체, 기본값: 대상 규정만)")
+    parser = argparse.ArgumentParser(description="한국은행 법규정보 스크래퍼 (CSV 목록 기반)")
+    parser.add_argument("--limit", type=int, default=0, help="가져올 개수 제한 (0=전체)")
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="대상 규정 목록 CSV 경로 (기본: BOK_Scraper/input/list.csv)",
+    )
     args = parser.parse_args()
     
-    scraper = BokScraper()
+    scraper = BokScraper(csv_path=args.csv)
     results = scraper.crawl_regulations()
     
     print(f"\n총 {len(results)}개의 법규정보를 수집했습니다.")
-    save_bok_results(results)
+    save_bok_results(results, crawler=scraper)
 
