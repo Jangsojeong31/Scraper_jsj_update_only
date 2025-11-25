@@ -438,6 +438,7 @@ class KofiaScraper(BaseScraper):
                 
                 department_info = self._extract_department_from_iframe01(iframe01_soup)
                 file_info = self._extract_files_from_iframe01(iframe01_soup)
+                dates_info = self._extract_dates_from_iframe01(iframe01_soup)
                 
                 # #lawFullContent는 iframe 태그 자체이므로 iframe으로 찾기
                 try:
@@ -454,11 +455,13 @@ class KofiaScraper(BaseScraper):
                     # iframe 내용 추출
                     soup = BeautifulSoup(driver.page_source, "lxml")
                     
-                    # 소관부서 및 첨부파일 정보를 soup에 추가 (나중에 extract_content_from_iframe에서 사용)
+                    # 소관부서, 첨부파일, 날짜 정보를 soup에 추가 (나중에 extract_content_from_iframe에서 사용)
                     if department_info:
                         soup.department_info = department_info
                     if file_info:
                         soup.file_info = file_info
+                    if dates_info:
+                        soup.dates_info = dates_info
                     
                     # 디버깅: 최종 HTML에서 본문 요소 확인
                     lawcontent_div = soup.select_one("#lawcontent")
@@ -490,21 +493,25 @@ class KofiaScraper(BaseScraper):
                         
                         # iframe 내용 추출
                         soup = BeautifulSoup(driver.page_source, "lxml")
-                        # 소관부서 및 첨부파일 정보 추가
+                        # 소관부서, 첨부파일, 날짜 정보 추가
                         if department_info:
                             soup.department_info = department_info
                         if file_info:
                             soup.file_info = file_info
+                        if dates_info:
+                            soup.dates_info = dates_info
                         driver.switch_to.default_content()
                         return soup
                     else:
                         # iframe이 없으면 현재 iframe01의 내용 사용
                         soup = BeautifulSoup(driver.page_source, "lxml")
-                        # 소관부서 및 첨부파일 정보 추가
+                        # 소관부서, 첨부파일, 날짜 정보 추가
                         if department_info:
                             soup.department_info = department_info
                         if file_info:
                             soup.file_info = file_info
+                        if dates_info:
+                            soup.dates_info = dates_info
                         driver.switch_to.default_content()
                         return soup
                 
@@ -589,6 +596,70 @@ class KofiaScraper(BaseScraper):
         
         return None
 
+    # ------------------------------------------------------------------
+    # iframe01에서 날짜 추출 (iframe01에 직접 있음)
+    # ------------------------------------------------------------------
+    def _extract_dates_from_iframe01(self, soup: BeautifulSoup) -> Optional[Dict]:
+        """
+        iframe01 내부에서 날짜(#his_sel) 추출
+        """
+        if soup is None:
+            return None
+        
+        dates_info = {
+            "enactment_date": "",
+            "revision_date": "",
+        }
+        
+        # #his_sel 요소 찾기
+        his_sel = soup.select_one("#his_sel")
+        if his_sel:
+            # 모든 옵션 가져오기
+            options = his_sel.select("option")
+            if options:
+                print(f"  디버깅: #his_sel에서 {len(options)}개 옵션 발견")
+                for idx, opt in enumerate(options, 1):
+                    opt_text = opt.get_text(strip=True)
+                    opt_value = opt.get("value", "")
+                    opt_selected = opt.get("selected")
+                    print(f"    옵션 {idx}: '{opt_text}' (value: {opt_value}, selected: {opt_selected})")
+                
+                # 선택된 옵션 찾기 (selected 속성이 있거나 첫 번째 옵션)
+                selected_option = None
+                for opt in options:
+                    if opt.get("selected") or opt.get("value") == his_sel.get("value"):
+                        selected_option = opt
+                        break
+                # 선택된 옵션이 없으면 첫 번째 옵션 사용
+                if not selected_option and options:
+                    selected_option = options[0]
+                
+                # 옵션 개수에 따라 처리
+                if len(options) == 1:
+                    # 값이 하나라면 그게 제정일
+                    date_text = options[0].get_text(strip=True)
+                    dates_info["enactment_date"] = self._normalize_date_text(date_text)
+                    print(f"  ✓ 제정일 추출: {dates_info['enactment_date']} (원본: '{date_text}')")
+                elif len(options) > 1:
+                    # 값이 여러개라면
+                    # 가장 마지막 값이 제정일
+                    last_option = options[-1]
+                    last_date_text = last_option.get_text(strip=True)
+                    dates_info["enactment_date"] = self._normalize_date_text(last_date_text)
+                    print(f"  ✓ 제정일 추출 (마지막 옵션): {dates_info['enactment_date']} (원본: '{last_date_text}')")
+                    
+                    # 선택되어있는(또는 첫 번째) 값이 최근 개정일
+                    if selected_option:
+                        selected_date_text = selected_option.get_text(strip=True)
+                        dates_info["revision_date"] = self._normalize_date_text(selected_date_text)
+                        print(f"  ✓ 최근 개정일 추출 (선택된 옵션): {dates_info['revision_date']} (원본: '{selected_date_text}')")
+            else:
+                print(f"  ⚠ #his_sel에서 옵션을 찾지 못했습니다.")
+        else:
+            print(f"  ⚠ #his_sel 요소를 찾지 못했습니다.")
+        
+        return dates_info if dates_info["enactment_date"] or dates_info["revision_date"] else None
+    
     # ------------------------------------------------------------------
     # iframe01에서 첨부파일 추출 (iframe01에 직접 있음)
     # ------------------------------------------------------------------
@@ -764,24 +835,14 @@ class KofiaScraper(BaseScraper):
                                 info["department"] = value
                             break
 
-        # 날짜 추출 - #his_sel > option:nth-child(1)
-        date_element = soup.select_one("#his_sel > option:nth-child(1)")
-        if date_element:
-            date_text = date_element.get_text(strip=True)
-            # 날짜 텍스트에서 제정일/개정일 추출
-            enactment, revision = self.extract_dates_from_text(date_text)
-            if not info["enactment_date"]:
-                info["enactment_date"] = enactment
-            if not info["revision_date"]:
-                info["revision_date"] = revision
-
-        # 본문에서도 날짜 추출 시도 (날짜 셀렉터에서 못 찾은 경우)
-        if not info["enactment_date"] or not info["revision_date"]:
-            enactment, revision = self.extract_dates_from_text(info["content"])
-            if not info["enactment_date"]:
-                info["enactment_date"] = enactment
-            if not info["revision_date"]:
-                info["revision_date"] = revision
+        # 날짜 추출 - iframe01에서 추출한 정보 사용
+        # soup 객체에 dates_info 속성이 있으면 사용 (iframe01에서 추출한 것)
+        if hasattr(soup, 'dates_info') and soup.dates_info:
+            if soup.dates_info.get("enactment_date"):
+                info["enactment_date"] = soup.dates_info["enactment_date"]
+            if soup.dates_info.get("revision_date"):
+                info["revision_date"] = soup.dates_info["revision_date"]
+            print(f"  ✓ 날짜 정보 추출 (iframe01에서): 제정일={info.get('enactment_date', '')}, 최근 개정일={info.get('revision_date', '')}")
 
         # 첨부파일 추출 - iframe01에서 추출한 정보 사용
         # soup 객체에 file_info 속성이 있으면 사용 (iframe01에서 추출한 것)
@@ -953,49 +1014,39 @@ class KofiaScraper(BaseScraper):
 
         return all_results
 
-    def extract_dates_from_text(self, text: str) -> Tuple[str, str]:
+    def _normalize_date_text(self, date_text: str) -> str:
+        """
+        날짜 텍스트를 정규화된 형식으로 변환
+        예: "2008. 12. 30" -> "2008-12-30"
+        """
         import re
-
-        if not text:
-            return "", ""
-
-        enactment_date = ""
-        revision_date = ""
-
-        enactment_patterns = [
-            r"제\s*정\s*(\d{4}[.\-년]\s*\d{1,2}[.\-월]\s*\d{1,2}[일.]?)",
-            r"(\d{4}[.\-]\d{1,2}[.\-]\d{1,2})\s*제\s*정",
-            r"제\s*정\s*일\s*[:：]?\s*(\d{4}[.\-]\d{1,2}[.\-]\d{1,2})",
-        ]
-        revision_patterns = [
-            r"개\s*정\s*(\d{4}[.\-년]\s*\d{1,2}[.\-월]\s*\d{1,2}[일.]?)",
-            r"(\d{4}[.\-]\d{1,2}[.\-]\d{1,2})\s*개\s*정",
-            r"최근\s*개\s*정\s*일\s*[:：]?\s*(\d{4}[.\-]\d{1,2}[.\-]\d{1,2})",
-            r"최종\s*개\s*정\s*일\s*[:：]?\s*(\d{4}[.\-]\d{1,2}[.\-]\d{1,2})",
-        ]
-
-        def normalize(date_str: str) -> str:
-            cleaned = re.sub(r"[년월일]", ".", date_str)
-            cleaned = cleaned.replace(" ", "").replace("-", ".")
-            cleaned = cleaned.strip(".")
-            parts = [p for p in cleaned.split(".") if p]
-            if len(parts) >= 3:
-                return f"{parts[0]}.{int(parts[1])}.{int(parts[2])}."
-            return cleaned
-
-        for pattern in enactment_patterns:
-            match = re.search(pattern, text)
-            if match:
-                enactment_date = normalize(match.group(1))
-                break
-
-        for pattern in revision_patterns:
-            matches = list(re.finditer(pattern, text))
-            if matches:
-                revision_date = normalize(matches[-1].group(1))
-                break
-
-        return enactment_date, revision_date
+        
+        if not date_text:
+            return ""
+        
+        # 공백 제거 및 정규화
+        cleaned = re.sub(r"[년월일]", ".", date_text)
+        cleaned = cleaned.replace(" ", "").replace("-", ".")
+        cleaned = cleaned.strip(".")
+        
+        # 날짜 부분 추출 (숫자와 점만)
+        parts = [p for p in cleaned.split(".") if p and p.isdigit()]
+        if len(parts) >= 3:
+            # YYYY-MM-DD 형식으로 변환
+            year = parts[0]
+            month = str(int(parts[1])).zfill(2)  # 월을 2자리로 (01, 02, ...)
+            day = str(int(parts[2])).zfill(2)  # 일을 2자리로 (01, 02, ...)
+            return f"{year}-{month}-{day}"
+        elif len(parts) >= 2:
+            # YYYY-MM 형식
+            year = parts[0]
+            month = str(int(parts[1])).zfill(2)
+            return f"{year}-{month}"
+        elif len(parts) >= 1:
+            # YYYY 형식
+            return parts[0]
+        
+        return cleaned
 
 
 def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = None):
