@@ -249,30 +249,24 @@ def normalize_cell(text: str) -> str:
 def parse_table_from_text(text: str) -> List[Dict[str, str]]:
     """
     텍스트에서 표(항목, 점검사항, 점검방식)만 파싱
-    표 헤더를 찾으면 그 이후만 파싱하여 불필요한 처리 최소화
+    여러 표를 모두 찾아서 파싱
     """
     if not text:
         return []
     
-    # 표 헤더를 찾기 위해 줄 단위로 처리 (전체를 한 번에 처리하지 않음)
     lines = text.splitlines()
-    header_index = None
+    all_rows: List[Dict[str, str]] = []
     
-    # 표 헤더 찾기 (처음 2000줄만 확인하여 빠르게 찾기)
-    for idx, line in enumerate(lines[:2000]):
+    # 모든 표 헤더 위치 찾기
+    header_indices = []
+    for idx, line in enumerate(lines):
         normalized = normalize_cell(line)
         if is_header_line(normalized):
-            header_index = idx
-            break
+            header_indices.append(idx)
     
-    if header_index is None:
+    if not header_indices:
         return []
-
-    # 표 헤더 이후부터만 파싱 (표가 끝나면 중단)
-    rows: List[Dict[str, str]] = []
-    current_entry: Optional[Dict[str, str]] = None
-    current_item: str = ""  # 현재 항목 추적
-    empty_row_count = 0  # 연속된 빈 행 카운트
+    
     bullet_tokens = {"", "-", "☑", "□", "◦", "•"}
     noise_items = {"필 수", "필수", "선 택", "선택", "구 분", "구분"}
     check_item_pattern = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]\s*")
@@ -280,101 +274,110 @@ def parse_table_from_text(text: str) -> List[Dict[str, str]]:
     def strip_bullets(text: str) -> str:
         return text.strip("□☑◦• ·").strip()
     
-    for line in lines[header_index + 1:]:
-        normalized = normalize_cell(line)
-        if not normalized:
-            empty_row_count += 1
-            # 연속된 빈 행이 5개 이상이면 표가 끝난 것으로 간주
-            if empty_row_count >= 5 and rows:
-                break
-            continue
+    # 각 표 헤더마다 표 파싱
+    for header_idx, header_index in enumerate(header_indices):
+        # 다음 표 헤더까지 또는 파일 끝까지
+        end_index = header_indices[header_idx + 1] if header_idx + 1 < len(header_indices) else len(lines)
         
+        rows: List[Dict[str, str]] = []
+        current_entry: Optional[Dict[str, str]] = None
+        current_item: str = ""
         empty_row_count = 0
         
-        # 또 다른 표 헤더가 나오면 중단 (다른 표 시작)
-        if is_header_line(normalized) and rows:
-            break
-            
-        parts = re.split(r"\s{2,}|\t|\|", normalized)
-        parts = [normalize_cell(p) for p in parts if normalize_cell(p)]
-        
-        if len(parts) >= 3:
-            item = strip_bullets(parts[0])
-            check = strip_bullets(parts[1])
-            method = " ".join(parts[2:]).strip()
-            method = strip_bullets(method)
-            
-            # "①", "②", "③" 같은 번호를 점검사항에서 제거
-            if check_item_pattern.match(check):
-                check = check_item_pattern.sub("", check).strip()
-            
-            # "①", "②", "③"로 시작하는 텍스트는 항상 점검사항 (항목 열에 있어도 점검사항으로 처리)
-            if check_item_pattern.match(item) and not check:
-                check = check_item_pattern.sub("", item).strip()
-                item = ""
-            
-            item_is_valid = item and item not in noise_items and item not in bullet_tokens
-            check_is_valid = check and check not in bullet_tokens
-            
-            # 1. 항목이 있으면 현재 항목 업데이트 (이전 entry 저장)
-            if item_is_valid:
-                # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-                if current_entry and current_entry.get("점 검 사 항"):
-                    rows.append(current_entry)
-                current_item = item  # 현재 항목 저장
-                current_entry = None  # 새 항목이 시작되므로 entry 초기화
-            
-            # 2. 점검사항이 있으면 반드시 새 entry 생성
-            if check_is_valid:
-                # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-                if current_entry and current_entry.get("점 검 사 항"):
-                    rows.append(current_entry)
-                
-                # 새 entry 생성 (항목이 비어있으면 이전 항목 유지)
-                if current_item:
-                    # 현재 항목이 있으면 사용
-                    current_entry = {
-                        "항 목": current_item,
-                        "점 검 사 항": check,
-                        "점 검 방 식": method if method else "",
-                    }
-                elif item_is_valid:
-                    # 새 항목이 있으면 사용하고 저장
-                    current_item = item
-                    current_entry = {
-                        "항 목": item,
-                        "점 검 사 항": check,
-                        "점 검 방 식": method if method else "",
-                    }
-                else:
-                    # 항목이 없으면 빈 값
-                    current_entry = {
-                        "항 목": "",
-                        "점 검 사 항": check,
-                        "점 검 방 식": method if method else "",
-                    }
-            elif not current_entry:
-                # current_entry가 없고 점검사항도 없으면 건너뜀
+        for line in lines[header_index + 1:end_index]:
+            normalized = normalize_cell(line)
+            if not normalized:
+                empty_row_count += 1
+                # 연속된 빈 행이 5개 이상이면 표가 끝난 것으로 간주
+                if empty_row_count >= 5 and rows:
+                    break
                 continue
-            elif method:
-                # 점검사항이 없고 점검방식만 있으면 현재 entry에 추가
-                if current_entry:
-                    if current_entry["점 검 방 식"]:
-                        current_entry["점 검 방 식"] += " " + method
+            
+            empty_row_count = 0
+            
+            parts = re.split(r"\s{2,}|\t|\|", normalized)
+            parts = [normalize_cell(p) for p in parts if normalize_cell(p)]
+            
+            if len(parts) >= 3:
+                item = strip_bullets(parts[0])
+                check = strip_bullets(parts[1])
+                method = " ".join(parts[2:]).strip()
+                method = strip_bullets(method)
+                
+                # "①", "②", "③" 같은 번호를 점검사항에서 제거
+                if check_item_pattern.match(check):
+                    check = check_item_pattern.sub("", check).strip()
+                
+                # "①", "②", "③"로 시작하는 텍스트는 항상 점검사항 (항목 열에 있어도 점검사항으로 처리)
+                if check_item_pattern.match(item) and not check:
+                    check = check_item_pattern.sub("", item).strip()
+                    item = ""
+                
+                item_is_valid = item and item not in noise_items and item not in bullet_tokens
+                check_is_valid = check and check not in bullet_tokens
+                
+                # 1. 항목이 있으면 현재 항목 업데이트 (이전 entry 저장)
+                if item_is_valid:
+                    # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
+                    if current_entry and current_entry.get("점 검 사 항"):
+                        rows.append(current_entry)
+                    current_item = item  # 현재 항목 저장
+                    current_entry = None  # 새 항목이 시작되므로 entry 초기화
+                
+                # 2. 점검사항이 있으면 반드시 새 entry 생성
+                if check_is_valid:
+                    # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
+                    if current_entry and current_entry.get("점 검 사 항"):
+                        rows.append(current_entry)
+                    
+                    # 새 entry 생성 (항목이 비어있으면 이전 항목 유지)
+                    if current_item:
+                        # 현재 항목이 있으면 사용
+                        current_entry = {
+                            "항 목": current_item,
+                            "점 검 사 항": check,
+                            "점 검 방 식": method if method else "",
+                        }
+                    elif item_is_valid:
+                        # 새 항목이 있으면 사용하고 저장
+                        current_item = item
+                        current_entry = {
+                            "항 목": item,
+                            "점 검 사 항": check,
+                            "점 검 방 식": method if method else "",
+                        }
                     else:
-                        current_entry["점 검 방 식"] = method
-        elif current_entry and normalized:
-            # 현재 entry가 있고 추가 텍스트가 있으면 점검방식에 추가
-            if current_entry["점 검 방 식"]:
-                current_entry["점 검 방 식"] += " " + normalized
-            else:
-                current_entry["점 검 방 식"] = normalized
+                        # 항목이 없으면 빈 값
+                        current_entry = {
+                            "항 목": "",
+                            "점 검 사 항": check,
+                            "점 검 방 식": method if method else "",
+                        }
+                elif not current_entry:
+                    # current_entry가 없고 점검사항도 없으면 건너뜀
+                    continue
+                elif method:
+                    # 점검사항이 없고 점검방식만 있으면 현재 entry에 추가
+                    if current_entry:
+                        if current_entry["점 검 방 식"]:
+                            current_entry["점 검 방 식"] += " " + method
+                        else:
+                            current_entry["점 검 방 식"] = method
+            elif current_entry and normalized:
+                # 현재 entry가 있고 추가 텍스트가 있으면 점검방식에 추가
+                if current_entry["점 검 방 식"]:
+                    current_entry["점 검 방 식"] += " " + normalized
+                else:
+                    current_entry["점 검 방 식"] = normalized
+        
+        # 마지막 entry 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
+        if current_entry and current_entry.get("점 검 사 항"):
+            rows.append(current_entry)
+        
+        # 이 표의 행들을 전체 결과에 추가
+        all_rows.extend(rows)
     
-    # 마지막 entry 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-    if current_entry and current_entry.get("점 검 사 항"):
-        rows.append(current_entry)
-    
-    return rows
+    return all_rows
 
 
 def parse_table_from_html(html: str, *, stop_when_found: bool = True) -> List[Dict[str, str]]:
@@ -554,8 +557,8 @@ def extract_table_rows_from_hwp(path: Path) -> List[Dict[str, str]]:
                 buffer = io.BytesIO()
                 HTML_TRANSFORM.transform_hwp5_to_xhtml(hwp, buffer)
             html = buffer.getvalue().decode("utf-8", errors="ignore")
-            # 표를 찾으면 즉시 파싱하고 중단
-            rows = parse_table_from_html(html, stop_when_found=True)
+            # 모든 표를 찾도록 변경
+            rows = parse_table_from_html(html, stop_when_found=False)
             if rows:
                 print(f"[정보] HTML 변환으로 {len(rows)}개 행 추출: {path.name}")
                 return rows
@@ -699,6 +702,14 @@ def extract_table_rows_from_path(
         rows = extract_table_rows_from_hwp(path)
         if log and rows:
             log(f"[정보] HWP 파싱 완료: {len(rows)}개 행 발견")
+    elif ext == "pdf":
+        if log:
+            log(f"[정보] PDF 파싱 시작: {path.name}")
+        rows = extract_table_rows_from_file(path)
+        if log and rows:
+            log(f"[정보] PDF 파싱 완료: {len(rows)}개 행 발견")
+        elif log:
+            log(f"[정보] PDF 파싱 완료: 표를 찾지 못함")
     else:
         rows = extract_table_rows_from_file(path)
     if stop_when_found and rows:
@@ -744,13 +755,13 @@ def extract_table_from_attachments(
 
             extracted_rows = extract_table_rows_from_path(
                 dest,
-                stop_when_found=True,
+                stop_when_found=False,  # 모든 표를 찾도록 변경
                 log=log,
             )
             _attachment_cache[url] = extracted_rows
             if extracted_rows:
                 rows.extend(extracted_rows)
-                break
+                # 모든 표를 찾았으므로 break 제거
     return rows
 
 
@@ -815,6 +826,7 @@ def scrape_all(
     limit: Optional[int] = None,
     *,
     skip_table_extraction: bool = False,
+    output_dir: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
     results: List[Dict[str, str]] = []
     seen_ids: set[str] = set()
@@ -853,7 +865,9 @@ def scrape_all(
             if ntt_id and ntt_id in seen_ids:
                 continue
 
-            log(f"[정보] 상세 수집 시작: nttId={ntt_id} | 제목={row.get('제목', '-')}")
+
+            게시글번호 = row.get("번호", "-")
+            log(f"[진행] 게시글 {게시글번호}번 처리 시작: nttId={ntt_id} | 제목={row.get('제목', '-')}")
             detail_data, attachments, table_rows = parse_detail(
                 session,
                 row["상세페이지URL"],
@@ -927,7 +941,15 @@ def scrape_all(
                 results.append(record)
                 new_records += 1
 
-            log(f"[정보] 상세 수집 완료: nttId={ntt_id} (점검사항 {len(table_rows) if table_rows else 0}건)")
+            log(f"[완료] 게시글 {게시글번호}번 수집 완료: nttId={ntt_id} (점검사항 {len(table_rows) if table_rows else 0}건)")
+            
+            # 각 게시글 완료 후 즉시 파일에 저장
+            if output_dir:
+                try:
+                    save_results(results, output_dir)
+                    log(f"[저장] 게시글 {게시글번호}번 결과 저장 완료 (총 {len(results)}개 레코드)")
+                except Exception as exc:
+                    log(f"[경고] 파일 저장 실패: {exc}")
 
             if limit is not None and len(seen_ids) >= limit:
                 break
@@ -1016,6 +1038,7 @@ def main() -> None:
         session,
         limit=args.limit,
         skip_table_extraction=args.skip_attachments,
+        output_dir=output_dir,
     )
     print(f"[정보] 총 {len(results)}건 수집 완료")
 

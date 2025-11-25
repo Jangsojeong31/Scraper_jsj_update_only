@@ -211,14 +211,49 @@ def main():
         with open('fss_results.json', 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
  
-        # CSV도 재생성
+        # CSV도 재생성 (사건이 여러 개인 경우 행 확장)
         import csv
+        csv_rows = []
+        base_fieldnames = ['번호', '제재대상기관', '제재조치요구일', '관련부서', '조회수', '문서유형', '상세페이지URL', 
+                          '제재조치내용', '제재대상', '제재내용']
+        
+        for item in data:
+            incidents = item.get('사건목록', [])
+            
+            if not incidents:
+                # 사건이 없으면 기본 정보만
+                row = {}
+                for field in base_fieldnames:
+                    row[field] = item.get(field, '')
+                row['사건제목'] = ''
+                row['사건내용'] = ''
+                csv_rows.append(row)
+            else:
+                # 사건이 있으면 각 사건마다 행 생성
+                for incident in incidents:
+                    row = {}
+                    for field in base_fieldnames:
+                        row[field] = item.get(field, '')
+                    row['사건제목'] = incident.get('사건제목', '')
+                    row['사건내용'] = incident.get('사건내용', '')
+                    csv_rows.append(row)
+        
+        fieldnames = base_fieldnames + ['사건제목', '사건내용']
         with open('fss_results.csv', 'w', newline='', encoding='utf-8-sig') as f:
-            if data:
-                fieldnames = list(data[0].keys())
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(data)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            
+            for row in csv_rows:
+                csv_row = {}
+                for field in fieldnames:
+                    value = row.get(field, '')
+                    if value is None:
+                        value = ''
+                    value_str = str(value).strip()
+                    if not value_str:
+                        value_str = '-'
+                    csv_row[field] = value_str
+                writer.writerow(csv_row)
  
         print("   ✓ JSON 및 CSV 파일 저장 완료")
     
