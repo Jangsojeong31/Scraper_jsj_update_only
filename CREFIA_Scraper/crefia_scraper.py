@@ -36,7 +36,7 @@ if str(project_root) not in sys.path:
 
 from common.base_scraper import BaseScraper
 from common.file_extractor import FileExtractor
-from common.date_extractor import extract_dates_from_text
+from data_scraper import extract_data_from_text, extract_dates_from_filename
 
 # ---------------- Selenium 다운로드 유틸 ----------------
 def init_selenium(download_dir: str, headless: bool = False) -> webdriver.Chrome:
@@ -118,289 +118,340 @@ class CrefiaScraper(BaseScraper):
             left_right_containers = container.select("div.left, div.right")
             
             for lr_container in left_right_containers:
-                category_title_elem = (
-                    lr_container.select_one("div > div.title.dia_bul > h4") or
-                    lr_container.select_one("div.title.dia_bul > h4, h4")
-                )
+                # div.right 또는 div.left 안에 여러 div.cont_box가 있을 수 있음
+                # 각 cont_box를 개별적으로 처리
+                cont_boxes = lr_container.select("div.cont_box")
                 
-                if not category_title_elem:
-                    continue
-                
-                category_idx += 1
-                category_title = category_title_elem.get_text(strip=True)
-                print(f"\n[{category_idx}] 카테고리: {category_title}")
+                for cont_box in cont_boxes:
+                    # 카테고리 제목 찾기 (여러 방법 시도)
+                    category_title_elem = (
+                        cont_box.select_one("div.title.dia_bul > h4") or
+                        cont_box.select_one(".title.dia_bul > h4") or
+                        cont_box.select_one("div.title > h4") or
+                        cont_box.select_one("h4")
+                    )
+                    
+                    if not category_title_elem:
+                        continue
+                    
+                    category_idx += 1
+                    category_title = category_title_elem.get_text(strip=True)
+                    print(f"\n[{category_idx}] 카테고리: {category_title}")
 
-                skip_categories = [
-                    "표준약관", 
-                ]
-                if category_title in skip_categories:
-                    print(f"  ⚠ '{category_title}' 카테고리는 스킵합니다.")
-                    continue
-                
-                list_box = (lr_container.select_one("div > div.list_box") or
-                            lr_container.select_one("div.list_box"))
-                if not list_box:
-                    print("  ⚠ 목록 박스를 찾지 못했습니다.")
-                    continue
-                
-                # ---- BeautifulSoup에서 링크 텍스트 및 onclick 정보 추출 ----
-                links = list_box.select("ul > li > a")
-                link_data = []  # (text, filename, file_type) 튜플 리스트
-                for link in links:
-                    title_elem = link.select_one("p")
-                    text = title_elem.get_text(strip=True) if title_elem else link.get_text(strip=True)
-                    if text:
-                        # onclick 속성에서 파일명과 타입 추출
-                        onclick = link.get("onclick", "")
-                        filename = ""
-                        file_type = "selfRegulation"  # 기본값
-                        if onclick:
-                            # fn_downloadFile('파일명.hwp', 'selfRegulation') 형식 파싱
-                            match = re.search(
-                                r"fn_downloadFile\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]",
-                                onclick
-                            )
-                            if match:
-                                filename = match.group(1)
-                                file_type = match.group(2)
-                                print(f"  📎 onclick에서 추출: 파일명={filename}, 타입={file_type}")
-                        link_data.append((text, filename, file_type))
-
-                print(f"  링크 수: {len(link_data)}개")
-                
-                # ---- Selenium으로 실제 클릭 ----
-                for link_idx, (text, filename, file_type) in enumerate(link_data, 1):
-                    # limit 체크 (0이면 전체 처리)
-                    if limit > 0 and item_count >= limit:
-                        print(f"  ⚠ limit({limit}개) 도달, 처리 중단")
-                        break
-                    # 링크 찾기 (여러 방법 시도)
-                    selenium_link = None
-                    try:
-                        # 방법 1: LINK_TEXT로 찾기
-                        selenium_link = driver.find_element(By.LINK_TEXT, text)
-                        print(f"  ✓ LINK_TEXT로 링크 찾음: {text}")
-                    except Exception:
-                        try:
-                            # 방법 2: 부분 텍스트로 찾기
-                            selenium_link = driver.find_element(
-                                By.PARTIAL_LINK_TEXT, text
-                            )
-                            print(f"  ✓ PARTIAL_LINK_TEXT로 링크 찾음: {text}")
-                        except Exception:
-                            try:
-                                # 방법 3: XPath로 찾기
-                                xpath = f"//a[contains(text(), '{text}')]"
-                                selenium_link = driver.find_element(By.XPATH, xpath)
-                                print(f"  ✓ XPath로 링크 찾음: {text}")
-                            except Exception as e:
-                                print(f"  ⚠ 모든 방법으로 '{text}' 링크를 찾지 못함: {e}")
-                                continue
-
-                    # onclick에서 파일명 재확인 (Selenium에서)
-                    if not filename:
-                        try:
-                            selenium_onclick = selenium_link.get_attribute("onclick")
-                            if selenium_onclick:
+                    skip_categories = [
+                        "표준약관", 
+                    ]
+                    if category_title in skip_categories:
+                        print(f"  ⚠ '{category_title}' 카테고리는 스킵합니다.")
+                        continue
+                    
+                    # list_box 찾기 (여러 방법 시도)
+                    list_box = (
+                        cont_box.select_one("div.list_box") or
+                        cont_box.select_one(".list_box")
+                    )
+                    if not list_box:
+                        print("  ⚠ 목록 박스를 찾지 못했습니다.")
+                        continue
+                    
+                    # ---- BeautifulSoup에서 링크 텍스트 및 onclick 정보 추출 ----
+                    links = list_box.select("ul > li > a")
+                    link_data = []  # (text, filename, file_type) 튜플 리스트
+                    for link in links:
+                        title_elem = link.select_one("p")
+                        text = title_elem.get_text(strip=True) if title_elem else link.get_text(strip=True)
+                        if text:
+                            # onclick 속성에서 파일명과 타입 추출
+                            onclick = link.get("onclick", "")
+                            filename = ""
+                            file_type = "selfRegulation"  # 기본값
+                            if onclick:
+                                # fn_downloadFile('파일명.hwp', 'selfRegulation') 형식 파싱
                                 match = re.search(
                                     r"fn_downloadFile\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]",
-                                    selenium_onclick
+                                    onclick
                                 )
                                 if match:
                                     filename = match.group(1)
                                     file_type = match.group(2)
-                                    print(f"  📎 Selenium에서 재추출: 파일명={filename}, 타입={file_type}")
-                        except Exception as e:
-                            print(f"  ⚠ onclick 재확인 실패: {e}")
+                                    print(f"  📎 onclick에서 추출: 파일명={filename}, 타입={file_type}")
+                            link_data.append((text, filename, file_type))
 
-                    # 다운로드 URL 구성
-                    # 패턴: /common/downloadFile.do?fileName=<파일명(UTF-8 인코딩)>&fileType=selfRegulation&keyNum=&date=&pFileEnc=
-                    download_url = ""
-                    file_name = filename  # 저장할 파일명
-                    if filename:
+                    print(f"  링크 수: {len(link_data)}개")
+                    
+                    # ---- Selenium으로 실제 클릭 ----
+                    for link_idx, (text, filename, file_type) in enumerate(link_data, 1):
+                        # limit 체크 (0이면 전체 처리)
+                        if limit > 0 and item_count >= limit:
+                            print(f"  ⚠ limit({limit}개) 도달, 처리 중단")
+                            break
+                        # 링크 찾기 (여러 방법 시도)
+                        selenium_link = None
                         try:
-                            from urllib.parse import quote
-                            # 파일명을 UTF-8로 인코딩
-                            encoded_filename = quote(
-                                filename, encoding='utf-8'
-                            )
-                            download_url = (
-                                f"{self.BASE_URL}/common/downloadFile.do"
-                                f"?fileName={encoded_filename}"
-                                f"&fileType={file_type}"
-                                f"&keyNum="
-                                f"&date="
-                                f"&pFileEnc="
-                            )
-                            print(f"  📎 다운로드 URL 구성: {download_url}")
-                        except Exception as e:
-                            print(f"  ⚠ URL 구성 실패: {e}")
-                    else:
-                        print("  ⚠ 파일명을 찾을 수 없어 URL 구성 불가")
+                            # 방법 1: LINK_TEXT로 찾기
+                            selenium_link = driver.find_element(By.LINK_TEXT, text)
+                            print(f"  ✓ LINK_TEXT로 링크 찾음: {text}")
+                        except Exception:
+                            try:
+                                # 방법 2: 부분 텍스트로 찾기
+                                selenium_link = driver.find_element(
+                                    By.PARTIAL_LINK_TEXT, text
+                                )
+                                print(f"  ✓ PARTIAL_LINK_TEXT로 링크 찾음: {text}")
+                            except Exception:
+                                try:
+                                    # 방법 3: XPath로 찾기
+                                    xpath = f"//a[contains(text(), '{text}')]"
+                                    selenium_link = driver.find_element(By.XPATH, xpath)
+                                    print(f"  ✓ XPath로 링크 찾음: {text}")
+                                except Exception as e:
+                                    print(f"  ⚠ 모든 방법으로 '{text}' 링크를 찾지 못함: {e}")
+                                    continue
 
-                    content = ""
-                    downloaded_file = None
-                    filepath = None
+                        # onclick에서 파일명 재확인 (Selenium에서)
+                        if not filename:
+                            try:
+                                selenium_onclick = selenium_link.get_attribute("onclick")
+                                if selenium_onclick:
+                                    match = re.search(
+                                        r"fn_downloadFile\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]",
+                                        selenium_onclick
+                                    )
+                                    if match:
+                                        filename = match.group(1)
+                                        file_type = match.group(2)
+                                        print(f"  📎 Selenium에서 재추출: 파일명={filename}, 타입={file_type}")
+                            except Exception as e:
+                                print(f"  ⚠ onclick 재확인 실패: {e}")
 
-                    # 방법 1: URL로 직접 다운로드 시도
-                    if download_url and filename:
-                        print(f"📥 방법 1: URL로 다운로드 시도: {text}")
-                        print(f"  📎 다운로드 URL: {download_url}")
-                        
-                        try:
-                            # 간단한 GET 요청으로 다운로드
-                            response = requests.get(download_url, timeout=15)
+                        # 다운로드 URL 구성
+                        # 패턴: /common/downloadFile.do?fileName=<파일명(UTF-8 인코딩)>&fileType=selfRegulation&keyNum=&date=&pFileEnc=
+                        download_url = ""
+                        file_name = filename  # 저장할 파일명
+                        if filename:
+                            try:
+                                from urllib.parse import quote
+                                # 파일명을 UTF-8로 인코딩
+                                encoded_filename = quote(
+                                    filename, encoding='utf-8'
+                                )
+                                download_url = (
+                                    f"{self.BASE_URL}/common/downloadFile.do"
+                                    f"?fileName={encoded_filename}"
+                                    f"&fileType={file_type}"
+                                    f"&keyNum="
+                                    f"&date="
+                                    f"&pFileEnc="
+                                )
+                                print(f"  📎 다운로드 URL 구성: {download_url}")
+                            except Exception as e:
+                                print(f"  ⚠ URL 구성 실패: {e}")
+                        else:
+                            print("  ⚠ 파일명을 찾을 수 없어 URL 구성 불가")
+
+                        content = ""
+                        downloaded_file = None
+                        filepath = None
+
+                        # 방법 1: URL로 직접 다운로드 시도
+                        if download_url and filename:
+                            print(f"📥 방법 1: URL로 다운로드 시도: {text}")
+                            print(f"  📎 다운로드 URL: {download_url}")
                             
-                            if response.status_code == 200:
-                                filepath = os.path.join(self.download_dir, filename)
-                                with open(filepath, "wb") as f:
-                                    f.write(response.content)
-                                print(f"  ✅ 파일 저장 완료: {filepath}")
-                                downloaded_file = filename
-                                if not file_name:
-                                    file_name = filename
-                            else:
-                                print(f"  ⚠ 다운로드 실패: {response.status_code}, {response.text[:200]}")
-                        except Exception as e:
-                            print(f"  ⚠ URL 다운로드 중 오류: {e}")
-
-                    # 방법 2: driver 클릭으로 다운로드 (방법 1 실패 시)
-                    if not downloaded_file:
-                        print(f"📥 방법 2: driver 클릭으로 다운로드: {text}")
-                        
-                        # 다운로드 감지
-                        download_dir_abs = os.path.abspath(self.download_dir)
-                        print(f"  📂 다운로드 디렉토리: {download_dir_abs}")
-                        before = set(os.listdir(self.download_dir))
-                        print(f"  📋 다운로드 전 파일 수: {len(before)}개")
-                        
-                        # 클릭 전 현재 URL 저장
-                        current_url = driver.current_url
-                        
-                        try:
-                            # 클릭 실행
-                            driver.execute_script("arguments[0].click();", selenium_link)
-                            time.sleep(2)  # 클릭 후 초기 대기
-                            
-                            # 페이지 이동 확인
-                            new_url = driver.current_url
-                            if new_url != current_url:
-                                print(f"  ⚠ 페이지 이동 발생: {current_url} -> {new_url}")
-                                # 원래 페이지로 돌아가기
-                                driver.back()
-                                time.sleep(2)
-                        except Exception as e:
-                            print(f"  ⚠ 클릭 실패: {e}")
-
-                        timeout = 40
-                        start_time = time.time()
-                        crdownload_count = 0
-
-                        while time.time() - start_time < timeout:
-                            after = set(os.listdir(self.download_dir))
-                            new_files = after - before
-
-                            if new_files:
-                                for new_file in new_files:
-                                    print(f"  🔍 새 파일 발견: {new_file}")
-                                    if new_file.endswith(".crdownload"):
-                                        crdownload_count += 1
-                                        print(f"  ⏳ 다운로드 진행 중... ({crdownload_count}초)")
-                                    else:
-                                        downloaded_file = new_file
-                                        print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
-                                        break
+                            try:
+                                # 간단한 GET 요청으로 다운로드
+                                response = requests.get(download_url, timeout=15)
                                 
-                                if downloaded_file:
-                                    break
-                            else:
-                                elapsed = int(time.time() - start_time)
-                                if elapsed % 5 == 0:  # 5초마다 로그
-                                    print(f"  ⏳ 다운로드 대기 중... ({elapsed}초)")
+                                if response.status_code == 200:
+                                    filepath = os.path.join(self.download_dir, filename)
+                                    with open(filepath, "wb") as f:
+                                        f.write(response.content)
+                                    print(f"  ✅ 파일 저장 완료: {filepath}")
+                                    downloaded_file = filename
+                                    if not file_name:
+                                        file_name = filename
+                                else:
+                                    print(f"  ⚠ 다운로드 실패: {response.status_code}, {response.text[:200]}")
+                            except Exception as e:
+                                print(f"  ⚠ URL 다운로드 중 오류: {e}")
+
+                        # 방법 2: driver 클릭으로 다운로드 (방법 1 실패 시)
+                        if not downloaded_file:
+                            print(f"📥 방법 2: driver 클릭으로 다운로드: {text}")
                             
-                            time.sleep(1)
-
-                        if downloaded_file is None:
-                            print(f"❌ driver 클릭 다운로드도 실패: {text}")
-                            print(f"  📋 다운로드 후 파일 수: {len(after) if 'after' in locals() else len(before)}개")
-                            # .crdownload 파일이 남아있는지 확인
-                            crdownload_files = [
-                                f for f in os.listdir(self.download_dir)
-                                if f.endswith(".crdownload")
-                            ]
-                            if crdownload_files:
-                                print(f"  ⚠ 미완료 다운로드 파일 발견: {crdownload_files}")
-                            continue
-
-                        filepath = os.path.join(self.download_dir, downloaded_file)
-                        # onclick에서 추출한 파일명이 없으면 다운로드된 파일명 사용
-                        if not file_name:
-                            file_name = downloaded_file
-                        print(f"  ✅ driver 클릭 다운로드 완료: {filepath}")
-                        print(f"  📝 저장할 파일명: {file_name}")
-
-                    # FileExtractor로 내용 추출
-                    content = ""
-                    enactment_date = ""
-                    revision_date = ""
-                    
-                    try:
-                        full_content = self.file_extractor.extract_hwp_content(filepath)
-                        original_length = len(full_content)
-                        
-                        # 날짜 추출: 초반 100자(1페이지) 이내에서만 추출
-                        first_page = full_content[:100] if full_content else ""
-                        
-                        if first_page:
-                            enactment_date, revision_date = extract_dates_from_text(first_page)
+                            # 다운로드 감지
+                            download_dir_abs = os.path.abspath(self.download_dir)
+                            print(f"  📂 다운로드 디렉토리: {download_dir_abs}")
+                            before = set(os.listdir(self.download_dir))
+                            print(f"  📋 다운로드 전 파일 수: {len(before)}개")
                             
-                            if enactment_date:
-                                print(f"  📅 제정일 추출: {enactment_date}")
-                            if revision_date:
-                                print(f"  📅 최근 개정일 추출: {revision_date}")
+                            # 클릭 전 현재 URL 저장
+                            current_url = driver.current_url
                             
-                            if not enactment_date and not revision_date:
-                                print("  ⚠ 1페이지(100자) 이내에 제정일/개정일이 없습니다.")
-                        
-                        # content를 500자로 제한
-                        content = full_content[:500]
-                        print(f"\n📄 {text} 파일 내용 추출 완료 "
-                              f"(원본: {original_length}자, 저장: {len(content)}자)")
-                    except Exception as e:
-                        content = f"파일 읽기 실패: {str(e)}"
-                        print(f"  ⚠ 파일 읽기 실패: {e}")
+                            try:
+                                # 클릭 실행
+                                driver.execute_script("arguments[0].click();", selenium_link)
+                                time.sleep(2)  # 클릭 후 초기 대기
+                                
+                                # 페이지 이동 확인
+                                new_url = driver.current_url
+                                if new_url != current_url:
+                                    print(f"  ⚠ 페이지 이동 발생: {current_url} -> {new_url}")
+                                    # 원래 페이지로 돌아가기
+                                    driver.back()
+                                    time.sleep(2)
+                            except Exception as e:
+                                print(f"  ⚠ 클릭 실패: {e}")
 
-                    # 다운로드된 파일 정리 (옵션)
-                    if self.cleanup_downloads:
+                            timeout = 40
+                            start_time = time.time()
+                            crdownload_count = 0
+
+                            while time.time() - start_time < timeout:
+                                after = set(os.listdir(self.download_dir))
+                                new_files = after - before
+
+                                if new_files:
+                                    for new_file in new_files:
+                                        print(f"  🔍 새 파일 발견: {new_file}")
+                                        if new_file.endswith(".crdownload"):
+                                            crdownload_count += 1
+                                            print(f"  ⏳ 다운로드 진행 중... ({crdownload_count}초)")
+                                        else:
+                                            downloaded_file = new_file
+                                            print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
+                                            break
+                                    
+                                    if downloaded_file:
+                                        break
+                                else:
+                                    elapsed = int(time.time() - start_time)
+                                    if elapsed % 5 == 0:  # 5초마다 로그
+                                        print(f"  ⏳ 다운로드 대기 중... ({elapsed}초)")
+                                
+                                time.sleep(1)
+
+                            if downloaded_file is None:
+                                print(f"❌ driver 클릭 다운로드도 실패: {text}")
+                                print(f"  📋 다운로드 후 파일 수: {len(after) if 'after' in locals() else len(before)}개")
+                                # .crdownload 파일이 남아있는지 확인
+                                crdownload_files = [
+                                    f for f in os.listdir(self.download_dir)
+                                    if f.endswith(".crdownload")
+                                ]
+                                if crdownload_files:
+                                    print(f"  ⚠ 미완료 다운로드 파일 발견: {crdownload_files}")
+                                continue
+
+                            filepath = os.path.join(self.download_dir, downloaded_file)
+                            # onclick에서 추출한 파일명이 없으면 다운로드된 파일명 사용
+                            if not file_name:
+                                file_name = downloaded_file
+                            print(f"  ✅ driver 클릭 다운로드 완료: {filepath}")
+                            print(f"  📝 저장할 파일명: {file_name}")
+
+                        # FileExtractor로 내용 추출
+                        content = ""
+                        enactment_date = ""
+                        revision_date = ""
+                        department = ""
+                        
+                        # 1단계: 파일명에서 날짜 추출 시도
+                        filename_enactment = ""
+                        filename_revision = ""
+                        if file_name:
+                            filename_enactment, filename_revision = extract_dates_from_filename(file_name)
+                            if filename_enactment:
+                                print(f"  📅 제정일 추출 (파일명): {filename_enactment}")
+                            if filename_revision:
+                                print(f"  📅 최근 개정일 추출 (파일명): {filename_revision}")
+                        
                         try:
-                            os.remove(filepath)
-                            print(f"  🗑️ 다운로드 파일 삭제: {file_name}")
+                            full_content = self.file_extractor.extract_hwp_content(filepath)
+                            original_length = len(full_content)
+                            
+                            # 2단계: 파일 내용에서 데이터 추출
+                            extract_text = full_content[:500] if full_content else ""
+                            
+                            if extract_text:
+                                content_enactment, content_revision, content_department = extract_data_from_text(extract_text)
+                                
+                                # 파일 내부 데이터를 우선 사용 (파일명과 다를 경우 파일 내부 우선)
+                                if content_enactment:
+                                    if filename_enactment and filename_enactment != content_enactment:
+                                        print(f"  ⚠ 제정일 불일치 - 파일명: {filename_enactment}, 파일내용: {content_enactment} (파일내용 사용)")
+                                    enactment_date = content_enactment
+                                    print(f"  📅 제정일 추출 (파일내용): {enactment_date}")
+                                elif filename_enactment:
+                                    enactment_date = filename_enactment
+                                    print(f"  📅 제정일 추출 (파일명, 파일내용 없음): {enactment_date}")
+                                
+                                if content_revision:
+                                    if filename_revision and filename_revision != content_revision:
+                                        print(f"  ⚠ 개정일 불일치 - 파일명: {filename_revision}, 파일내용: {content_revision} (파일내용 사용)")
+                                    revision_date = content_revision
+                                    print(f"  📅 최근 개정일 추출 (파일내용): {revision_date}")
+                                elif filename_revision:
+                                    revision_date = filename_revision
+                                    print(f"  📅 최근 개정일 추출 (파일명, 파일내용 없음): {revision_date}")
+                                
+                                if content_department:
+                                    department = content_department
+                                    print(f"  🏢 소관부서 추출: {department}")
+                                
+                                if not enactment_date and not revision_date and not department:
+                                    print("  ⚠ 파일명과 파일내용(500자) 모두에서 제정일/개정일/소관부서를 찾지 못했습니다.")
+                            else:
+                                # 파일 내용을 읽을 수 없는 경우 파일명에서 추출한 값 사용
+                                if filename_enactment:
+                                    enactment_date = filename_enactment
+                                if filename_revision:
+                                    revision_date = filename_revision
+                            
+                            # content를 500자로 제한
+                            content = full_content[:500]
+                            print(f"\n📄 {text} 파일 내용 추출 완료 "
+                                  f"(원본: {original_length}자, 저장: {len(content)}자)")
                         except Exception as e:
-                            print(f"  ⚠ 파일 삭제 실패: {e}")
+                            content = f"파일 읽기 실패: {str(e)}"
+                            print(f"  ⚠ 파일 읽기 실패: {e}")
+                            # 파일 읽기 실패 시 파일명에서 추출한 값 사용
+                            if filename_enactment:
+                                enactment_date = filename_enactment
+                            if filename_revision:
+                                revision_date = filename_revision
 
-                    item: Dict[str, str] = {
-                        "no": str(item_count + 1),
-                        "title": text,
-                        "regulation_name": text,
-                        "organization": "여신금융협회",
-                        "category": category_title,
-                        "detail_link": download_url,
-                        "file_download_link": download_url,
-                        "file_name": file_name,
-                        "content": content,
-                        "enactment_date": enactment_date,
-                        "revision_date": revision_date,
-                        "department": "",
-                    }
-                    
-                    results.append(item)
-                    item_count += 1
-                    
-                    print(f"    [{link_idx}] {text[:50]}... -> {file_name[:60]}")
-                    
-                    # delay 적용 (서버 부하 방지)
-                    if link_idx < len(link_data):
-                        time.sleep(self.delay)
+                        # 다운로드된 파일 정리 (옵션)
+                        if self.cleanup_downloads:
+                            try:
+                                os.remove(filepath)
+                                print(f"  🗑️ 다운로드 파일 삭제: {file_name}")
+                            except Exception as e:
+                                print(f"  ⚠ 파일 삭제 실패: {e}")
+
+                        item: Dict[str, str] = {
+                            "no": str(item_count + 1),
+                            "title": text,
+                            "regulation_name": text,
+                            "organization": "여신금융협회",
+                            "category": category_title,
+                            "detail_link": download_url,
+                            "file_download_link": download_url,
+                            "file_name": file_name,
+                            "content": content,
+                            "enactment_date": enactment_date,
+                            "revision_date": revision_date,
+                            "department": department,
+                        }
+                        
+                        results.append(item)
+                        item_count += 1
+                        
+                        print(f"    [{link_idx}] {text[:50]}... -> {file_name[:60]}")
+                        
+                        # delay 적용 (서버 부하 방지)
+                        if link_idx < len(link_data):
+                            time.sleep(self.delay)
         
         print(f"\n총 {len(results)}개 항목 추출 완료")
         return results
