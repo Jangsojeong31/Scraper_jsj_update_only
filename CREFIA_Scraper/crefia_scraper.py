@@ -81,11 +81,12 @@ class CrefiaScraper(BaseScraper):
     BASE_URL = "https://www.crefia.or.kr"
     LIST_URL = "https://www.crefia.or.kr/portal/infocenter/regulation/selfRegulation.xx"
     
-    def __init__(self, delay: float = 1.0, cleanup_downloads: bool = False):
+    def __init__(self, delay: float = 1.0, cleanup_downloads: bool = False, clean_downloads: bool = False):
         """
         Args:
             delay: 요청 간 대기 시간 (초)
             cleanup_downloads: 다운로드된 파일을 내용 추출 후 삭제할지 여부
+            clean_downloads: 크롤링 시작 전 downloads 폴더를 정리할지 여부
         """
         super().__init__(delay)
         self.download_dir = os.path.join("output", "downloads")
@@ -96,7 +97,31 @@ class CrefiaScraper(BaseScraper):
             session=self.session
         )
         self.cleanup_downloads = cleanup_downloads
+        self.clean_downloads = clean_downloads
+        
+        if self.clean_downloads:
+            self._clean_downloads_folder()
+        
         print("다운로드 폴더 내용:", os.listdir(self.download_dir))
+    
+    def _clean_downloads_folder(self):
+        """downloads 폴더의 모든 파일 삭제"""
+        try:
+            files = os.listdir(self.download_dir)
+            if files:
+                print(f"🗑️ downloads 폴더 정리 중... ({len(files)}개 파일)")
+                for file in files:
+                    file_path = os.path.join(self.download_dir, file)
+                    if os.path.isfile(file_path):
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            print(f"  ⚠ 파일 삭제 실패: {file} - {e}")
+                print("✅ downloads 폴더 정리 완료")
+            else:
+                print("📂 downloads 폴더가 비어있습니다.")
+        except Exception as e:
+            print(f"⚠ downloads 폴더 정리 중 오류: {e}")
     
     # ---------------- 목록 추출 ----------------
     def extract_list_items(
@@ -255,25 +280,33 @@ class CrefiaScraper(BaseScraper):
 
                         # 방법 1: URL로 직접 다운로드 시도
                         if download_url and filename:
-                            print(f"📥 방법 1: URL로 다운로드 시도: {text}")
-                            print(f"  📎 다운로드 URL: {download_url}")
+                            filepath = os.path.join(self.download_dir, filename)
                             
-                            try:
-                                # 간단한 GET 요청으로 다운로드
-                                response = requests.get(download_url, timeout=15)
+                            # 이미 같은 파일이 존재하는지 확인
+                            if os.path.exists(filepath):
+                                print(f"  ⏭️ 파일이 이미 존재합니다: {filename} (건너뜀)")
+                                downloaded_file = filename
+                                if not file_name:
+                                    file_name = filename
+                            else:
+                                print(f"📥 방법 1: URL로 다운로드 시도: {text}")
+                                print(f"  📎 다운로드 URL: {download_url}")
                                 
-                                if response.status_code == 200:
-                                    filepath = os.path.join(self.download_dir, filename)
-                                    with open(filepath, "wb") as f:
-                                        f.write(response.content)
-                                    print(f"  ✅ 파일 저장 완료: {filepath}")
-                                    downloaded_file = filename
-                                    if not file_name:
-                                        file_name = filename
-                                else:
-                                    print(f"  ⚠ 다운로드 실패: {response.status_code}, {response.text[:200]}")
-                            except Exception as e:
-                                print(f"  ⚠ URL 다운로드 중 오류: {e}")
+                                try:
+                                    # 간단한 GET 요청으로 다운로드
+                                    response = requests.get(download_url, timeout=15)
+                                    
+                                    if response.status_code == 200:
+                                        with open(filepath, "wb") as f:
+                                            f.write(response.content)
+                                        print(f"  ✅ 파일 저장 완료: {filepath}")
+                                        downloaded_file = filename
+                                        if not file_name:
+                                            file_name = filename
+                                    else:
+                                        print(f"  ⚠ 다운로드 실패: {response.status_code}, {response.text[:200]}")
+                                except Exception as e:
+                                    print(f"  ⚠ URL 다운로드 중 오류: {e}")
 
                         # 방법 2: driver 클릭으로 다운로드 (방법 1 실패 시)
                         if not downloaded_file:
@@ -311,16 +344,23 @@ class CrefiaScraper(BaseScraper):
                                 after = set(os.listdir(self.download_dir))
                                 new_files = after - before
 
-                                if new_files:
-                                    for new_file in new_files:
-                                        print(f"  🔍 새 파일 발견: {new_file}")
-                                        if new_file.endswith(".crdownload"):
-                                            crdownload_count += 1
-                                            print(f"  ⏳ 다운로드 진행 중... ({crdownload_count}초)")
+                            if new_files:
+                                for new_file in new_files:
+                                    print(f"  🔍 새 파일 발견: {new_file}")
+                                    if new_file.endswith(".crdownload"):
+                                        crdownload_count += 1
+                                        print(f"  ⏳ 다운로드 진행 중... ({crdownload_count}초)")
+                                    else:
+                                        # 이미 같은 파일명이 존재하는지 확인
+                                        new_file_path = os.path.join(self.download_dir, new_file)
+                                        if filename and os.path.exists(os.path.join(self.download_dir, filename)):
+                                            # 기대한 파일명과 다를 수 있으므로, 새로 다운로드된 파일은 유지
+                                            downloaded_file = new_file
+                                            print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
                                         else:
                                             downloaded_file = new_file
                                             print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
-                                            break
+                                        break
                                     
                                     if downloaded_file:
                                         break
@@ -376,24 +416,24 @@ class CrefiaScraper(BaseScraper):
                             if extract_text:
                                 content_enactment, content_revision, content_department = extract_data_from_text(extract_text)
                                 
-                                # 파일 내부 데이터를 우선 사용 (파일명과 다를 경우 파일 내부 우선)
-                                if content_enactment:
-                                    if filename_enactment and filename_enactment != content_enactment:
-                                        print(f"  ⚠ 제정일 불일치 - 파일명: {filename_enactment}, 파일내용: {content_enactment} (파일내용 사용)")
-                                    enactment_date = content_enactment
-                                    print(f"  📅 제정일 추출 (파일내용): {enactment_date}")
-                                elif filename_enactment:
+                                # 파일명 데이터를 우선 사용 (파일명과 다를 경우 파일명 우선)
+                                if filename_enactment:
+                                    if content_enactment and filename_enactment != content_enactment:
+                                        print(f"  ⚠ 제정일 불일치 - 파일명: {filename_enactment}, 파일내용: {content_enactment} (파일명 사용)")
                                     enactment_date = filename_enactment
-                                    print(f"  📅 제정일 추출 (파일명, 파일내용 없음): {enactment_date}")
+                                    print(f"  📅 제정일 추출 (파일명): {enactment_date}")
+                                elif content_enactment:
+                                    enactment_date = content_enactment
+                                    print(f"  📅 제정일 추출 (파일내용, 파일명 없음): {enactment_date}")
                                 
-                                if content_revision:
-                                    if filename_revision and filename_revision != content_revision:
-                                        print(f"  ⚠ 개정일 불일치 - 파일명: {filename_revision}, 파일내용: {content_revision} (파일내용 사용)")
-                                    revision_date = content_revision
-                                    print(f"  📅 최근 개정일 추출 (파일내용): {revision_date}")
-                                elif filename_revision:
+                                if filename_revision:
+                                    if content_revision and filename_revision != content_revision:
+                                        print(f"  ⚠ 개정일 불일치 - 파일명: {filename_revision}, 파일내용: {content_revision} (파일명 사용)")
                                     revision_date = filename_revision
-                                    print(f"  📅 최근 개정일 추출 (파일명, 파일내용 없음): {revision_date}")
+                                    print(f"  📅 최근 개정일 추출 (파일명): {revision_date}")
+                                elif content_revision:
+                                    revision_date = content_revision
+                                    print(f"  📅 최근 개정일 추출 (파일내용, 파일명 없음): {revision_date}")
                                 
                                 if content_department:
                                     department = content_department
@@ -553,9 +593,15 @@ if __name__ == "__main__":
         "--cleanup", action="store_true",
         help="다운로드된 파일을 내용 추출 후 삭제"
     )
+    
+    parser.add_argument(
+        "--clean-downloads", action="store_true",
+        help="크롤링 시작 전 downloads 폴더의 모든 파일 삭제"
+    )
+    
     args = parser.parse_args()
     
-    crawler = CrefiaScraper(cleanup_downloads=args.cleanup)
+    crawler = CrefiaScraper(cleanup_downloads=args.cleanup, clean_downloads=args.clean_downloads)
     results = crawler.crawl_self_regulation_status(limit=args.limit)
     print(f"\n추출된 데이터: {len(results)}개")
     save_crefia_results(results)
