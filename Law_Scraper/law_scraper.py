@@ -695,11 +695,13 @@ def main():
     parser.add_argument('--query', '-q', type=str, default='', help='법령명 키워드 (예: 환경)')
     parser.add_argument('--limit', type=int, default=0, help='검색 목록에서 가져올 개수 제한 (0=전체)')
     parser.add_argument('--details-limit', type=int, default=0, help='상세 내용 스크래핑 개수 제한 (0=전체)')
+    parser.add_argument('--content', type=int, default=0, help='본문 길이 제한 (0=제한 없음, 문자 수)')
     args = parser.parse_args()
 
     keyword = args.query.strip()
     list_limit = max(0, int(args.limit))
     details_limit = max(0, int(args.details_limit))
+    content_limit = max(0, int(args.content))
 
     crawler = LawGoKrScraper(delay=1.0)
     
@@ -1018,15 +1020,24 @@ def main():
             else:
                 print(f"   내용: 없음")
         
+        def truncate_content(text: str) -> str:
+            if not text:
+                return ''
+            if content_limit and len(text) > content_limit:
+                return text[:content_limit]
+            return text
+
         for item in all_results:
             # 원본 법령명 우선 사용 (괄호 포함), 없으면 검색 결과의 법령명 사용
             regulation_name = item.get('original_law_name', '') or item.get('regulation_name', '') or item.get('law_name', '')
+            full_content = item.get('content', item.get('law_content', ''))
+            truncated_content = truncate_content(full_content)
             
             law_item = {
                 '번호': item.get('no', ''),
                 '규정명': regulation_name,  # 원본 법령명 (괄호 포함) 사용
                 '기관명': item.get('organization', '법제처'),
-                '본문': item.get('content', item.get('law_content', '')),
+                '본문': truncated_content,
                 '제정일': item.get('enactment_date', item.get('promulgation_date', '')),
                 '최근 개정일': item.get('revision_date', item.get('enforcement_date', '')),
                 '소관부서': item.get('department', item.get('ministry', '')),
@@ -1043,21 +1054,77 @@ def main():
         'total_count': len(law_results),
         'results': law_results
         }
+    # law_results에 CSV 목록 전체를 반영 (미수집 항목은 빈 값으로 채움)
+    def _normalize_name(name: str) -> str:
+        import re
+        return re.sub(r'[\s\W]+', '', (name or '').strip()).lower()
+
+    final_results: List[Dict] = []
+    if crawler.law_items:
+        scraped_map = {}
+        scraped_norm_map = {}
+        for item in law_results:
+            name = (item.get('규정명') or '').strip()
+            if not name:
+                continue
+            if name not in scraped_map:
+                scraped_map[name] = item
+            norm_name = _normalize_name(name)
+            if norm_name and norm_name not in scraped_norm_map:
+                scraped_norm_map[norm_name] = item
+
+        for target in crawler.law_items:
+            if isinstance(target, dict):
+                original_name = (target.get('법령명') or '').strip()
+            else:
+                original_name = str(target).strip()
+
+            matched_item = scraped_map.get(original_name)
+            if not matched_item and original_name:
+                matched_item = scraped_norm_map.get(_normalize_name(original_name))
+
+            if matched_item:
+                # 이미 truncate된 값이지만 safety 차원에서 재확인
+                matched_item = matched_item.copy()
+                matched_item['본문'] = truncate_content(matched_item.get('본문', ''))
+                final_results.append(matched_item)
+            else:
+                final_results.append(
+                    {
+                        '번호': '',
+                        '규정명': original_name,
+                        '기관명': '법제처',
+                        '본문': '',
+                        '제정일': '',
+                        '최근 개정일': '',
+                        '소관부서': '',
+                        '파일 다운로드 링크': '',
+                        '파일 이름': '',
+                    }
+                )
+    else:
+        final_results = law_results
+
+    total_export_count = len(final_results)
+
     # 파일명을 스크래퍼 이름에 맞춰 통일성 있게 변경
     json_name = 'law_scraper.json'
+    # JSON 저장 시에도 전체 결과 사용
+    output_data['total_count'] = total_export_count
+    output_data['results'] = final_results
     crawler.save_results(output_data, json_name)
 
     # CSV 저장 (정리된 law_results 사용)
     meta_for_excel = {
         'url': first_page_url or '',
         'crawled_at': output_data['crawled_at'],
-        'total_count': len(law_results),
+        'total_count': total_export_count,
         'total_pages': total_pages,
-        'extracted_count': len(law_results),
+        'extracted_count': total_export_count,
         'keyword': keyword
     }
     csv_name = 'law_scraper.csv'
-    crawler.save_results_csv(law_results, meta_for_excel, csv_name)
+    crawler.save_results_csv(final_results, meta_for_excel, csv_name)
     
     print("\n=== 스크래핑 완료 ===")
 
