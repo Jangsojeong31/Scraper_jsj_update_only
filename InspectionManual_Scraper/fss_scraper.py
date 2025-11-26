@@ -973,6 +973,13 @@ def save_results(results: List[Dict[str, str]], output_dir: Path) -> Tuple[Path,
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
+    # JSON 필드명을 CSV 필드명으로 매핑
+    field_mapping = {
+        "항 목": "항목",
+        "점 검 사 항": "점검사항",
+        "점 검 방 식": "점검방식",
+    }
+    
     fieldnames = [
         "번호",
         "구분",
@@ -1003,7 +1010,12 @@ def save_results(results: List[Dict[str, str]], output_dir: Path) -> Tuple[Path,
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in results:
-            writer.writerow(row)
+            # 필드명 매핑 처리
+            csv_row = {}
+            for key, value in row.items():
+                csv_key = field_mapping.get(key, key)
+                csv_row[csv_key] = value
+            writer.writerow(csv_row)
 
     return json_path, csv_path
 
