@@ -413,6 +413,7 @@ class FileExtractor:
                     transform_text = text_transform.transform_hwp5_to_text
                     html_transform = HTMLTransform()
                     html_text = ""
+                    text_extraction_success = False
                     
                     with closing(Hwp5File(filepath)) as hwp5file:
                         # 1) 본문 텍스트 추출
@@ -423,85 +424,90 @@ class FileExtractor:
                                 tmp_txt.seek(0)
                                 content_bytes = tmp_txt.read()
                                 content = content_bytes.decode('utf-8', errors='ignore')
+                                text_extraction_success = True
+                            except Exception as e:
+                                # 텍스트 추출 실패 시 즉시 폴백으로 넘어감
+                                print(f"  ✗ pyhwp 텍스트 추출 실패: {e}")
+                                content = ""
+                                raise  # 예외를 다시 발생시켜 외부 except로 이동
                             finally:
                                 try:
                                     os.unlink(tmp_txt_path)
                                 except:
                                     pass
 
-                        # 2) HTML 변환 후 <table> 파싱 → Markdown으로 병합
-                        try:
-                            # HTMLTransform을 사용하여 HTML 변환 (새로운 Hwp5File 인스턴스 필요)
-                            with closing(Hwp5File(filepath)) as hwp5file_html:
-                                with tempfile.TemporaryDirectory() as tmp_dir:
-                                    html_transform.transform_hwp5_to_dir(hwp5file_html, tmp_dir)
-                                    # 변환된 HTML 파일 찾기 (tmp_dir이 닫히기 전에 처리)
-                                    html_files = [f for f in os.listdir(tmp_dir) if f.endswith('.html') or f.endswith('.xhtml')]
-                                    if html_files:
-                                        html_file_path = os.path.join(tmp_dir, html_files[0])
-                                        with open(html_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                            html_text = f.read()
-                                        
-                                        if html_text and html_text.strip():
-                                            soup = BeautifulSoup(html_text, 'html.parser')
-                                            tables = soup.find_all('table')
-                                            print(f"  HTML에서 {len(tables)}개의 표 발견")
-                                            if tables:
-                                                md_sections = []
-                                                for t_idx, t in enumerate(tables):
-                                                    headers = []
-                                                    thead = t.find('thead')
-                                                    if thead:
-                                                        ths = thead.find_all(['th','td'])
-                                                        headers = [th.get_text(strip=True) for th in ths]
-                                                    if not headers:
-                                                        first_tr = t.find('tr')
-                                                        if first_tr:
-                                                            headers = [c.get_text(strip=True) for c in first_tr.find_all(['th','td'])]
-                                                    rows_md = []
-                                                    if headers:
-                                                        rows_md.append('| ' + ' | '.join(headers) + ' |')
-                                                        rows_md.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+                        # 2) HTML 변환 후 <table> 파싱 → Markdown으로 병합 (텍스트 추출 성공한 경우에만)
+                        if text_extraction_success and content:
+                            try:
+                                # HTMLTransform을 사용하여 HTML 변환 (새로운 Hwp5File 인스턴스 필요)
+                                with closing(Hwp5File(filepath)) as hwp5file_html:
+                                    with tempfile.TemporaryDirectory() as tmp_dir:
+                                        html_transform.transform_hwp5_to_dir(hwp5file_html, tmp_dir)
+                                        # 변환된 HTML 파일 찾기 (tmp_dir이 닫히기 전에 처리)
+                                        html_files = [f for f in os.listdir(tmp_dir) if f.endswith('.html') or f.endswith('.xhtml')]
+                                        if html_files:
+                                            html_file_path = os.path.join(tmp_dir, html_files[0])
+                                            with open(html_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                                html_text = f.read()
+                                            
+                                            if html_text and html_text.strip():
+                                                soup = BeautifulSoup(html_text, 'html.parser')
+                                                tables = soup.find_all('table')
+                                                print(f"  HTML에서 {len(tables)}개의 표 발견")
+                                                if tables:
+                                                    md_sections = []
+                                                    for t_idx, t in enumerate(tables):
+                                                        headers = []
+                                                        thead = t.find('thead')
+                                                        if thead:
+                                                            ths = thead.find_all(['th','td'])
+                                                            headers = [th.get_text(strip=True) for th in ths]
+                                                        if not headers:
+                                                            first_tr = t.find('tr')
+                                                            if first_tr:
+                                                                headers = [c.get_text(strip=True) for c in first_tr.find_all(['th','td'])]
+                                                        rows_md = []
+                                                        if headers:
+                                                            rows_md.append('| ' + ' | '.join(headers) + ' |')
+                                                            rows_md.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+                                                        
+                                                        body_rows = t.find_all('tr')
+                                                        start_idx = 1 if headers and body_rows else 0
+                                                        for tr_idx, tr in enumerate(body_rows):
+                                                            if tr_idx < start_idx:
+                                                                continue
+                                                            cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
+                                                            if cells:
+                                                                rows_md.append('| ' + ' | '.join(cells) + ' |')
+                                                        if rows_md:
+                                                            md_sections.append('\n'.join(rows_md))
+                                                            print(f"    표 {t_idx + 1}: {len(rows_md)}행 변환 완료")
                                                     
-                                                    body_rows = t.find_all('tr')
-                                                    start_idx = 1 if headers and body_rows else 0
-                                                    for tr_idx, tr in enumerate(body_rows):
-                                                        if tr_idx < start_idx:
-                                                            continue
-                                                        cells = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
-                                                        if cells:
-                                                            rows_md.append('| ' + ' | '.join(cells) + ' |')
-                                                    if rows_md:
-                                                        md_sections.append('\n'.join(rows_md))
-                                                        print(f"    표 {t_idx + 1}: {len(rows_md)}행 변환 완료")
-                                                
-                                                if md_sections:
-                                                    tables_md = '\n\n'.join(md_sections)
-                                                    # 본문에서 <표> 플레이스홀더를 실제 표 데이터로 교체
-                                                    if '<표>' in content:
-                                                        # 각 <표>를 실제 표 데이터로 교체
-                                                        parts = content.split('<표>')
-                                                        new_content = parts[0]
-                                                        for i, part in enumerate(parts[1:], 1):
-                                                            if i <= len(md_sections):
-                                                                new_content += '\n\n' + md_sections[i-1] + '\n\n' + part
-                                                            else:
-                                                                new_content += '<표>' + part
-                                                        content = new_content
-                                                    else:
-                                                        # <표>가 없으면 끝에 추가
-                                                        if content and not content.endswith('\n'):
-                                                            content += '\n'
-                                                        content += '\n[표]\n\n' + tables_md
-                                                    print(f"  총 {len(md_sections)}개의 표를 Markdown으로 변환하여 추가")
-                                            else:
-                                                print(f"  HTML에서 표를 찾지 못함")
+                                                    if md_sections:
+                                                        tables_md = '\n\n'.join(md_sections)
+                                                        # 본문에서 <표> 플레이스홀더를 실제 표 데이터로 교체
+                                                        if '<표>' in content:
+                                                            # 각 <표>를 실제 표 데이터로 교체
+                                                            parts = content.split('<표>')
+                                                            new_content = parts[0]
+                                                            for i, part in enumerate(parts[1:], 1):
+                                                                if i <= len(md_sections):
+                                                                    new_content += '\n\n' + md_sections[i-1] + '\n\n' + part
+                                                                else:
+                                                                    new_content += '<표>' + part
+                                                            content = new_content
+                                                        else:
+                                                            # <표>가 없으면 끝에 추가
+                                                            if content and not content.endswith('\n'):
+                                                                content += '\n'
+                                                            content += '\n[표]\n\n' + tables_md
+                                                        print(f"  총 {len(md_sections)}개의 표를 Markdown으로 변환하여 추가")
+                                                else:
+                                                    print(f"  HTML에서 표를 찾지 못함")
 
-                        except Exception as e:
-                            # HTML 변환 실패 시 표 병합 생략
-                            print(f"  HTML 변환 실패: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            except Exception as e:
+                                # HTML 변환 실패 시 표 병합 생략 (본문은 이미 추출됨)
+                                print(f"  ⚠ HTML 변환 실패 (본문은 이미 추출됨): {e}")
 
                     if content and content.strip():
                         print(f"  ✓ pyhwp로 {len(content)}자 추출 완료")
@@ -510,8 +516,9 @@ class FileExtractor:
                         content = ""
                 except Exception as e:
                     print(f"  ✗ pyhwp 추출 실패: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    # traceback은 너무 길어서 제거 (필요시 주석 해제)
+                    # import traceback
+                    # traceback.print_exc()
                     content = ""
             else:
                 print(f"  ⚠ pyhwp 사용 불가 (PYHWP_AVAILABLE={PYHWP_AVAILABLE})")

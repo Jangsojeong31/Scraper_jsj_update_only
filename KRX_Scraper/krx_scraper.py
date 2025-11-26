@@ -1,8 +1,23 @@
 """
 한국거래소 스크래퍼
 """
+import csv
+import re
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Tuple
+
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    NoSuchElementException,
+    TimeoutException,
+)
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 # 프로젝트 루트를 sys.path에 추가 (common 모듈 import를 위해)
 def find_project_root():
@@ -23,33 +38,719 @@ def find_project_root():
     # 찾지 못한 경우 현재 디렉토리 반환
     return Path.cwd()
 
+
 project_root = find_project_root()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
-from bs4 import BeautifulSoup
-from typing import List, Dict, Optional
-from common.base_scraper import BaseScraper
+
+from common.base_scraper import BaseScraper  # noqa: E402  pylint: disable=wrong-import-position
 
 
 class KrxScraper(BaseScraper):
     """한국거래소 - KRX법무포탈 스크래퍼"""
     
     BASE_URL = "https://rule.krx.co.kr"
+    MAIN_URL = f"{BASE_URL}/out/index.do"
+    SEARCH_URL = f"{BASE_URL}/web/search.do"
+    RELATIVE_LIST_PATH = Path("input") / "list.csv"
+    JSON_FILENAME = "krx_scraper.json"
+    CSV_FILENAME = "krx_scraper.csv"
     
     def __init__(self, delay: float = 1.0):
         super().__init__(delay)
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        (self.output_dir / "json").mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "csv").mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "downloads").mkdir(parents=True, exist_ok=True)
     
     def crawl_krx_legal_portal(self) -> List[Dict]:
         """
         KRX법무포탈 스크래핑
         URL: https://rule.krx.co.kr/out/index.do
         """
-        url = "https://rule.krx.co.kr/out/index.do"
-        soup = self.fetch_page(url, use_selenium=True)
+        keywords = self._load_filter_keywords()
+        if not keywords:
+            print("⚠ 필터링할 키워드가 없습니다. CSV 파일을 확인해주세요.")
+            return []
         
-        results = []
-        # TODO: 실제 페이지 구조에 맞춰 데이터 추출 구현
+        # Chrome 옵션에 다운로드 디렉토리 설정
+        chrome_options = self._build_default_chrome_options()
+        download_dir = str(self.output_dir / "downloads")
+        prefs = {
+            "download.default_directory": download_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "plugins.always_open_pdf_externally": True,  # PDF를 외부에서 열기
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
+        
+        driver = self._create_webdriver(chrome_options)
+        wait = WebDriverWait(driver, 15)
+        results: List[Dict] = []
+        
+        try:
+            for keyword in keywords:
+                keyword_results = self._search_keyword_and_collect(driver, wait, keyword)
+                results.extend(keyword_results)
+        finally:
+            driver.quit()
+        
+        # 번호를 순차적으로 재매기기
+        for idx, record in enumerate(results, start=1):
+            record["번호"] = str(idx)
+        
+        crawled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        meta = {
+            "url": self.MAIN_URL,
+            "crawled_at": crawled_at,
+            "keyword_count": len(keywords),
+            "result_count": len(results),
+        }
+        self._save_outputs(results, meta)
         return results
+    
+    def _load_filter_keywords(self) -> List[str]:
+        """input/list.csv에서 규정명을 읽어 필터 키워드 목록을 작성"""
+        csv_path = self.base_dir / self.RELATIVE_LIST_PATH
+        if not csv_path.exists():
+            print(f"⚠ 필터 CSV 파일이 존재하지 않습니다: {csv_path}")
+            return []
+        
+        keywords = []
+        with open(csv_path, "r", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            if "법령명" not in reader.fieldnames:
+                print("⚠ CSV 파일에 '법령명' 컬럼이 필요합니다.")
+                return []
+            for row in reader:
+                keyword = (row.get("법령명") or "").strip()
+                if keyword:
+                    keywords.append(keyword)
+        print(f"CSV에서 {len(keywords)}개의 키워드를 불러왔습니다.")
+        return keywords
+    
+    def _open_main_page(self, driver, wait) -> None:
+        """메인 페이지 진입"""
+        driver.get(self.MAIN_URL)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#mainSchTxt")))
+        print("메인 페이지 진입 완료")
+    
+    def _perform_search(self, driver, wait, keyword: str) -> None:
+        """메인 검색창에 키워드 입력 후 결과 페이지로 이동"""
+        self._open_main_page(driver, wait)
+        main_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#mainSchTxt")))
+        main_input.clear()
+        main_input.send_keys(keyword)
+        
+        current_handle = driver.current_window_handle
+        existing_handles = set(driver.window_handles)
+        try:
+            search_button = driver.find_element(By.CSS_SELECTOR, "#mainSchBtn")
+            # 요소가 가려져 있을 수 있으므로 JavaScript 클릭 시도
+            try:
+                search_button.click()
+            except ElementClickInterceptedException:
+                driver.execute_script("arguments[0].click();", search_button)
+        except NoSuchElementException:
+            # 버튼이 없으면 ENTER 키 사용
+            main_input.send_keys(Keys.ENTER)
+        
+        # 검색 결과 페이지 로딩 대기 (동일 창 또는 새 창)
+        try:
+            wait.until(lambda d: "search.do" in d.current_url)
+        except TimeoutException:
+            try:
+                WebDriverWait(driver, 5).until(lambda d: len(d.window_handles) > len(existing_handles))
+                new_handle = next(h for h in driver.window_handles if h not in existing_handles)
+                driver.switch_to.window(new_handle)
+            except Exception:
+                raise
+        
+        if "search.do" not in driver.current_url:
+            wait.until(lambda d: "search.do" in d.current_url)
+        
+        print("검색 결과 페이지 진입 완료")
+        self._switch_to_results_frame(driver, wait)
+    
+    def _switch_to_results_frame(self, driver, wait) -> None:
+        """검색 결과가 담긴 iframe으로 전환"""
+        try:
+            driver.switch_to.default_content()
+            wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "workPage")))
+        except Exception as e:
+            print(f"  ⚠ iframe 전환 실패: {e}")
+            # 예외 발생 시에도 계속 진행
+    
+    def _search_keyword_and_collect(self, driver, wait, keyword: str) -> List[Dict]:
+        """키워드 검색 후 목록을 추출"""
+        print(f"\n▶ 검색 키워드: {keyword}")
+        results: List[Dict] = []
+        
+        # 메인 페이지에서 검색 수행 후 결과 페이지에서 후속 처리
+        self._perform_search(driver, wait, keyword)
+
+        # iframe 내부로 전환해 결과 테이블 접근
+        self._switch_to_results_frame(driver, wait)
+
+        # 검색 결과 로딩 대기
+        wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "#law_rule li dl")))
+        entries = driver.find_elements(By.CSS_SELECTOR, "#law_rule li dl")
+        if not entries:
+            print(" - 검색 결과 없음")
+            return results
+        
+        # 첫 번째 항목만 처리
+        try:
+            entry = entries[0]
+            title_el = entry.find_element(By.CSS_SELECTOR, "dt")
+            title_text = title_el.text.strip()
+            onclick = title_el.get_attribute("onclick") or ""
+            book_id = self._parse_book_id(onclick)
+            
+            meta_spans = entry.find_elements(By.CSS_SELECTOR, "dd span")
+            doc_type = meta_spans[0].text.strip() if len(meta_spans) > 0 else ""
+            revised_date_raw = meta_spans[1].text.strip() if len(meta_spans) > 1 else ""
+            department = meta_spans[2].text.strip() if len(meta_spans) > 2 else ""
+            
+            # 날짜 포맷팅
+            revised_date = self._format_date(revised_date_raw)
+            
+            # 클릭 전 창 핸들 저장 (iframe 컨텍스트에서)
+            current_handles_before = set(driver.window_handles)
+            
+            # onclick 속성에서 goToView 함수 파라미터 추출 (이미 위에서 읽음)
+            print(f"  → onclick 속성: {onclick}")
+            
+            # goToView 함수 직접 호출 시도
+            if "goToView" in onclick:
+                # goToView('rule', '210025251', 'N') 형태에서 파라미터 추출
+                import re
+                matches = re.findall(r"goToView\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]", onclick)
+                if matches:
+                    gbn, pk1, pk2 = matches[0]
+                    print(f"  → goToView 호출: gbn={gbn}, pk1={pk1}, pk2={pk2}")
+                    # JavaScript로 goToView 함수 직접 호출
+                    driver.execute_script(f"goToView('{gbn}', '{pk1}', '{pk2}');")
+                else:
+                    # 정규식으로 파싱 실패 시 onclick 직접 실행
+                    driver.execute_script(onclick)
+            else:
+                # onclick이 없으면 일반 클릭
+                driver.execute_script("arguments[0].scrollIntoView(true);", title_el)
+                try:
+                    title_el.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", title_el)
+            
+            # 클릭 후 잠시 대기 (새 창이 열릴 시간)
+            time.sleep(3)
+            
+            # iframe에서 나와서 새 창 확인
+            driver.switch_to.default_content()
+            detail_text, download_link, file_name = self._extract_detail(driver, wait, current_handles_before, keyword)
+            
+            # KFB_Scraper와 동일한 컬럼 구조로 매핑
+            record = {
+                "번호": "",  # 나중에 순차적으로 재매기기됨
+                "규정명": title_text,
+                "기관명": "한국거래소",
+                "본문": detail_text,
+                "제정일": "",  # KRX에서는 제정일 정보가 별도로 제공되지 않음
+                "최근 개정일": revised_date,
+                "소관부서": department,
+                "파일 다운로드 링크": download_link,
+                "파일 이름": file_name,
+            }
+            print(f" - [0] {record['규정명']} (제·개정 {doc_type})")
+            results.append(record)
+        except Exception as exc:
+            print(f"  ⚠ 첫 번째 항목 처리 중 오류 발생: {exc}")
+        finally:
+            # 상세 팝업 후 iframe 컨텍스트 복원 (안전하게 처리)
+            try:
+                # 유효한 창이 있는지 확인
+                if driver.window_handles:
+                    # 첫 번째 창으로 전환
+                    driver.switch_to.window(driver.window_handles[0])
+                    self._switch_to_results_frame(driver, wait)
+            except Exception as e:
+                print(f"  ⚠ iframe 컨텍스트 복원 실패: {e}")
+        return results
+
+    def _extract_detail(self, driver, wait, existing_handles: set = None, keyword: str = "") -> Tuple[str, str, str]:
+        """상세 페이지(새 창)에서 내용, 다운로드 링크, 파일 이름 추출
+        Args:
+            driver: WebDriver 인스턴스
+            wait: WebDriverWait 인스턴스
+            existing_handles: 클릭 전 창 핸들 집합 (None이면 현재 창 핸들 사용)
+            keyword: 검색 키워드 (파일명으로 사용)
+        Returns:
+            (본문 내용, 다운로드 링크, 파일 이름) 튜플
+        """
+        current_handle = driver.current_window_handle
+        if existing_handles is None:
+            existing_handles = set(driver.window_handles)
+        content = "상세 내용 없음"
+        download_link = ""
+        file_name = ""
+        
+        # 새 창이 열릴 때까지 대기 (최대 15초)
+        try:
+            print(f"  → 클릭 전 창 핸들 수: {len(existing_handles)}")
+            print(f"  → 현재 창 핸들 수: {len(driver.window_handles)}")
+            print(f"  → 새 창 대기 중...")
+            WebDriverWait(driver, 15).until(lambda d: len(d.window_handles) > len(existing_handles))
+            print(f"  → 새 창 감지됨! 현재 창 핸들 수: {len(driver.window_handles)}")
+            new_handles = [h for h in driver.window_handles if h not in existing_handles]
+            if new_handles:
+                new_handle = new_handles[0]
+                driver.switch_to.window(new_handle)
+                print(f"  → 새 창으로 전환: {driver.current_url}")
+                
+                # 페이지 로딩 대기
+                time.sleep(3)
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                
+                # #regulCont 요소가 로드될 때까지 대기
+                try:
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#regulCont")))
+                    print("  → #regulCont 요소 발견")
+                except TimeoutException:
+                    print("  ⚠ #regulCont 요소를 찾지 못함, 다른 선택자 시도")
+                
+                # 본문 내용 추출 (#regulCont 우선)
+                selectors = [
+                    (By.CSS_SELECTOR, "#regulCont"),  # 상세 내용의 주요 컨테이너
+                    (By.XPATH, '//*[@id="regulCont"]'),  # xpath로도 시도
+                ]
+                
+                for selector_type, selector_value in selectors:
+                    try:
+                        element = driver.find_element(selector_type, selector_value)
+                        content = element.text.strip()
+                        if content and len(content) > 50:
+                            print(f"  → 본문 추출 성공 ({len(content)}자)")
+                            break
+                    except Exception as e:
+                        continue
+                
+                if not content or len(content) < 50:
+                    # 폴백: body 전체 텍스트
+                    try:
+                        body_text = driver.find_element(By.TAG_NAME, "body").text.strip()
+                        content = body_text if body_text else "상세 내용 없음"
+                        print(f"  → body 텍스트로 폴백 ({len(content)}자)")
+                    except Exception:
+                        content = "상세 내용 없음"
+                
+                # 파일 다운로드 링크 및 파일 이름 추출 (#webprint 처리)
+                try:
+                    # #webprint 요소 찾기
+                    webprint_elem = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#webprint")))
+                    webprint_href = webprint_elem.get_attribute("href") or ""
+                    webprint_onclick = webprint_elem.get_attribute("onclick") or ""
+                    
+                    print(f"  → #webprint 발견: href={webprint_href[:50] if webprint_href else 'None'}, onclick={webprint_onclick[:50] if webprint_onclick else 'None'}")
+                    
+                    # 파일 이름은 키워드로 설정 (확장자 추가)
+                    if keyword:
+                        # 키워드에서 파일명으로 사용할 수 없는 문자 제거
+                        safe_keyword = re.sub(r'[<>:"/\\|?*]', '_', keyword)
+                        file_name = f"{safe_keyword}.pdf"
+                    else:
+                        file_name = "download.pdf"
+                    
+                    # #webprint 클릭 전 창 핸들 저장
+                    print_handles_before = set(driver.window_handles)
+                    
+                    # #webprint 클릭 (새 창으로 프린트 팝업 열림)
+                    try:
+                        webprint_elem.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", webprint_elem)
+                    
+                    # 새 창이 열릴 때까지 대기
+                    time.sleep(2)
+                    try:
+                        WebDriverWait(driver, 5).until(lambda d: len(d.window_handles) > len(print_handles_before))
+                        print_handles = [h for h in driver.window_handles if h not in print_handles_before]
+                        if print_handles:
+                            print_handle = print_handles[0]
+                            driver.switch_to.window(print_handle)
+                            print(f"  → 프린트 팝업 창으로 전환: {driver.current_url}")
+                            
+                            # 프린트 팝업 창의 URL을 다운로드 링크로 사용
+                            download_link = driver.current_url
+                            
+                            # 페이지 로딩 대기
+                            time.sleep(2)
+                            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                            
+                            # 프린트 팝업에서 '저장' 버튼 찾기 및 클릭
+                            downloaded_path = self._click_save_button_in_print_popup(driver, wait, file_name)
+                            
+                            # 프린트 팝업 창 닫기
+                            driver.close()
+                            
+                            # 상세 페이지 창(new_handle)으로 돌아가기
+                            try:
+                                if new_handle in driver.window_handles:
+                                    driver.switch_to.window(new_handle)
+                                elif driver.window_handles:
+                                    driver.switch_to.window(driver.window_handles[0])
+                            except Exception as e:
+                                print(f"  ⚠ 상세 페이지 창으로 전환 실패: {e}")
+                                if driver.window_handles:
+                                    driver.switch_to.window(driver.window_handles[0])
+                            
+                            print(f"  → 다운로드 링크 설정: {download_link}")
+                            print(f"  → 파일 이름: {file_name}")
+                            if downloaded_path:
+                                print(f"  → 다운로드된 파일 경로: {downloaded_path}")
+                        else:
+                            # 새 창이 열리지 않았으면 원래 창의 URL 사용
+                            download_link = driver.current_url
+                            print(f"  → 새 창이 열리지 않음, 현재 URL 사용: {download_link}")
+                    except TimeoutException:
+                        # 타임아웃 시 원래 창의 URL 사용
+                        download_link = driver.current_url
+                        print(f"  → 타임아웃, 현재 URL 사용: {download_link}")
+                    
+                except NoSuchElementException:
+                    print("  ⚠ #webprint 요소를 찾지 못함")
+                    download_link = driver.current_url
+                    if keyword:
+                        safe_keyword = re.sub(r'[<>:"/\\|?*]', '_', keyword)
+                        file_name = f"{safe_keyword}.pdf"
+                    else:
+                        file_name = "download.pdf"
+                except Exception as e:
+                    print(f"  ⚠ 다운로드 링크 추출 실패: {e}")
+                    download_link = driver.current_url
+                    if keyword:
+                        safe_keyword = re.sub(r'[<>:"/\\|?*]', '_', keyword)
+                        file_name = f"{safe_keyword}.pdf"
+                    else:
+                        file_name = "download.pdf"
+                
+                # 상세 페이지 창(new_handle) 닫기
+                try:
+                    # 현재 상세 페이지 창이 활성화되어 있는지 확인
+                    if driver.current_window_handle == new_handle:
+                        driver.close()
+                    elif new_handle in driver.window_handles:
+                        driver.switch_to.window(new_handle)
+                        driver.close()
+                except Exception as e:
+                    print(f"  ⚠ 상세 페이지 창 닫기 실패: {e}")
+                
+                # 원래 창(current_handle)으로 안전하게 전환
+                try:
+                    if current_handle in driver.window_handles:
+                        driver.switch_to.window(current_handle)
+                    elif driver.window_handles:
+                        # current_handle이 없으면 첫 번째 창으로 전환
+                        driver.switch_to.window(driver.window_handles[0])
+                except Exception as e:
+                    print(f"  ⚠ 원래 창으로 전환 실패: {e}")
+                    if driver.window_handles:
+                        driver.switch_to.window(driver.window_handles[0])
+                
+                return (content, download_link, file_name)
+        except TimeoutException:
+            print("  ⚠ 새 창이 열리지 않음 (타임아웃)")
+        except Exception as exc:
+            print(f"  ⚠ 상세 내용 추출 중 오류: {exc}")
+        
+        # 예외 발생 시 원래 창으로 복귀 시도
+        try:
+            if current_handle in driver.window_handles:
+                driver.switch_to.window(current_handle)
+            elif driver.window_handles:
+                driver.switch_to.window(driver.window_handles[0])
+        except Exception as e:
+            print(f"  ⚠ 창 복귀 실패: {e}")
+        
+        return (content, download_link, file_name)
+    
+    def _click_save_button_in_print_popup(self, driver, wait, file_name: str) -> str:
+        """프린트 팝업에서 '저장' 버튼을 찾아서 클릭하고 파일 다운로드
+        Args:
+            driver: WebDriver 인스턴스
+            wait: WebDriverWait 인스턴스
+            file_name: 저장할 파일명
+        Returns:
+            다운로드된 파일 경로
+        """
+        try:
+            # 다운로드 디렉토리에서 기존 파일 목록 확인
+            download_dir = self.output_dir / "downloads"
+            existing_files = set(download_dir.glob("*.pdf")) if download_dir.exists() else set()
+            
+            # 프린트 팝업에서 '저장' 버튼 찾기 (여러 가능한 셀렉터 시도)
+            save_button_selectors = [
+                (By.XPATH, "//button[contains(text(), '저장')]"),
+                (By.XPATH, "//a[contains(text(), '저장')]"),
+                (By.XPATH, "//input[@value='저장']"),
+                (By.XPATH, "//button[contains(text(), 'Save')]"),
+                (By.XPATH, "//a[contains(text(), 'Save')]"),
+                (By.XPATH, "//input[@value='Save']"),
+                (By.XPATH, "//button[contains(text(), '다운로드')]"),
+                (By.XPATH, "//a[contains(text(), '다운로드')]"),
+                (By.XPATH, "//button[contains(text(), 'Download')]"),
+                (By.XPATH, "//a[contains(text(), 'Download')]"),
+                (By.CSS_SELECTOR, "button[onclick*='save']"),
+                (By.CSS_SELECTOR, "a[onclick*='save']"),
+                (By.CSS_SELECTOR, "button[onclick*='download']"),
+                (By.CSS_SELECTOR, "a[onclick*='download']"),
+                (By.CSS_SELECTOR, "#saveBtn"),
+                (By.CSS_SELECTOR, "#downloadBtn"),
+                (By.CSS_SELECTOR, ".save-btn"),
+                (By.CSS_SELECTOR, ".download-btn"),
+            ]
+            
+            save_button = None
+            for selector_type, selector_value in save_button_selectors:
+                try:
+                    save_button = wait.until(EC.element_to_be_clickable((selector_type, selector_value)))
+                    print(f"  → '저장' 버튼 발견: {selector_value}")
+                    break
+                except (TimeoutException, NoSuchElementException):
+                    continue
+            
+            if not save_button:
+                # 버튼을 찾지 못한 경우, 페이지 소스를 확인해서 디버깅
+                page_source = driver.page_source
+                print(f"  ⚠ '저장' 버튼을 찾지 못했습니다. 페이지 소스 확인 중...")
+                
+                # PDF 다운로드 링크 찾기 시도
+                pdf_link_selectors = [
+                    (By.XPATH, "//a[contains(@href, '.pdf')]"),
+                    (By.XPATH, "//a[contains(@href, 'pdf')]"),
+                    (By.XPATH, "//a[contains(@onclick, 'pdf')]"),
+                    (By.CSS_SELECTOR, "a[href*='.pdf']"),
+                    (By.CSS_SELECTOR, "a[href*='pdf']"),
+                ]
+                
+                pdf_link = None
+                for selector_type, selector_value in pdf_link_selectors:
+                    try:
+                        pdf_link = driver.find_element(selector_type, selector_value)
+                        pdf_url = pdf_link.get_attribute("href")
+                        if pdf_url:
+                            print(f"  → PDF 다운로드 링크 발견: {pdf_url[:100]}")
+                            # 링크 클릭
+                            pdf_link.click()
+                            print(f"  → PDF 다운로드 링크 클릭 완료")
+                            break
+                    except (NoSuchElementException, Exception):
+                        continue
+                
+                if not pdf_link:
+                    # 프린트 팝업 페이지의 URL을 사용해서 PDF 다운로드 시도
+                    current_url = driver.current_url
+                    print(f"  → 현재 URL: {current_url}")
+                    
+                    # URL에 download 파라미터 추가 시도
+                    if '?' in current_url:
+                        download_url = f"{current_url}&download=true"
+                    else:
+                        download_url = f"{current_url}?download=true"
+                    
+                    # JavaScript로 PDF 다운로드 시도
+                    try:
+                        # window.print() 호출 후 저장 다이얼로그 대기
+                        driver.execute_script("window.print();")
+                        print(f"  → window.print() 호출")
+                        time.sleep(2)  # 프린트 다이얼로그가 열릴 시간
+                        
+                        # 또는 직접 PDF 다운로드 링크 생성
+                        download_script = f"""
+                        var link = document.createElement('a');
+                        link.href = '{current_url}';
+                        link.download = '{file_name}';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        """
+                        driver.execute_script(download_script)
+                        print(f"  → JavaScript로 PDF 다운로드 시도")
+                    except Exception as e:
+                        print(f"  ⚠ JavaScript 다운로드 시도 실패: {e}")
+            else:
+                # 저장 버튼 클릭
+                try:
+                    save_button.click()
+                    print(f"  → '저장' 버튼 클릭 완료")
+                except Exception as e:
+                    # JavaScript로 클릭 시도
+                    try:
+                        driver.execute_script("arguments[0].click();", save_button)
+                        print(f"  → JavaScript로 '저장' 버튼 클릭 완료")
+                    except Exception as e2:
+                        print(f"  ⚠ '저장' 버튼 클릭 실패: {e2}")
+            
+            # 다운로드 완료 대기 (최대 10초)
+            time.sleep(1)  # 초기 대기
+            max_wait = 10
+            waited = 0
+            downloaded_file = None
+            
+            while waited < max_wait:
+                # 새로 다운로드된 파일 찾기
+                current_files = set(download_dir.glob("*.pdf")) if download_dir.exists() else set()
+                new_files = current_files - existing_files
+                
+                if new_files:
+                    # 가장 최근에 수정된 파일 선택
+                    downloaded_file = max(new_files, key=lambda f: f.stat().st_mtime)
+                    print(f"  → 다운로드된 파일 발견: {downloaded_file.name}")
+                    break
+                
+                time.sleep(0.5)
+                waited += 0.5
+            
+            if downloaded_file:
+                # 파일명을 키워드 이름으로 변경
+                target_path = download_dir / file_name
+                if target_path.exists() and target_path != downloaded_file:
+                    # 이미 같은 이름의 파일이 있으면 삭제
+                    target_path.unlink()
+                
+                downloaded_file.rename(target_path)
+                print(f"  → 파일명 변경 완료: {target_path.name}")
+                return str(target_path)
+            else:
+                print(f"  ⚠ 다운로드된 파일을 찾지 못했습니다.")
+                return ""
+                
+        except Exception as e:
+            print(f"  ⚠ 저장 버튼 클릭 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
+    
+    def _download_file(self, driver, download_url: str, file_name: str) -> str:
+        """프린트 팝업 URL을 사용해서 PDF 파일 다운로드
+        Args:
+            driver: WebDriver 인스턴스
+            download_url: 다운로드할 URL
+            file_name: 저장할 파일명
+        Returns:
+            다운로드된 파일 경로
+        """
+        try:
+            # Selenium 쿠키를 requests 세션에 전달
+            cookies = driver.get_cookies()
+            session = self.session
+            
+            # 쿠키 설정
+            for cookie in cookies:
+                session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain', ''))
+            
+            # 다운로드 디렉토리 경로
+            download_path = self.output_dir / "downloads" / file_name
+            
+            # 파일 다운로드 (헤더 설정)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/pdf,application/octet-stream,*/*',
+                'Referer': download_url,
+            }
+            response = session.get(download_url, headers=headers, timeout=30, verify=False, stream=True)
+            response.raise_for_status()
+            
+            # Content-Type 확인
+            content_type = response.headers.get('Content-Type', '').lower()
+            print(f"  → Content-Type: {content_type}")
+            
+            # 파일 저장
+            with open(download_path, 'wb') as f:
+                first_chunk = True
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        # 첫 번째 청크에서 PDF 시그니처 확인
+                        if first_chunk:
+                            if chunk[:4] != b'%PDF':
+                                print(f"  ⚠ PDF 파일이 아닌 것으로 보입니다. HTML일 수 있습니다.")
+                            first_chunk = False
+                        f.write(chunk)
+            
+            file_size = download_path.stat().st_size
+            if file_size > 0:
+                print(f"  → 파일 다운로드 완료: {download_path} ({file_size} bytes)")
+                return str(download_path)
+            else:
+                print(f"  ⚠ 다운로드된 파일 크기가 0입니다.")
+                try:
+                    download_path.unlink()  # 빈 파일 삭제
+                except Exception:
+                    pass
+                return ""
+        except Exception as e:
+            print(f"  ⚠ 파일 다운로드 실패: {e}")
+            return ""
+    
+    def _parse_book_id(self, onclick_value: str) -> str:
+        """onclick 문자열에서 규정 식별자(bookid) 추출"""
+        try:
+            matches = re.findall(r"'([^']+)'", onclick_value)
+            if len(matches) >= 2:
+                return matches[1]
+        except Exception:
+            pass
+        return ""
+    
+    def _format_date(self, date_str: str) -> str:
+        """날짜 문자열을 yyyy-mm-dd 형태로 변환"""
+        if not date_str or not date_str.strip():
+            return ""
+        
+        date_str = date_str.strip()
+        # yyyymmdd 형태 (예: 20250205)를 yyyy-mm-dd로 변환
+        if re.match(r'^\d{8}$', date_str):
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        
+        # 이미 yyyy-mm-dd 형태인 경우 그대로 반환
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            return date_str
+        
+        # 다른 형태의 날짜는 그대로 반환 (추가 파싱 필요 시 확장 가능)
+        return date_str
+    
+    def _save_outputs(self, records: List[Dict], meta: Dict) -> None:
+        """JSON / CSV 결과 저장 (KFB_Scraper와 동일한 컬럼 구조)"""
+        # JSON 저장
+        json_payload = {
+            "crawled_at": meta.get("crawled_at", ""),
+            "url": meta.get("url", ""),
+            "total_count": len(records),
+            "results": records,
+        }
+        json_path = self.output_dir / "json" / self.JSON_FILENAME
+        with open(json_path, "w", encoding="utf-8") as jf:
+            import json  # 지역 import로 지연 로딩
+            json.dump(json_payload, jf, ensure_ascii=False, indent=2)
+        print(f"JSON 저장 완료: {json_path}")
+        
+        # CSV 저장 (KFB와 동일한 헤더 순서)
+        csv_path = self.output_dir / "csv" / self.CSV_FILENAME
+        if not records:
+            print("저장할 레코드가 없어 CSV 생성을 건너뜁니다.")
+            return
+        
+        # KFB_Scraper와 동일한 헤더 순서
+        headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as cf:
+            writer = csv.DictWriter(cf, fieldnames=headers)
+            writer.writeheader()
+            for item in records:
+                # CSV 저장 시 본문의 줄바꿈 처리 (KFB와 동일)
+                csv_item = item.copy()
+                csv_item['본문'] = csv_item.get('본문', '').replace('\n', ' ').replace('\r', ' ')
+                writer.writerow(csv_item)
+        print(f"CSV 저장 완료: {csv_path}")
 
 
 if __name__ == "__main__":

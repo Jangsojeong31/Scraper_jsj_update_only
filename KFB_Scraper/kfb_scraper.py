@@ -100,11 +100,13 @@ class KfbScraper(BaseScraper):
         if not content:
             return info
         
-        # 제정일 추출 (제정 2025.1.15. 같은 패턴)
+        # 제정일 추출 (제정 2025.1.15. 또는 제정 2003. 12. 19. 같은 패턴)
         enactment_patterns = [
-            r'제\s*정\s+(\d{4}\.\d{1,2}\.\d{1,2}\.?)',  # 제정 2025.1.15. 또는 제정 2025.1.15
+            r'제\s*정\s+(\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.?)',  # 제정 2003. 12. 19. 또는 제정 2025.1.15.
+            r'제\s*정\s+(\d{4}\.\d{1,2}\.\d{1,2}\.?)',  # 제정 2025.1.15. (공백 없는 형식)
             r'제\s*정\s*일\s*[:：]\s*(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)',
             r'제\s*정\s*[:：]\s*(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)',
+            r'(\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.?)\s*제\s*정',  # 2003. 12. 19. 제정
             r'(\d{4}\.\d{1,2}\.\d{1,2}\.?)\s*제\s*정',  # 2025.1.15. 제정
             r'(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)\s*제\s*정',
         ]
@@ -126,16 +128,18 @@ class KfbScraper(BaseScraper):
         
         # 최근 개정일 추출 (개정일 패턴)
         revision_patterns = [
-            r'개\s*정\s+(\d{4}\.\d{1,2}\.\d{1,2}\.?)',  # 개정 2025.1.15. 또는 개정 2025.1.15
+            r'개\s*정\s+(\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.?)',  # 개정 2003. 12. 19. 또는 개정 2025. 11. 28.
+            r'개\s*정\s+(\d{4}\.\d{1,2}\.\d{1,2}\.?)',  # 개정 2025.1.15. (공백 없는 형식)
             r'개\s*정\s*일\s*[:：]\s*(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)',
             r'최\s*근\s*개\s*정\s*일\s*[:：]\s*(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)',
             r'최종\s*개\s*정\s*일\s*[:：]\s*(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)',
+            r'(\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.?)\s*개\s*정',  # 2003. 12. 19. 개정
             r'(\d{4}\.\d{1,2}\.\d{1,2}\.?)\s*개\s*정',  # 2025.1.15. 개정
             r'(\d{4}[\.\-년]\s*\d{1,2}[\.\-월]\s*\d{1,2}[일]?)\s*개\s*정',
         ]
         
         # 여러 개정일이 있을 수 있으므로 모두 찾아서 가장 최근 것 사용
-        revision_dates = []
+        revision_dates_raw = []
         for pattern in revision_patterns:
             matches = re.finditer(pattern, content, re.IGNORECASE)
             for match in matches:
@@ -143,16 +147,41 @@ class KfbScraper(BaseScraper):
                 # 날짜 정리
                 date_str = re.sub(r'[년월일]', '', date_str).strip()
                 date_str = date_str.replace(' ', '').replace('-', '.')
-                # 마지막 점이 없으면 추가
-                if date_str and not date_str.endswith('.'):
-                    # YYYY.M.D 형식인지 확인
-                    if re.match(r'\d{4}\.\d{1,2}\.\d{1,2}$', date_str):
-                        date_str += '.'
-                revision_dates.append(date_str)
+                # 마지막 점 제거 (나중에 다시 추가)
+                date_str = date_str.rstrip('.')
+                if date_str:
+                    revision_dates_raw.append(date_str)
         
-        if revision_dates:
-            # 가장 최근 날짜 선택 (간단히 마지막 것 사용)
-            info['revision_date'] = revision_dates[-1]
+        # 날짜를 파싱해서 가장 최근 날짜 선택
+        if revision_dates_raw:
+            # 중복 제거 및 날짜 파싱
+            parsed_dates = []
+            seen = set()
+            for date_str in revision_dates_raw:
+                # YYYY.M.D 형식 파싱
+                parts = date_str.split('.')
+                if len(parts) >= 3:
+                    try:
+                        year = int(parts[0])
+                        month = int(parts[1])
+                        day = int(parts[2])
+                        # 중복 체크용 키
+                        date_key = (year, month, day)
+                        if date_key not in seen:
+                            seen.add(date_key)
+                            parsed_dates.append((year, month, day, date_str))
+                    except ValueError:
+                        continue
+            
+            if parsed_dates:
+                # 날짜를 비교해서 가장 최근 날짜 선택
+                latest = max(parsed_dates, key=lambda x: (x[0], x[1], x[2]))
+                # 정규화된 형식으로 변환 (YYYY.MM.DD.)
+                latest_date_str = f"{latest[3]}"
+                # 마지막 점이 없으면 추가
+                if not latest_date_str.endswith('.'):
+                    latest_date_str += '.'
+                info['revision_date'] = latest_date_str
         
         # 규정명 추출 (제목이 없거나 개선이 필요한 경우)
         if not info['regulation_name'] or info['regulation_name'] == title:
@@ -731,7 +760,7 @@ class KfbScraper(BaseScraper):
         
         return page_urls
     
-    def crawl_self_regulation(self, limit: int = 0, download_files: bool = True) -> List[Dict]:
+    def crawl_self_regulation(self, limit: int = 0, download_files: bool = True, content_limit: int = 0) -> List[Dict]:
         """
         자율규제 스크래핑
         URL: https://www.kfb.or.kr/publicdata/reform_info.php
@@ -739,6 +768,7 @@ class KfbScraper(BaseScraper):
         Args:
             limit: 가져올 개수 제한 (0=전체)
             download_files: HWP 파일 다운로드 및 내용 추출 여부
+            content_limit: 본문 길이 제한 (0=제한 없음, 문자 수)
         """
         base_url = "https://www.kfb.or.kr/publicdata/reform_info.php"
         all_results = []
@@ -1259,7 +1289,7 @@ class KfbScraper(BaseScraper):
                         item['file_content'] = hwp_content
                         item['file_path'] = filepath
                         
-                        # HWP 내용에서 법규 정보 추출 (제정일/최근개정일만 추출, 본문은 상세 페이지에서 가져온 것 유지)
+                        # HWP 내용에서 법규 정보 추출 (제정일/최근개정일 추출)
                         if hwp_content:
                             law_info = self.extract_law_info_from_content(hwp_content, item.get('title', ''))
                             # 규정명은 파일에서 추출한 것이 더 정확할 수 있으므로 업데이트
@@ -1270,7 +1300,16 @@ class KfbScraper(BaseScraper):
                                 item['enactment_date'] = law_info.get('enactment_date')
                             if law_info.get('revision_date'):
                                 item['revision_date'] = law_info.get('revision_date')
-                            # 본문은 상세 페이지에서 가져온 것을 유지 (파일 내용으로 덮어쓰지 않음)
+                            
+                            # 본문은 파일 내용으로 설정 (길이 제한 적용)
+                            original_length = len(hwp_content)
+                            if content_limit > 0 and hwp_content:
+                                item['content'] = hwp_content[:content_limit]
+                                if original_length > content_limit:
+                                    print(f"  ⚠ 본문 길이 제한 적용: {original_length}자 → {content_limit}자")
+                            else:
+                                item['content'] = hwp_content
+                            
                             print(f"  ✓ 파일 내용 추출 완료 ({len(hwp_content)}자)")
                             if law_info.get('enactment_date'):
                                 print(f"    제정일: {law_info.get('enactment_date')}")
@@ -1278,14 +1317,11 @@ class KfbScraper(BaseScraper):
                                 print(f"    최근 개정일: {law_info.get('revision_date')}")
                         else:
                             # 파일 내용 추출 실패 시 제정일/최근개정일은 그대로 유지
+                            # 본문은 상세 페이지에서 추출한 내용 유지 (파일이 없을 경우)
                             print(f"  ⚠ 파일 내용 추출 실패 또는 빈 파일")
                         
-                        # 파일 내용 추출 후 다운로드한 파일 삭제
-                        try:
-                            os.remove(filepath)
-                            print(f"  ✓ 다운로드 파일 삭제 완료: {os.path.basename(filepath)}")
-                        except Exception as e:
-                            print(f"  ⚠ 파일 삭제 실패: {e}")
+                        # 파일은 output/downloads 디렉토리에 보관
+                        print(f"  ✓ 파일 저장 완료: {filepath}")
                     else:
                         print(f"  ✗ 파일 다운로드 실패")
                         item['file_content'] = ""
@@ -1339,10 +1375,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='은행연합회 자율규제 스크래퍼')
     parser.add_argument('--limit', type=int, default=0, help='가져올 개수 제한 (0=전체)')
     parser.add_argument('--no-download', action='store_true', help='HWP 파일 다운로드 및 내용 추출 건너뛰기')
+    parser.add_argument('--content', type=int, default=0, help='본문 길이 제한 (0=제한 없음, 문자 수)')
     args = parser.parse_args()
     
     crawler = KfbScraper()
-    results = crawler.crawl_self_regulation(limit=args.limit, download_files=not args.no_download)
+    results = crawler.crawl_self_regulation(limit=args.limit, download_files=not args.no_download, content_limit=args.content)
     
     print(f"\n=== 최종 결과 ===")
     print(f"추출된 데이터: {len(results)}개")
