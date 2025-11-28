@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+from urllib.parse import urljoin
 
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -380,15 +381,17 @@ class KrxScraper(BaseScraper):
                             driver.switch_to.window(print_handle)
                             print(f"  → 프린트 팝업 창으로 전환: {driver.current_url}")
                             
-                            # 프린트 팝업 창의 URL을 다운로드 링크로 사용
-                            download_link = driver.current_url
+                            # 프린트 팝업 창의 URL
+                            print_url = driver.current_url
+                            download_link = print_url
                             
                             # 페이지 로딩 대기
                             time.sleep(2)
                             wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
                             
-                            # 프린트 팝업에서 '저장' 버튼 찾기 및 클릭
-                            downloaded_path = self._click_save_button_in_print_popup(driver, wait, file_name)
+                            # 프린트 팝업 URL에서 PDF 직접 다운로드
+                            print(f"  → PDF 다운로드 시작: {print_url}")
+                            downloaded_path = self._download_pdf_from_print_url(driver, print_url, file_name)
                             
                             # 프린트 팝업 창 닫기
                             driver.close()
@@ -408,6 +411,8 @@ class KrxScraper(BaseScraper):
                             print(f"  → 파일 이름: {file_name}")
                             if downloaded_path:
                                 print(f"  → 다운로드된 파일 경로: {downloaded_path}")
+                            else:
+                                print(f"  ⚠ PDF 다운로드 실패")
                         else:
                             # 새 창이 열리지 않았으면 원래 창의 URL 사용
                             download_link = driver.current_url
@@ -474,159 +479,49 @@ class KrxScraper(BaseScraper):
         
         return (content, download_link, file_name)
     
-    def _click_save_button_in_print_popup(self, driver, wait, file_name: str) -> str:
-        """프린트 팝업에서 '저장' 버튼을 찾아서 클릭하고 파일 다운로드
+    def _download_pdf_from_print_url(self, driver, print_url: str, file_name: str) -> str:
+        """프린트 팝업 URL에서 PDF 파일 다운로드 (Chrome print-to-pdf 사용)
         Args:
             driver: WebDriver 인스턴스
-            wait: WebDriverWait 인스턴스
+            print_url: 프린트 팝업 URL
             file_name: 저장할 파일명
         Returns:
             다운로드된 파일 경로
         """
         try:
-            # 다운로드 디렉토리에서 기존 파일 목록 확인
+            # 다운로드 디렉토리 경로
             download_dir = self.output_dir / "downloads"
-            existing_files = set(download_dir.glob("*.pdf")) if download_dir.exists() else set()
+            download_dir.mkdir(parents=True, exist_ok=True)
+            download_path = download_dir / file_name
             
-            # 프린트 팝업에서 '저장' 버튼 찾기 (여러 가능한 셀렉터 시도)
-            save_button_selectors = [
-                (By.XPATH, "//button[contains(text(), '저장')]"),
-                (By.XPATH, "//a[contains(text(), '저장')]"),
-                (By.XPATH, "//input[@value='저장']"),
-                (By.XPATH, "//button[contains(text(), 'Save')]"),
-                (By.XPATH, "//a[contains(text(), 'Save')]"),
-                (By.XPATH, "//input[@value='Save']"),
-                (By.XPATH, "//button[contains(text(), '다운로드')]"),
-                (By.XPATH, "//a[contains(text(), '다운로드')]"),
-                (By.XPATH, "//button[contains(text(), 'Download')]"),
-                (By.XPATH, "//a[contains(text(), 'Download')]"),
-                (By.CSS_SELECTOR, "button[onclick*='save']"),
-                (By.CSS_SELECTOR, "a[onclick*='save']"),
-                (By.CSS_SELECTOR, "button[onclick*='download']"),
-                (By.CSS_SELECTOR, "a[onclick*='download']"),
-                (By.CSS_SELECTOR, "#saveBtn"),
-                (By.CSS_SELECTOR, "#downloadBtn"),
-                (By.CSS_SELECTOR, ".save-btn"),
-                (By.CSS_SELECTOR, ".download-btn"),
-            ]
+            # Chrome print-to-pdf 기능 활용
+            print(f"  → Chrome print-to-pdf 기능으로 PDF 생성 중...")
+            pdf_data = driver.execute_cdp_cmd('Page.printToPDF', {
+                'printBackground': True,
+                'paperWidth': 8.27,  # A4 width in inches
+                'paperHeight': 11.69,  # A4 height in inches
+                'marginTop': 0,
+                'marginBottom': 0,
+                'marginLeft': 0,
+                'marginRight': 0,
+            })
             
-            save_button = None
-            for selector_type, selector_value in save_button_selectors:
-                try:
-                    save_button = wait.until(EC.element_to_be_clickable((selector_type, selector_value)))
-                    print(f"  → '저장' 버튼 발견: {selector_value}")
-                    break
-                except (TimeoutException, NoSuchElementException):
-                    continue
+            if pdf_data and 'data' in pdf_data:
+                import base64
+                pdf_bytes = base64.b64decode(pdf_data['data'])
+                with open(download_path, 'wb') as f:
+                    f.write(pdf_bytes)
+                
+                file_size = download_path.stat().st_size
+                if file_size > 0:
+                    print(f"  → PDF 생성 완료: {download_path} ({file_size} bytes)")
+                    return str(download_path)
             
-            if not save_button:
-                # 버튼을 찾지 못한 경우, 페이지 소스를 확인해서 디버깅
-                page_source = driver.page_source
-                print(f"  ⚠ '저장' 버튼을 찾지 못했습니다. 페이지 소스 확인 중...")
-                
-                # PDF 다운로드 링크 찾기 시도
-                pdf_link_selectors = [
-                    (By.XPATH, "//a[contains(@href, '.pdf')]"),
-                    (By.XPATH, "//a[contains(@href, 'pdf')]"),
-                    (By.XPATH, "//a[contains(@onclick, 'pdf')]"),
-                    (By.CSS_SELECTOR, "a[href*='.pdf']"),
-                    (By.CSS_SELECTOR, "a[href*='pdf']"),
-                ]
-                
-                pdf_link = None
-                for selector_type, selector_value in pdf_link_selectors:
-                    try:
-                        pdf_link = driver.find_element(selector_type, selector_value)
-                        pdf_url = pdf_link.get_attribute("href")
-                        if pdf_url:
-                            print(f"  → PDF 다운로드 링크 발견: {pdf_url[:100]}")
-                            # 링크 클릭
-                            pdf_link.click()
-                            print(f"  → PDF 다운로드 링크 클릭 완료")
-                            break
-                    except (NoSuchElementException, Exception):
-                        continue
-                
-                if not pdf_link:
-                    # 프린트 팝업 페이지의 URL을 사용해서 PDF 다운로드 시도
-                    current_url = driver.current_url
-                    print(f"  → 현재 URL: {current_url}")
-                    
-                    # URL에 download 파라미터 추가 시도
-                    if '?' in current_url:
-                        download_url = f"{current_url}&download=true"
-                    else:
-                        download_url = f"{current_url}?download=true"
-                    
-                    # JavaScript로 PDF 다운로드 시도
-                    try:
-                        # window.print() 호출 후 저장 다이얼로그 대기
-                        driver.execute_script("window.print();")
-                        print(f"  → window.print() 호출")
-                        time.sleep(2)  # 프린트 다이얼로그가 열릴 시간
-                        
-                        # 또는 직접 PDF 다운로드 링크 생성
-                        download_script = f"""
-                        var link = document.createElement('a');
-                        link.href = '{current_url}';
-                        link.download = '{file_name}';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                        """
-                        driver.execute_script(download_script)
-                        print(f"  → JavaScript로 PDF 다운로드 시도")
-                    except Exception as e:
-                        print(f"  ⚠ JavaScript 다운로드 시도 실패: {e}")
-            else:
-                # 저장 버튼 클릭
-                try:
-                    save_button.click()
-                    print(f"  → '저장' 버튼 클릭 완료")
-                except Exception as e:
-                    # JavaScript로 클릭 시도
-                    try:
-                        driver.execute_script("arguments[0].click();", save_button)
-                        print(f"  → JavaScript로 '저장' 버튼 클릭 완료")
-                    except Exception as e2:
-                        print(f"  ⚠ '저장' 버튼 클릭 실패: {e2}")
+            print(f"  ⚠ PDF 생성 실패")
+            return ""
             
-            # 다운로드 완료 대기 (최대 10초)
-            time.sleep(1)  # 초기 대기
-            max_wait = 10
-            waited = 0
-            downloaded_file = None
-            
-            while waited < max_wait:
-                # 새로 다운로드된 파일 찾기
-                current_files = set(download_dir.glob("*.pdf")) if download_dir.exists() else set()
-                new_files = current_files - existing_files
-                
-                if new_files:
-                    # 가장 최근에 수정된 파일 선택
-                    downloaded_file = max(new_files, key=lambda f: f.stat().st_mtime)
-                    print(f"  → 다운로드된 파일 발견: {downloaded_file.name}")
-                    break
-                
-                time.sleep(0.5)
-                waited += 0.5
-            
-            if downloaded_file:
-                # 파일명을 키워드 이름으로 변경
-                target_path = download_dir / file_name
-                if target_path.exists() and target_path != downloaded_file:
-                    # 이미 같은 이름의 파일이 있으면 삭제
-                    target_path.unlink()
-                
-                downloaded_file.rename(target_path)
-                print(f"  → 파일명 변경 완료: {target_path.name}")
-                return str(target_path)
-            else:
-                print(f"  ⚠ 다운로드된 파일을 찾지 못했습니다.")
-                return ""
-                
         except Exception as e:
-            print(f"  ⚠ 저장 버튼 클릭 중 오류: {e}")
+            print(f"  ⚠ PDF 다운로드 중 오류: {e}")
             import traceback
             traceback.print_exc()
             return ""
