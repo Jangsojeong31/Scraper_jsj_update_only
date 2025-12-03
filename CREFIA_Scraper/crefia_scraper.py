@@ -411,7 +411,7 @@ class CrefiaScraper(BaseScraper):
                             original_length = len(full_content)
                             
                             # 2단계: 파일 내용에서 데이터 추출
-                            extract_text = full_content[:500] if full_content else ""
+                            extract_text = full_content[:1000] if full_content else ""
                             
                             if extract_text:
                                 content_enactment, content_revision, content_department = extract_data_from_text(extract_text)
@@ -448,8 +448,8 @@ class CrefiaScraper(BaseScraper):
                                 if filename_revision:
                                     revision_date = filename_revision
                             
-                            # content를 500자로 제한
-                            content = full_content[:500]
+                            # content를 1000자로 제한
+                            content = full_content[:1000]
                             print(f"\n📄 {text} 파일 내용 추출 완료 "
                                   f"(원본: {original_length}자, 저장: {len(content)}자)")
                         except Exception as e:
