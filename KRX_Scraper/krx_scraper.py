@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 from selenium.common.exceptions import (
@@ -45,6 +45,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from common.base_scraper import BaseScraper  # noqa: E402  pylint: disable=wrong-import-position
+from common.file_comparator import FileComparator  # noqa: E402  pylint: disable=wrong-import-position
 
 
 class KrxScraper(BaseScraper):
@@ -64,20 +65,75 @@ class KrxScraper(BaseScraper):
         (self.output_dir / "json").mkdir(parents=True, exist_ok=True)
         (self.output_dir / "csv").mkdir(parents=True, exist_ok=True)
         (self.output_dir / "downloads").mkdir(parents=True, exist_ok=True)
+        # previous와 current 디렉토리 설정
+        self.previous_dir = self.output_dir / "downloads" / "previous"
+        self.current_dir = self.output_dir / "downloads" / "current"
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        # 파일 비교기 초기화
+        self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
+    
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _find_previous_file(self, file_name: str) -> Optional[Path]:
+        """previous 디렉토리에서 같은 파일명의 파일 찾기
+        Args:
+            file_name: 찾을 파일명
+        Returns:
+            이전 파일 경로 또는 None
+        """
+        previous_file = self.previous_dir / file_name
+        if previous_file.exists():
+            return previous_file
+        return None
     
     def crawl_krx_legal_portal(self) -> List[Dict]:
         """
         KRX법무포탈 스크래핑
         URL: https://rule.krx.co.kr/out/index.do
         """
+        # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+        self._backup_current_to_previous()
+        
         keywords = self._load_filter_keywords()
         if not keywords:
             print("⚠ 필터링할 키워드가 없습니다. CSV 파일을 확인해주세요.")
             return []
         
-        # Chrome 옵션에 다운로드 디렉토리 설정
+        # Chrome 옵션에 다운로드 디렉토리 설정 (current 디렉토리)
         chrome_options = self._build_default_chrome_options()
-        download_dir = str(self.output_dir / "downloads")
+        download_dir = str(self.current_dir)
         prefs = {
             "download.default_directory": download_dir,
             "download.prompt_for_download": False,
@@ -489,10 +545,8 @@ class KrxScraper(BaseScraper):
             다운로드된 파일 경로
         """
         try:
-            # 다운로드 디렉토리 경로
-            download_dir = self.output_dir / "downloads"
-            download_dir.mkdir(parents=True, exist_ok=True)
-            download_path = download_dir / file_name
+            # current 디렉토리에 저장
+            download_path = self.current_dir / file_name
             
             # Chrome print-to-pdf 기능 활용
             print(f"  → Chrome print-to-pdf 기능으로 PDF 생성 중...")
@@ -515,6 +569,10 @@ class KrxScraper(BaseScraper):
                 file_size = download_path.stat().st_size
                 if file_size > 0:
                     print(f"  → PDF 생성 완료: {download_path} ({file_size} bytes)")
+                    
+                    # 이전 파일과 비교
+                    self._compare_with_previous_file(str(download_path), file_name)
+                    
                     return str(download_path)
             
             print(f"  ⚠ PDF 생성 실패")
@@ -525,6 +583,41 @@ class KrxScraper(BaseScraper):
             import traceback
             traceback.print_exc()
             return ""
+    
+    def _compare_with_previous_file(self, new_file_path: str, file_name: str) -> None:
+        """다운로드한 파일을 이전 파일과 비교
+        Args:
+            new_file_path: 새로 다운로드한 파일 경로
+            file_name: 파일명
+        """
+        try:
+            previous_file = self._find_previous_file(file_name)
+            
+            if not previous_file:
+                print(f"  ✓ 새 파일 (이전 파일 없음)")
+                return
+            
+            print(f"  → 이전 파일과 비교 중... (이전 파일: {previous_file})")
+            comparison_result = self.file_comparator.compare_and_report(
+                new_file_path,
+                str(previous_file),
+                save_diff=True
+            )
+            
+            if comparison_result['changed']:
+                print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                if 'diff_file' in comparison_result:
+                    print(f"    Diff 파일: {comparison_result['diff_file']}")
+                    html_file = Path(comparison_result['diff_file']).with_suffix('.html')
+                    if html_file.exists():
+                        print(f"    HTML Diff 파일: {html_file}")
+            else:
+                print(f"  ✓ 파일 동일 (변경 없음)")
+                
+        except Exception as e:
+            print(f"  ⚠ 파일 비교 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _download_file(self, driver, download_url: str, file_name: str) -> str:
         """프린트 팝업 URL을 사용해서 PDF 파일 다운로드
@@ -544,8 +637,8 @@ class KrxScraper(BaseScraper):
             for cookie in cookies:
                 session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain', ''))
             
-            # 다운로드 디렉토리 경로
-            download_path = self.output_dir / "downloads" / file_name
+            # current 디렉토리에 저장
+            download_path = self.current_dir / file_name
             
             # 파일 다운로드 (헤더 설정)
             headers = {
