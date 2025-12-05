@@ -479,6 +479,7 @@ class KoFIUScraperV2:
         for idx, item in enumerate(all_items, 1):
             link_text = item.pop('_link_text', '')
             pdf_filename = item.pop('_pdf_filename', '')
+            item.pop('_post_date', None)  # 임시 필드 제거
             
             print(f"\n[{idx}/{len(all_items)}] {pdf_filename or link_text or 'N/A'} 처리 중...")
             
