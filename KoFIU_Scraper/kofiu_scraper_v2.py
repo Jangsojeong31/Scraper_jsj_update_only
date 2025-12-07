@@ -596,22 +596,32 @@ class KoFIUScraperV2:
     def _extract_related_laws(self, text):
         """
         텍스트에서 관련법규 추출
-        - ｢ ｣ 괄호 안의 법률명 + 조항 추출
+        - ｢ ｣ 및 「 」 괄호 안의 법률명 + 조항 추출
         - 각 법률별로 줄바꿈으로 구분
         """
         if not text:
             return ""
+        
+        # 전처리: 괄호 통일 (「」 -> ｢｣, 혼합 괄호 처리)
+        normalized_text = text
+        normalized_text = normalized_text.replace('「', '｢').replace('」', '｣')
+        
+        # 줄바꿈을 공백으로 대체하여 법률명이 분리되지 않도록 처리
+        normalized_text = re.sub(r'\s*\n\s*', ' ', normalized_text)
+        
+        # 연속 공백 정리
+        normalized_text = re.sub(r'\s+', ' ', normalized_text)
         
         laws = []
         
         # ｢법률명｣ 제X조... 패턴 추출
         # 법률명과 조항을 함께 추출
         pattern = r'｢([^｣]+)｣\s*(제[\d조의\s,제항호]+(?:등)?)'
-        matches = re.findall(pattern, text)
+        matches = re.findall(pattern, normalized_text)
         
         for law_name, articles in matches:
-            # 법률명 정리 (앞뒤 공백 제거)
-            law_name = law_name.strip()
+            # 법률명 정리 (앞뒤 공백 제거, 연속 공백 정리)
+            law_name = re.sub(r'\s+', ' ', law_name.strip())
             articles = articles.strip()
             
             # 조항 정리 (연속 공백 제거)
@@ -623,7 +633,7 @@ class KoFIUScraperV2:
         
         # 동법 시행령 패턴도 추출
         sihaengryung_pattern = r'동법\s*시행령\s*(제[\d조의\s,제항호]+(?:등)?)'
-        sihaengryung_matches = re.findall(sihaengryung_pattern, text)
+        sihaengryung_matches = re.findall(sihaengryung_pattern, normalized_text)
         
         for articles in sihaengryung_matches:
             articles = re.sub(r'\s+', '', articles.strip())
