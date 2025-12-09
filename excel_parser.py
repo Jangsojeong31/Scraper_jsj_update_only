@@ -32,7 +32,7 @@
     law      법제처 (빈 값으로 필터링)
     bok      한국은행
     crefia   여신금융협회
-    fsb      금융안정위원회
+    fsb      저축은행중앙회
     kfb      은행연합회
     kofia    금융투자협회
     krx      한국거래소
@@ -129,18 +129,25 @@ class LawExcelParser:
             print(f"\n=== 시트: {sheet_name} ===")
             print(f"  행 수: {ws.max_row}, 열 수: {ws.max_column}")
             
+            # max_row가 None인 경우 처리 (빈 시트)
+            max_row = ws.max_row if ws.max_row is not None else 0
+            
             # 첫 5행 데이터 확인
             print(f"\n  첫 5행 데이터:")
-            for i, row in enumerate(ws.iter_rows(min_row=1, max_row=min(5, ws.max_row), values_only=True), 1):
-                print(f"    {i}: {row}")
+            if max_row > 0:
+                for i, row in enumerate(ws.iter_rows(min_row=1, max_row=min(5, max_row), values_only=True), 1):
+                    print(f"    {i}: {row}")
+            else:
+                print("    (데이터 없음)")
             
             # 헤더 행 찾기 (첫 번째 비어있지 않은 행)
             header_row = None
-            for row_idx in range(1, min(10, ws.max_row + 1)):
-                row = list(ws.iter_rows(min_row=row_idx, max_row=row_idx, values_only=True))[0]
-                if any(cell for cell in row if cell):
-                    header_row = row_idx
-                    break
+            if max_row > 0:
+                for row_idx in range(1, min(10, max_row + 1)):
+                    row = list(ws.iter_rows(min_row=row_idx, max_row=row_idx, values_only=True))[0]
+                    if any(cell for cell in row if cell):
+                        header_row = row_idx
+                        break
             
             headers = []
             if header_row:
@@ -439,7 +446,7 @@ def main():
         'law': '',  # 법제처 - 빈 값으로 필터링
         'bok': '한국은행',
         'crefia': '여신금융협회',
-        'fsb': '금융안정위원회',
+        'fsb': '저축은행중앙회',
         'kfb': '은행연합회',
         'kofia': '금융투자협회',
         'krx': '한국거래소',

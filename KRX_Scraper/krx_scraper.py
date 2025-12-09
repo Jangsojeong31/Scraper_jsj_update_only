@@ -106,6 +106,28 @@ class KrxScraper(BaseScraper):
         
         print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
     
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.output_dir / "downloads" / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
+    
     def _find_previous_file(self, file_name: str) -> Optional[Path]:
         """previous 디렉토리에서 같은 파일명의 파일 찾기
         Args:
@@ -125,6 +147,8 @@ class KrxScraper(BaseScraper):
         """
         # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
         self._backup_current_to_previous()
+        # 이전 실행의 diff 파일 정리
+        self._clear_diffs_directory()
         
         keywords = self._load_filter_keywords()
         if not keywords:
@@ -734,9 +758,15 @@ class KrxScraper(BaseScraper):
             writer = csv.DictWriter(cf, fieldnames=headers)
             writer.writeheader()
             for item in records:
-                # CSV 저장 시 본문의 줄바꿈 처리 (KFB와 동일)
+                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                content = item.get('본문', '') or ''
+                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                if len(content) > 1000:
+                    content = content[:1000]
+                
                 csv_item = item.copy()
-                csv_item['본문'] = csv_item.get('본문', '').replace('\n', ' ').replace('\r', ' ')
+                csv_item['본문'] = content
                 writer.writerow(csv_item)
         print(f"CSV 저장 완료: {csv_path}")
 

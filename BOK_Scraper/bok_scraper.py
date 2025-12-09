@@ -53,14 +53,19 @@ class BokScraper(BaseScraper):
     
     def __init__(self, delay: float = 1.0, csv_path: Optional[str] = None):
         super().__init__(delay)
-        self.download_dir = os.path.join("output", "downloads")
-        self.previous_dir = os.path.join("output", "downloads", "previous", "bok")
-        os.makedirs(self.download_dir, exist_ok=True)
-        os.makedirs(self.previous_dir, exist_ok=True)
-        # FileExtractor 초기화 (session 전달)
-        self.file_extractor = FileExtractor(download_dir=self.download_dir, session=self.session)
+        # 출력 디렉토리 설정
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        (self.output_dir / "downloads").mkdir(parents=True, exist_ok=True)
+        # previous와 current 디렉토리 설정
+        self.previous_dir = self.output_dir / "downloads" / "previous"
+        self.current_dir = self.output_dir / "downloads" / "current"
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        # FileExtractor 초기화 (current 디렉토리 사용)
+        self.file_extractor = FileExtractor(download_dir=str(self.current_dir), session=self.session)
         # 파일 비교기 초기화
-        self.file_comparator = FileComparator(base_dir=self.download_dir)
+        self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
         # CSV에서 대상 규정 목록 로드
         self.csv_path = csv_path or self.DEFAULT_CSV_PATH
         self.target_laws = self._load_target_laws(self.csv_path)
@@ -114,6 +119,61 @@ class BokScraper(BaseScraper):
             if target_normalized == title_normalized or target_normalized in title_normalized or title_normalized in target_normalized:
                 return True
         return False
+    
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.output_dir / "downloads" / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
     
     def extract_regulation_list(self, soup: BeautifulSoup) -> List[Dict]:
         """법규 목록에서 대상 규정만 추출"""
@@ -468,11 +528,11 @@ class BokScraper(BaseScraper):
             # 안전한 파일명 생성
             safe_filename = self._get_safe_filename(file_name, regulation_name)
             
-            # 새 파일 다운로드 경로
-            new_file_path = os.path.join(self.download_dir, safe_filename)
+            # 새 파일 다운로드 경로 (current 디렉토리)
+            new_file_path = self.current_dir / safe_filename
             
-            # 이전 파일 경로 (규정명 기반으로 찾기)
-            previous_file_path = os.path.join(self.previous_dir, safe_filename)
+            # 이전 파일 경로 (previous 디렉토리)
+            previous_file_path = self.previous_dir / safe_filename
             
             # 파일 다운로드
             print(f"  파일 다운로드 중: {file_name}")
@@ -495,20 +555,20 @@ class BokScraper(BaseScraper):
                 return None
             
             # 다운로드한 파일을 새 파일 경로로 이동/복사
-            if downloaded_path != new_file_path:
+            if str(downloaded_path) != str(new_file_path):
                 import shutil
-                if os.path.exists(new_file_path):
-                    os.remove(new_file_path)  # 기존 파일 삭제
+                if new_file_path.exists():
+                    new_file_path.unlink()  # 기존 파일 삭제
                 shutil.move(downloaded_path, new_file_path)
                 print(f"  ✓ 파일 저장: {new_file_path}")
             
             # 이전 파일과 비교
             comparison_result = None
-            if os.path.exists(previous_file_path):
-                print(f"  이전 파일과 비교 중...")
+            if previous_file_path.exists():
+                print(f"  → 이전 파일과 비교 중... (이전 파일: {previous_file_path})")
                 comparison_result = self.file_comparator.compare_and_report(
-                    new_file_path,
-                    previous_file_path,
+                    str(new_file_path),
+                    str(previous_file_path),
                     save_diff=True
                 )
                 
@@ -516,24 +576,17 @@ class BokScraper(BaseScraper):
                     print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
                     if 'diff_file' in comparison_result:
                         print(f"    Diff 파일: {comparison_result['diff_file']}")
+                        html_file = Path(comparison_result['diff_file']).with_suffix('.html')
+                        if html_file.exists():
+                            print(f"    HTML Diff 파일: {html_file}")
                 else:
                     print(f"  ✓ 파일 동일 (변경 없음)")
-                
-                # 이전 파일을 새 파일로 교체 (다음 비교를 위해)
-                import shutil
-                shutil.copy2(new_file_path, previous_file_path)
-                print(f"  ✓ 이전 파일 업데이트 완료")
             else:
                 print(f"  ✓ 새 파일 (이전 파일 없음)")
-                # 이전 파일 디렉토리에 복사 (다음 비교를 위해)
-                import shutil
-                os.makedirs(self.previous_dir, exist_ok=True)
-                shutil.copy2(new_file_path, previous_file_path)
-                print(f"  ✓ 이전 파일로 저장 완료")
             
             return {
-                'file_path': new_file_path,
-                'previous_file_path': previous_file_path if os.path.exists(previous_file_path) else None,
+                'file_path': str(new_file_path),
+                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
                 'comparison': comparison_result,
             }
             
@@ -548,6 +601,11 @@ class BokScraper(BaseScraper):
         법규정보 - 규정 스크래핑
         CSV 목록 기반으로 각 규정명을 검색어로 사용하여 수집
         """
+        # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+        self._backup_current_to_previous()
+        # 이전 실행의 diff 파일 정리
+        self._clear_diffs_directory()
+        
         print(f"\n=== 한국은행 법규 스크래핑 시작 ===")
         if not self.target_laws:
             print("⚠ CSV 목록이 없습니다.")
@@ -765,11 +823,18 @@ def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
         file_names_str = "; ".join(item.get("file_names", [])) if item.get("file_names") else ""
         download_links_str = "; ".join(item.get("download_links", [])) if item.get("download_links") else ""
         
+        # 본문 내용 처리 (개행 유지, 1000자 제한)
+        content = item.get("content", "") or ""
+        # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        if len(content) > 1000:
+            content = content[:1000]
+        
         law_item = {
             "번호": str(idx),  # 순번으로 번호 생성
             "규정명": item.get("regulation_name", item.get("title", "")),
             "기관명": item.get("organization", "한국은행"),
-            "본문": (item.get("content", "") or "").replace("\n", " ").replace("\r", " "),
+            "본문": content,
             "제정일": item.get("enactment_date", ""),
             "최근 개정일": item.get("revision_date", ""),
             "소관부서": item.get("department", ""),

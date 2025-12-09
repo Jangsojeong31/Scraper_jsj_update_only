@@ -38,6 +38,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from common.base_scraper import BaseScraper
+from common.file_comparator import FileComparator
+from common.file_extractor import FileExtractor
 
 
 class LawGoKrScraper(BaseScraper):
@@ -53,6 +55,20 @@ class LawGoKrScraper(BaseScraper):
             csv_path: 법령명 목록이 있는 CSV 파일 경로 (None이면 기본 경로 사용)
         """
         super().__init__(delay)
+        
+        # 출력 디렉토리 설정
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        (self.output_dir / "downloads").mkdir(parents=True, exist_ok=True)
+        # previous와 current 디렉토리 설정
+        self.previous_dir = self.output_dir / "downloads" / "previous"
+        self.current_dir = self.output_dir / "downloads" / "current"
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        # FileExtractor 초기화 (current 디렉토리 사용)
+        self.file_extractor = FileExtractor(download_dir=str(self.current_dir), session=self.session)
+        # 파일 비교기 초기화
+        self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
         
         # CSV 파일에서 법령명과 구분 정보 읽기
         self.law_items = self._load_target_laws_from_csv(csv_path or self.DEFAULT_CSV_PATH)
@@ -183,6 +199,108 @@ class LawGoKrScraper(BaseScraper):
                 return True
         return False
     
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.output_dir / "downloads" / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
+    
+    def _find_previous_file(self, file_name: str) -> Optional[Path]:
+        """previous 디렉토리에서 같은 파일명의 파일 찾기
+        Args:
+            file_name: 찾을 파일명
+        Returns:
+            이전 파일 경로 또는 None
+        """
+        previous_file = self.previous_dir / file_name
+        if previous_file.exists():
+            return previous_file
+        return None
+    
+    def _compare_with_previous_file(self, new_file_path: str, file_name: str) -> None:
+        """다운로드한 파일을 이전 파일과 비교
+        Args:
+            new_file_path: 새로 다운로드한 파일 경로
+            file_name: 파일명
+        """
+        try:
+            previous_file = self._find_previous_file(file_name)
+            
+            if not previous_file:
+                print(f"  ✓ 새 파일 (이전 파일 없음)")
+                return
+            
+            print(f"  → 이전 파일과 비교 중... (이전 파일: {previous_file})")
+            comparison_result = self.file_comparator.compare_and_report(
+                new_file_path,
+                str(previous_file),
+                save_diff=True
+            )
+            
+            if comparison_result['changed']:
+                print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                if 'diff_file' in comparison_result:
+                    print(f"    Diff 파일: {comparison_result['diff_file']}")
+                    html_file = Path(comparison_result['diff_file']).with_suffix('.html')
+                    if html_file.exists():
+                        print(f"    HTML Diff 파일: {html_file}")
+            else:
+                print(f"  ✓ 파일 동일 (변경 없음)")
+                
+        except Exception as e:
+            print(f"  ⚠ 파일 비교 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def fetch_page(self, url: str, use_selenium: bool = False, driver: Optional[webdriver.Chrome] = None) -> Optional[BeautifulSoup]:
         """
         웹 페이지를 가져와서 BeautifulSoup 객체로 반환 (법령 검색 페이지 특화)
@@ -296,6 +414,618 @@ class LawGoKrScraper(BaseScraper):
         
         return info
     
+    def _extract_file_links(self, soup: BeautifulSoup, base_url: str = "") -> Dict:
+        """상세 페이지에서 파일 다운로드 링크 추출
+        Args:
+            soup: BeautifulSoup 객체
+            base_url: 기본 URL
+        Returns:
+            {'file_names': [], 'download_links': []} 딕셔너리
+        """
+        file_info = {
+            'file_names': [],
+            'download_links': []
+        }
+        
+        if soup is None:
+            return file_info
+        
+        # 방법 1: 국가법령정보센터의 다운로드 버튼 (#bdySaveBtn) 우선 검색
+        download_btn = soup.find('a', id='bdySaveBtn') or soup.select_one('#bdySaveBtn')
+        if download_btn:
+            href = download_btn.get('href', '')
+            onclick = download_btn.get('onclick', '')
+            
+            # onclick에서 URL 추출 시도
+            if not href or href == '#' or href.startswith('javascript:'):
+                if onclick:
+                    import re
+                    # onclick에서 URL 패턴 찾기
+                    url_patterns = [
+                        r"['\"]([^'\"]*download[^'\"]*)['\"]",
+                        r"['\"]([^'\"]*fileDown[^'\"]*)['\"]",
+                        r"['\"]([^'\"]*\.pdf[^'\"]*)['\"]",
+                        r"['\"]([^'\"]*\.hwp[^'\"]*)['\"]",
+                        r"location\.href\s*=\s*['\"]([^'\"]+)['\"]",
+                        r"window\.open\s*\(\s*['\"]([^'\"]+)['\"]",
+                    ]
+                    for pattern in url_patterns:
+                        match = re.search(pattern, onclick, re.IGNORECASE)
+                        if match:
+                            href = match.group(1)
+                            break
+            
+            if href and not href.startswith('javascript:'):
+                # 파일명 추출
+                file_name = download_btn.get_text(strip=True)
+                if not file_name or len(file_name) < 3:
+                    # href에서 파일명 추출 시도
+                    if href:
+                        file_name = href.split('/')[-1].split('?')[0]
+                        if not file_name or '.' not in file_name:
+                            file_name = download_btn.get('title', '') or '파일'
+                
+                # URL 완성
+                if base_url and not href.startswith('http'):
+                    file_url = urljoin(base_url, href)
+                else:
+                    file_url = href
+                
+                if file_url:
+                    file_info['file_names'].append(file_name)
+                    file_info['download_links'].append(file_url)
+                    print(f"  ✓ 파일 링크 발견 (#bdySaveBtn): {file_name} ({file_url[:80]})")
+                    return file_info  # 찾았으면 바로 반환
+        
+        # 방법 2: 일반적인 파일 다운로드 링크 선택자
+        file_selectors = [
+            'a[href*="download"]',
+            'a[href*="fileDown"]',
+            'a[href*=".pdf"]',
+            'a[href*=".hwp"]',
+            'a[href*=".doc"]',
+            'a[href*=".docx"]',
+            '.file_download a',
+            '.attach_file a',
+            '#fileList a',
+            '.file_list a',
+            'a[onclick*="download"]',
+            'a[onclick*="fileDown"]',
+        ]
+        
+        for selector in file_selectors:
+            file_links = soup.select(selector)
+            if file_links:
+                for link in file_links:
+                    href = link.get('href', '')
+                    onclick = link.get('onclick', '')
+                    
+                    # onclick에서 URL 추출 시도
+                    if not href or href == '#' or href.startswith('javascript:'):
+                        if onclick:
+                            import re
+                            # onclick에서 URL 패턴 찾기
+                            url_patterns = [
+                                r"['\"]([^'\"]*download[^'\"]*)['\"]",
+                                r"['\"]([^'\"]*fileDown[^'\"]*)['\"]",
+                                r"['\"]([^'\"]*\.pdf[^'\"]*)['\"]",
+                                r"['\"]([^'\"]*\.hwp[^'\"]*)['\"]",
+                            ]
+                            for pattern in url_patterns:
+                                match = re.search(pattern, onclick, re.IGNORECASE)
+                                if match:
+                                    href = match.group(1)
+                                    break
+                    
+                    if not href or href.startswith('javascript:'):
+                        continue
+                    
+                    # 파일명 추출
+                    file_name = link.get_text(strip=True)
+                    if not file_name or len(file_name) < 3:
+                        # href에서 파일명 추출 시도
+                        if href:
+                            file_name = href.split('/')[-1].split('?')[0]
+                            if not file_name or '.' not in file_name:
+                                file_name = link.get('title', '') or link.get('alt', '') or '파일'
+                    
+                    # URL 완성
+                    if base_url and not href.startswith('http'):
+                        file_url = urljoin(base_url, href)
+                    else:
+                        file_url = href
+                    
+                    if file_url and file_url not in file_info['download_links']:
+                        file_info['file_names'].append(file_name)
+                        file_info['download_links'].append(file_url)
+                        print(f"  ✓ 파일 링크 발견: {file_name} ({file_url[:80]})")
+        
+        # 방법 3: 국가법령정보센터 특정 구조 찾기
+        # 파일 다운로드 버튼이나 링크가 있는 영역 찾기
+        download_areas = soup.find_all(['div', 'span', 'td'], class_=lambda x: x and ('file' in str(x).lower() or 'download' in str(x).lower() or 'attach' in str(x).lower()))
+        for area in download_areas:
+            links = area.find_all('a', href=True)
+            for link in links:
+                href = link.get('href', '')
+                if href and ('.pdf' in href.lower() or '.hwp' in href.lower() or 'download' in href.lower() or 'fileDown' in href.lower()):
+                    if href not in file_info['download_links']:
+                        file_name = link.get_text(strip=True) or href.split('/')[-1].split('?')[0] or '파일'
+                        if base_url and not href.startswith('http'):
+                            file_url = urljoin(base_url, href)
+                        else:
+                            file_url = href
+                        file_info['file_names'].append(file_name)
+                        file_info['download_links'].append(file_url)
+                        print(f"  ✓ 파일 링크 발견 (영역 검색): {file_name} ({file_url[:80]})")
+        
+        return file_info
+    
+    def _download_file_with_selenium(self, driver, regulation_name: str = "") -> Optional[Dict]:
+        """Selenium을 사용하여 팝업을 통해 파일 다운로드
+        Args:
+            driver: Selenium WebDriver 인스턴스
+            regulation_name: 규정명 (파일명 생성용)
+        Returns:
+            비교 결과 딕셔너리 또는 None
+        """
+        try:
+            import re
+            import os
+            
+            # #bdySaveBtn 버튼 찾기 및 클릭 (여러 방법 시도)
+            save_btn = None
+            
+            # 방법 1: CSS 셀렉터로 찾기
+            try:
+                save_btn = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#bdySaveBtn"))
+                )
+                print(f"  ✓ 버튼 발견 (CSS 셀렉터)")
+            except:
+                pass
+            
+            # 방법 2: XPath로 찾기
+            if not save_btn:
+                try:
+                    save_btn = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[1]/div[2]/div[1]/div[3]/a[5]"))
+                    )
+                    print(f"  ✓ 버튼 발견 (XPath)")
+                except:
+                    pass
+            
+            # 방법 3: 다른 XPath 패턴 시도
+            if not save_btn:
+                try:
+                    # form[2]가 없을 수도 있으므로 다른 패턴 시도
+                    xpath_patterns = [
+                        "//a[@id='bdySaveBtn']",
+                        "//a[contains(@class, 'btn_c') and @id='bdySaveBtn']",
+                        "//a[@title='저장' and @id='bdySaveBtn']",
+                        "//a[contains(@onclick, 'bdySavePrint')]",
+                    ]
+                    for xpath in xpath_patterns:
+                        try:
+                            save_btn = driver.find_element(By.XPATH, xpath)
+                            if save_btn:
+                                print(f"  ✓ 버튼 발견 (XPath: {xpath[:50]}...)")
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+            
+            # 방법 4: iframe 안에 있을 수 있으므로 iframe 확인
+            found_in_iframe = False
+            if not save_btn:
+                try:
+                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                    print(f"  → iframe {len(iframes)}개 발견, 확인 중...")
+                    for iframe in iframes:
+                        try:
+                            driver.switch_to.frame(iframe)
+                            save_btn = driver.find_element(By.CSS_SELECTOR, "#bdySaveBtn")
+                            if save_btn:
+                                print(f"  ✓ 버튼 발견 (iframe 내부)")
+                                found_in_iframe = True
+                                break
+                        except:
+                            driver.switch_to.default_content()
+                            continue
+                    if not save_btn:
+                        driver.switch_to.default_content()
+                except Exception as e:
+                    print(f"  → iframe 확인 중 오류: {e}")
+                    try:
+                        driver.switch_to.default_content()
+                    except:
+                        pass
+            
+            # 버튼을 찾지 못한 경우
+            if not save_btn:
+                print(f"  ⚠ #bdySaveBtn 버튼을 찾을 수 없습니다")
+                print(f"  → 현재 페이지 URL: {driver.current_url}")
+                print(f"  → 페이지 소스 일부 확인 중...")
+                try:
+                    # 페이지에서 'bdySaveBtn' 텍스트가 있는지 확인
+                    page_source = driver.page_source
+                    if 'bdySaveBtn' in page_source:
+                        print(f"  → 페이지 소스에 'bdySaveBtn' 텍스트는 존재합니다")
+                        # 모든 a 태그 확인
+                        all_links = driver.find_elements(By.TAG_NAME, "a")
+                        print(f"  → 페이지에 <a> 태그 {len(all_links)}개 발견")
+                        for i, link in enumerate(all_links[:10]):  # 처음 10개만 확인
+                            link_id = link.get_attribute('id')
+                            link_class = link.get_attribute('class')
+                            if link_id or (link_class and 'btn' in link_class):
+                                print(f"    [{i}] id={link_id}, class={link_class}")
+                    else:
+                        print(f"  → 페이지 소스에 'bdySaveBtn' 텍스트가 없습니다")
+                except Exception as e:
+                    print(f"  → 페이지 소스 확인 중 오류: {e}")
+                return None
+            
+            # 버튼 클릭
+            try:
+                print(f"  → 다운로드 버튼 클릭 중... (#bdySaveBtn)")
+                # 스크롤하여 버튼이 보이도록
+                driver.execute_script("arguments[0].scrollIntoView(true);", save_btn)
+                time.sleep(0.5)
+                # JavaScript로 클릭
+                driver.execute_script("arguments[0].click();", save_btn)
+                time.sleep(2)
+                print(f"  ✓ 버튼 클릭 완료")
+            except Exception as e:
+                print(f"  ⚠ 버튼 클릭 실패: {e}")
+                return None
+            
+            # iframe에서 찾았으면 default content로 복귀
+            if found_in_iframe:
+                try:
+                    driver.switch_to.default_content()
+                    print(f"  → 메인 컨텍스트로 복귀")
+                except:
+                    pass
+            
+            # 팝업이 나타날 시간 대기 (모달/div로 같은 페이지에 나타남)
+            print(f"  → 팝업 대기 중...")
+            # WebDriverWait로 팝업 요소가 나타날 때까지 대기 (최대 3초, 실제로는 더 빠르게)
+            try:
+                WebDriverWait(driver, 3).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#aBtnOutPutSave, input[type='radio']"))
+                )
+            except:
+                time.sleep(1)  # fallback
+            
+            # 라디오 버튼 선택 (DOC → PDF → HWP 순서로 시도)
+            radio_selected = False
+            selected_format = None  # 선택된 형식 저장
+            radio_buttons = [
+                {
+                    'name': 'DOC',
+                    'xpath': '/html/body/div[45]/div[2]/div/div/form/fieldset/div[3]/div[1]/div[4]/input',
+                    'selector': 'input[type="radio"][value*="doc" i], input[type="radio"][value*="DOC"]'
+                },
+                {
+                    'name': 'PDF',
+                    'xpath': '/html/body/div[45]/div[2]/div/div/form/fieldset/div[3]/div[1]/div[3]/input',
+                    'selector': 'input[type="radio"][value*="pdf" i], input[type="radio"][value*="PDF"]'
+                },
+                {
+                    'name': 'HWP',
+                    'xpath': '/html/body/div[45]/div[2]/div/div/form/fieldset/div[3]/div[1]/div[1]/input',
+                    'selector': 'input[type="radio"][value*="hwp" i], input[type="radio"][value*="HWP"]'
+                }
+            ]
+            
+            for radio_info in radio_buttons:
+                radio_btn = None
+                # 방법 1: XPath로 찾기
+                try:
+                    radio_btn = driver.find_element(By.XPATH, radio_info['xpath'])
+                    print(f"  ✓ {radio_info['name']} 라디오 버튼 발견 (XPath)")
+                except:
+                    # 방법 2: CSS 셀렉터로 찾기
+                    try:
+                        radio_btn = driver.find_element(By.CSS_SELECTOR, radio_info['selector'])
+                        print(f"  ✓ {radio_info['name']} 라디오 버튼 발견 (CSS 셀렉터)")
+                    except:
+                        pass
+                
+                if radio_btn:
+                    try:
+                        # 라디오 버튼이 이미 선택되어 있는지 확인
+                        if not radio_btn.is_selected():
+                            # JavaScript로 클릭하여 선택
+                            driver.execute_script("arguments[0].click();", radio_btn)
+                            time.sleep(0.3)  # 최소 대기 시간으로 줄임
+                            
+                            # 선택이 실제로 반영되었는지 확인 (빠른 검증)
+                            is_actually_selected = False
+                            try:
+                                # 방법 1: is_selected() 확인
+                                is_actually_selected = radio_btn.is_selected()
+                            except:
+                                pass
+                            
+                            if not is_actually_selected:
+                                # 방법 2: checked 속성 확인
+                                try:
+                                    is_actually_selected = driver.execute_script("return arguments[0].checked;", radio_btn)
+                                except:
+                                    pass
+                            
+                            if is_actually_selected:
+                                print(f"  ✓ {radio_info['name']} 라디오 버튼 선택 완료 (검증됨)")
+                            else:
+                                print(f"  ⚠ {radio_info['name']} 라디오 버튼 선택 실패 (검증 실패)")
+                                # 다시 시도
+                                driver.execute_script("arguments[0].checked = true; arguments[0].click();", radio_btn)
+                                time.sleep(0.3)  # 재시도 대기 시간도 줄임
+                                # 최종 확인
+                                try:
+                                    if radio_btn.is_selected() or driver.execute_script("return arguments[0].checked;", radio_btn):
+                                        print(f"  ✓ {radio_info['name']} 라디오 버튼 선택 완료 (재시도 성공)")
+                                        is_actually_selected = True
+                                except:
+                                    pass
+                        else:
+                            print(f"  ✓ {radio_info['name']} 라디오 버튼이 이미 선택되어 있음")
+                            is_actually_selected = True
+                        
+                        if is_actually_selected:
+                            radio_selected = True
+                            selected_format = radio_info['name']  # 선택된 형식 저장
+                            break
+                    except Exception as e:
+                        print(f"  ⚠ {radio_info['name']} 라디오 버튼 선택 실패: {e}")
+                        continue
+            
+            if not radio_selected:
+                print(f"  ⚠ 라디오 버튼을 찾을 수 없습니다 (계속 진행)")
+            
+            # #aBtnOutPutSave 버튼 찾기 (여러 방법 시도)
+            download_btn = None
+            
+            # 방법 1: CSS 셀렉터
+            try:
+                download_btn = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#aBtnOutPutSave"))
+                )
+                print(f"  ✓ 저장 버튼 발견 (CSS 셀렉터)")
+            except:
+                pass
+            
+            # 방법 2: XPath
+            if not download_btn:
+                try:
+                    download_btn = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, "/html/body/div[45]/div[2]/div/div/form/fieldset/div[3]/div[2]/a[1]"))
+                    )
+                    print(f"  ✓ 저장 버튼 발견 (XPath)")
+                except:
+                    pass
+            
+            # 방법 3: 다른 XPath 패턴들
+            if not download_btn:
+                xpath_patterns = [
+                    "//a[@id='aBtnOutPutSave']",
+                    "//a[contains(@onclick, 'beforeSavePrint')]",
+                    "//a[@href='#AJAX' and @id='aBtnOutPutSave']",
+                ]
+                for xpath in xpath_patterns:
+                    try:
+                        download_btn = driver.find_element(By.XPATH, xpath)
+                        if download_btn:
+                            print(f"  ✓ 저장 버튼 발견 (XPath: {xpath[:50]}...)")
+                            break
+                    except:
+                        continue
+            
+            # 버튼을 찾지 못한 경우
+            if not download_btn:
+                print(f"  ⚠ #aBtnOutPutSave 버튼을 찾을 수 없습니다")
+                return None
+            
+            # 버튼 클릭
+            try:
+                print(f"  → 다운로드 실행 버튼 클릭 중... (#aBtnOutPutSave)")
+                # 스크롤하여 버튼이 보이도록
+                driver.execute_script("arguments[0].scrollIntoView(true);", download_btn)
+                time.sleep(0.3)  # 스크롤 대기 시간 줄임
+                # JavaScript로 클릭
+                driver.execute_script("arguments[0].click();", download_btn)
+                print(f"  ✓ 버튼 클릭 완료")
+                
+                # 파일 다운로드 시작 대기 (최소 시간)
+                time.sleep(1.5)  # 3초에서 1.5초로 줄임
+            except Exception as e:
+                print(f"  ⚠ 버튼 클릭 실패: {e}")
+                return None
+            
+            # 다운로드된 파일 찾기 (current 디렉토리에서 최근 파일)
+            # 파일이 실제로 다운로드될 때까지 대기 (최대 10초, 폴링 방식)
+            max_wait = 10
+            wait_interval = 0.5
+            waited = 0
+            files_before = set(self.current_dir.glob("*"))
+            
+            while waited < max_wait:
+                time.sleep(wait_interval)
+                waited += wait_interval
+                files_after = set(self.current_dir.glob("*"))
+                new_files = files_after - files_before
+                # .crdownload 파일이 없고 새 파일이 있으면 다운로드 완료
+                crdownload_files = [f for f in new_files if f.name.endswith('.crdownload')]
+                if not crdownload_files and new_files:
+                    break
+            
+            # current 디렉토리에서 최근 파일 찾기
+            downloaded_files = list(self.current_dir.glob("*"))
+            if not downloaded_files:
+                print(f"  ⚠ 다운로드된 파일을 찾을 수 없습니다")
+                return None
+            
+            # 가장 최근 파일 선택
+            latest_file = max(downloaded_files, key=lambda p: p.stat().st_mtime if p.is_file() else 0)
+            
+            if not latest_file.is_file():
+                print(f"  ⚠ 다운로드된 파일이 아닙니다")
+                return None
+            
+            # 다운로드된 파일의 확장자 확인
+            downloaded_ext = latest_file.suffix.lower()
+            
+            # 선택한 형식과 다운로드된 파일의 확장자 일치 여부 확인
+            if selected_format:
+                expected_exts = {
+                    'DOC': ['.doc', '.docx'],
+                    'PDF': ['.pdf'],
+                    'HWP': ['.hwp']
+                }
+                expected_exts_list = expected_exts.get(selected_format, [])
+                
+                if expected_exts_list and downloaded_ext not in expected_exts_list:
+                    print(f"  ⚠ 경고: {selected_format} 형식을 선택했지만 다운로드된 파일은 {downloaded_ext} 형식입니다.")
+                    print(f"  → 다운로드된 파일: {latest_file.name}")
+                else:
+                    print(f"  ✓ {selected_format} 형식으로 다운로드 확인: {downloaded_ext}")
+            
+            # 파일명 생성 (규정명 기반)
+            if regulation_name:
+                safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
+                safe_reg_name = safe_reg_name.replace(' ', '_')
+                ext = latest_file.suffix or '.pdf'
+                safe_filename = f"{safe_reg_name}{ext}"
+            else:
+                safe_filename = latest_file.name
+            
+            # 파일명 변경 (규정명 기반으로)
+            new_file_path = self.current_dir / safe_filename
+            if latest_file != new_file_path:
+                if new_file_path.exists():
+                    new_file_path.unlink()
+                latest_file.rename(new_file_path)
+                print(f"  ✓ 파일 저장: {new_file_path}")
+            else:
+                print(f"  ✓ 파일 저장: {new_file_path}")
+            
+            # 이전 파일과 비교
+            previous_file_path = self.previous_dir / safe_filename
+            comparison_result = None
+            
+            if previous_file_path.exists():
+                print(f"  → 이전 파일과 비교 중...")
+                comparison_result = self.file_comparator.compare_and_report(
+                    str(new_file_path),
+                    str(previous_file_path),
+                    save_diff=True
+                )
+                
+                if comparison_result['changed']:
+                    print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                else:
+                    print(f"  ✓ 파일 동일 (변경 없음)")
+            else:
+                print(f"  ✓ 새 파일 (이전 파일 없음)")
+            
+            # 파일 URL과 파일명 반환 (결과에 포함하기 위해)
+            return {
+                'file_path': str(new_file_path),
+                'file_url': '',  # 팝업을 통한 다운로드이므로 URL 없음
+                'file_name': safe_filename,
+                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
+                'comparison': comparison_result,
+            }
+            
+        except Exception as e:
+            print(f"  ⚠ Selenium 파일 다운로드 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _download_and_compare_file(self, file_url: str, file_name: str, regulation_name: str = "") -> Optional[Dict]:
+        """파일 다운로드 및 이전 파일과 비교
+        Args:
+            file_url: 다운로드 URL
+            file_name: 파일명
+            regulation_name: 규정명 (이전 파일 매칭용)
+        Returns:
+            비교 결과 딕셔너리 또는 None
+        """
+        try:
+            import re
+            import os
+            # 안전한 파일명 생성
+            if regulation_name:
+                safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
+                safe_reg_name = safe_reg_name.replace(' ', '_')
+                ext = Path(file_name).suffix if file_name else '.pdf'
+                safe_filename = f"{safe_reg_name}{ext}"
+            else:
+                safe_filename = re.sub(r'[^\w\s.-]', '', file_name).replace(' ', '_')
+            
+            # 새 파일 다운로드 경로 (current 디렉토리)
+            new_file_path = self.current_dir / safe_filename
+            
+            # 이전 파일 경로 (previous 디렉토리)
+            previous_file_path = self.previous_dir / safe_filename
+            
+            # 파일 다운로드
+            print(f"  → 파일 다운로드 중: {file_name}")
+            downloaded_result = self.file_extractor.download_file(
+                file_url,
+                safe_filename,
+                use_selenium=False,
+                driver=None
+            )
+            
+            if downloaded_result:
+                downloaded_path, actual_filename = downloaded_result
+            else:
+                downloaded_path, actual_filename = None, None
+            
+            if not downloaded_path or not os.path.exists(downloaded_path):
+                print(f"  ⚠ 파일 다운로드 실패")
+                return None
+            
+            # 다운로드한 파일을 새 파일 경로로 이동/복사
+            if str(downloaded_path) != str(new_file_path):
+                import shutil
+                if new_file_path.exists():
+                    new_file_path.unlink()
+                shutil.move(downloaded_path, new_file_path)
+                print(f"  ✓ 파일 저장: {new_file_path}")
+            
+            # 이전 파일과 비교
+            comparison_result = None
+            if previous_file_path.exists():
+                print(f"  → 이전 파일과 비교 중...")
+                comparison_result = self.file_comparator.compare_and_report(
+                    str(new_file_path),
+                    str(previous_file_path),
+                    save_diff=True
+                )
+                
+                if comparison_result['changed']:
+                    print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                else:
+                    print(f"  ✓ 파일 동일 (변경 없음)")
+            else:
+                print(f"  ✓ 새 파일 (이전 파일 없음)")
+            
+            return {
+                'file_path': str(new_file_path),
+                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
+                'comparison': comparison_result,
+            }
+            
+        except Exception as e:
+            print(f"  ⚠ 파일 다운로드/비교 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def extract_law_detail(self, soup: BeautifulSoup) -> str:
         """
         법령 상세 페이지에서 법령 내용 추출
@@ -330,16 +1060,12 @@ class LawGoKrScraper(BaseScraper):
         
         if content_div:
             # 법령 조문 내용 추출
-            # 조문들은 보통 특정 클래스나 구조를 가지고 있음
-            articles = content_div.find_all(['div', 'p', 'span'], class_=lambda x: x and ('article' in x.lower() or 'jo' in x.lower() or 'item' in x.lower()))
-            if articles:
-                for article in articles:
-                    text = article.get_text(strip=True, separator='\n')
-                    if text:
-                        content += text + "\n\n"
-            else:
-                # 조문이 없으면 전체 텍스트 추출
-                content = content_div.get_text(strip=True, separator='\n')
+            # 화면에서 보이는 것처럼 자연스럽게 추출 (개행 유지)
+            # 스크립트, 스타일 등 제외
+            for element in content_div.find_all(['script', 'style', 'nav', 'header', 'footer']):
+                element.decompose()
+            # 전체 텍스트 추출 (개행 유지)
+            content = content_div.get_text(separator='\n', strip=True)
         
         # 내용이 없으면 본문 영역 전체에서 추출
         if not content:
@@ -348,8 +1074,13 @@ class LawGoKrScraper(BaseScraper):
                 # 스크립트, 스타일, 네비게이션 등 제외
                 for element in body.find_all(['script', 'style', 'nav', 'header', 'footer']):
                     element.decompose()
-                content = body.get_text(strip=True, separator='\n')
+                content = body.get_text(separator='\n', strip=True)
         
+        # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+        import re
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        # 연속된 개행을 최대 2개로 제한 (너무 많은 빈 줄 방지)
+        content = re.sub(r'\n{3,}', '\n\n', content)
         return content.strip()
     
     def extract_law_search_results(self, soup: BeautifulSoup, base_url: str = None, is_adm_rul: bool = False, skip_target_filter: bool = False) -> Dict:
@@ -584,10 +1315,15 @@ class LawGoKrScraper(BaseScraper):
             writer.writeheader()
             
             for law_item in records:
-                # records는 이미 한글 필드명으로 정리된 데이터이므로 그대로 사용
-                # CSV 저장 시 본문의 줄바꿈 처리만 추가
+                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                content = law_item.get("본문", "") or ""
+                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                if len(content) > 1000:
+                    content = content[:1000]
+                
                 csv_item = law_item.copy()
-                csv_item["본문"] = csv_item.get("본문", "").replace("\n", " ").replace("\r", " ")
+                csv_item["본문"] = content
                 writer.writerow(csv_item)
 
         print(f"\nCSV로 저장되었습니다: {filepath}")
@@ -705,6 +1441,11 @@ def main():
 
     crawler = LawGoKrScraper(delay=1.0)
     
+    # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+    crawler._backup_current_to_previous()
+    # 이전 실행의 diff 파일 정리
+    crawler._clear_diffs_directory()
+    
     # 국가법령정보센터 검색 페이지 베이스 URL (기본값)
     default_base_search_url = "https://www.law.go.kr/LSW/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query="
     
@@ -717,6 +1458,20 @@ def main():
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--lang=ko-KR')
+    
+    # Chrome 다운로드 디렉토리 설정 (current 디렉토리)
+    import os
+    download_dir = str(crawler.current_dir)
+    prefs = {
+        "download.default_directory": os.path.abspath(download_dir),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "plugins.always_open_pdf_externally": True,  # PDF를 외부에서 열기
+        "safebrowsing.enabled": True,
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.default_content_setting_values.automatic_downloads": 1
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
     driver = webdriver.Chrome(options=chrome_options)
     
     all_results = []
@@ -875,9 +1630,58 @@ def main():
                                 print(f"  ✓ 본문 추출 완료 ({len(law_content)}자)")
                             else:
                                 print(f"  ⚠ 본문 추출 실패 또는 빈 내용")
+                            
+                            # 파일 다운로드 (Selenium을 사용하여 팝업 처리)
+                            # 상세 페이지가 이미 Selenium으로 열려있으므로 driver 사용 가능
+                            print(f"  → 파일 다운로드 시도 중...")
+                            
+                            # Selenium으로 파일 다운로드 (팝업 처리)
+                            downloaded_file_path = crawler._download_file_with_selenium(driver, regulation_name=original_law_name)
+                            
+                            if downloaded_file_path and downloaded_file_path.get('file_path'):
+                                target_item['file_download_link'] = downloaded_file_path.get('file_url', '')
+                                target_item['file_name'] = downloaded_file_path.get('file_name', '')
+                                
+                                file_path = downloaded_file_path['file_path']
+                                if file_path.lower().endswith('.pdf'):
+                                    print(f"  → PDF 내용 추출 중...")
+                                    pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
+                                    if pdf_content:
+                                        # PDF 내용이 있으면 본문으로 사용
+                                        target_item['law_content'] = pdf_content
+                                        print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
+                            else:
+                                # Selenium 다운로드 실패 시 기존 방법 시도
+                                file_info = crawler._extract_file_links(detail_soup, law_link)
+                                if file_info['download_links']:
+                                    target_item['file_download_link'] = file_info['download_links'][0]
+                                    target_item['file_name'] = file_info['file_names'][0] if file_info['file_names'] else ''
+                                    
+                                    # 파일 다운로드 및 비교
+                                    downloaded_file_path = crawler._download_and_compare_file(
+                                        file_info['download_links'][0],
+                                        file_info['file_names'][0] if file_info['file_names'] else '파일.pdf',
+                                        regulation_name=original_law_name
+                                    )
+                                    
+                                    # PDF 파일이면 내용 추출
+                                    if downloaded_file_path and downloaded_file_path.get('file_path'):
+                                        file_path = downloaded_file_path['file_path']
+                                        if file_path.lower().endswith('.pdf'):
+                                            print(f"  → PDF 내용 추출 중...")
+                                            pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
+                                            if pdf_content:
+                                                # PDF 내용이 있으면 본문으로 사용
+                                                target_item['law_content'] = pdf_content
+                                                print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
+                                else:
+                                    target_item['file_download_link'] = ''
+                                    target_item['file_name'] = ''
                         else:
                             print(f"  ✗ 상세 페이지 가져오기 실패")
                             target_item['law_content'] = ""
+                            target_item['file_download_link'] = ''
+                            target_item['file_name'] = ''
                         
                         # 구분 정보 추가
                         target_item['division'] = division
@@ -1021,11 +1825,16 @@ def main():
                 print(f"   내용: 없음")
         
         def truncate_content(text: str) -> str:
+            """본문 내용 처리 (개행 유지, 1000자 제한)"""
             if not text:
                 return ''
-            if content_limit and len(text) > content_limit:
-                return text[:content_limit]
-            return text
+            # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+            content = text.replace("\r\n", "\n").replace("\r", "\n")
+            # 1000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 1000자)
+            max_length = min(1000, content_limit) if content_limit > 0 else 1000
+            if len(content) > max_length:
+                content = content[:max_length]
+            return content
 
         for item in all_results:
             # 원본 법령명 우선 사용 (괄호 포함), 없으면 검색 결과의 법령명 사용
