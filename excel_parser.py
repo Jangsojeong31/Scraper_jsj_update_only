@@ -518,6 +518,12 @@ def main():
         if args.output_list:
             # output-list 옵션이 지정되면 해당 경로 사용
             parser_obj.save_to_law_list_csv(records, args.output_list)
+        elif keyword_lower == 'law':
+            # law 키워드인 경우 세 곳에 모두 저장
+            directories = ['Law_Scraper', 'Law_LegNotice_Scraper', 'Moleg_Scraper']
+            for directory_name in directories:
+                list_path = project_root / directory_name / "input" / "list.csv"
+                parser_obj.save_to_law_list_csv(records, str(list_path))
         elif keyword_lower and keyword_lower in DIRECTORY_MAPPING:
             # 약자 키워드가 있고 디렉토리 매핑에 있으면 해당 디렉토리의 input/list.csv에 저장
             directory_name = DIRECTORY_MAPPING[keyword_lower]
