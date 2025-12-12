@@ -1,84 +1,35 @@
 import argparse
 import csv
-import io
 import json
-import logging
 import re
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-
-try:
-    import pdfplumber  # type: ignore
-except ImportError:  # pragma: no cover
-    pdfplumber = None
-
-try:
-    import olefile  # type: ignore
-except ImportError:  # pragma: no cover
-    olefile = None
-
-try:
-    from hwp5.hwp5txt import Hwp5File as _Hwp5File, TextTransform as _Hwp5TextTransform  # type: ignore
-    from hwp5.hwp5html import HTMLTransform as _HTMLTransform  # type: ignore
-    import io
-    from contextlib import closing
-except Exception:  # pragma: no cover
-    _Hwp5File = None
-    _Hwp5TextTransform = None
-    _HTMLTransform = None
-    io = None
-    closing = None
-
-import zipfile
-import tempfile
-import shutil
-import zlib
 
 BASE_URL = "https://www.fss.or.kr"
 LIST_PATH = "/fss/bbs/B0000167/list.do"
 DETAIL_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
 }
-FILE_SIZE_PATTERN = re.compile(r"\((?:파일)?\s*크기\s*[:：]\s*([^)]+)\)")
-DETAIL_KEY_MAP = {
-    "등록일": "상세등록일",
-    "조회수": "상세조회수",
-    "담당부서": "상세담당부서",
-    "담당팀": "상세담당팀",
-    "담당자": "상세담당자",
-    "문의": "상세문의",
-    "문의이메일": "상세문의이메일",
-    "문의 이메일": "상세문의이메일",
-}
-TABLE_FIELD_NAMES = ["항 목", "점 검 사 항", "점 검 방 식"]
 DEFAULT_TIMEOUT = 30
 SLEEP_SECONDS = 0.3
-SUPPORTED_TEXT_EXTENSIONS = {"pdf", "hwp", "txt"}
 
 # 스크랩 대상 리스트
 SCRAPE_TARGETS = [
     "은행 검사매뉴얼",
-    "대부업 검사업무 안내서",
-    "저축은행 검사업무안내서",
     "여신전문금융 검사업무 안내서",
-    "상호금융 검사업무 안내서",
+    "금융투자 검사업무 안내서",
+    "저축은행 검사업무 안내서",
+    "신용정보업 검사업무 안내서",
+    "IT 검사업무 안내서",
+    "금융소비자보호법 검사업무 안내서",
+    "자금세탁방지 검사업무 안내서",
+    "퇴직연금 검사매뉴얼"
 ]
-
-HTML_TRANSFORM = _HTMLTransform() if '_HTMLTransform' in globals() and _HTMLTransform else None
-
-
-# pyhwp 변환 시 불필요한 경고 로그가 과도하게 출력되는 문제 완화
-logging.getLogger("hwp5").setLevel(logging.ERROR)
-
-
-# 중복 첨부파일 재처리를 방지하기 위한 간단한 캐시
-AttachmentCache = Dict[str, List[Dict[str, str]]]
-_attachment_cache: AttachmentCache = {}
 
 
 class ScraperError(Exception):
@@ -166,6 +117,21 @@ def parse_bd_list(bd_list) -> List[Dict[str, str]]:
         date_elem = item.find(class_=re.compile(r"date|등록일", re.I))
         if date_elem:
             reg_date = date_elem.get_text(strip=True)
+        else:
+            # td나 다른 요소에서 등록일 찾기 시도
+            # span.only-m이 포함된 td 찾기
+            for td in item.find_all("td"):
+                span = td.find("span", class_=re.compile(r"only-m|등록일", re.I))
+                if span and "등록일" in span.get_text():
+                    # 정규식으로 날짜 패턴 추출 (YYYY-MM-DD, YYYY.MM.DD 등)
+                    date_pattern = re.search(r'(\d{4}[-.]\d{1,2}[-.]\d{1,2})', td.get_text())
+                    if date_pattern:
+                        reg_date = date_pattern.group(1).replace(".", "-")
+                    else:
+                        # span을 제거하고 텍스트만 가져오기
+                        text = td.get_text(strip=True)
+                        reg_date = re.sub(r'등록일\s*', '', text).strip()
+                    break
         
         # 담당부서 찾기
         dept_elem = item.find(class_=re.compile(r"dept|부서", re.I))
@@ -214,8 +180,31 @@ def parse_list_row(tr) -> Optional[Dict[str, str]]:
     category = extract_category_from_title(title)
 
     dept = tds[3].get_text(strip=True)
-    reg_date = tds[4].get_text(strip=True)
-    views = tds[6].get_text(strip=True)
+    
+    # 등록일 추출: 5번째 td (인덱스 4)에서 span 태그 안의 날짜 추출
+    reg_date_td = tds[4] if len(tds) > 4 else None
+    reg_date = ""
+    if reg_date_td:
+        # span 태그 찾기
+        span = reg_date_td.find("span")
+        if span:
+            # span의 텍스트를 제외한 나머지 텍스트 가져오기 (날짜 부분)
+            # span을 제거한 후 텍스트 추출
+            span_text = span.get_text(strip=True)
+            full_text = reg_date_td.get_text(strip=True)
+            # span 텍스트("등록일")를 제거
+            reg_date = full_text.replace(span_text, "").strip()
+        else:
+            # span이 없으면 정규식으로 날짜 패턴 추출
+            date_pattern = re.search(r'(\d{4}[-.]\d{1,2}[-.]\d{1,2})', reg_date_td.get_text())
+            if date_pattern:
+                reg_date = date_pattern.group(1).replace(".", "-")
+            else:
+                # 전체 텍스트에서 "등록일" 제거
+                text = reg_date_td.get_text(strip=True)
+                reg_date = re.sub(r'등록일\s*', '', text).strip()
+    
+    views = tds[6].get_text(strip=True) if len(tds) > 6 else ""
 
     parsed = urlparse(detail_url)
     query = parse_qs(parsed.query)
@@ -233,704 +222,6 @@ def parse_list_row(tr) -> Optional[Dict[str, str]]:
     }
 
 
-def extract_attachment_info(view: BeautifulSoup) -> Tuple[List[Dict[str, str]], List[str]]:
-    attachments: List[Dict[str, str]] = []
-    sizes: List[str] = []
-
-    for item in view.select("dl.file-list div.file-list__set__item"):
-        anchor = item.find("a", href=True)
-        if not anchor:
-            continue
-        download_url = urljoin(BASE_URL, anchor["href"])
-        name_span = anchor.select_one(".name")
-        raw_name = name_span.get_text(" ", strip=True) if name_span else anchor.get_text(" ", strip=True)
-
-        size_match = FILE_SIZE_PATTERN.search(raw_name)
-        size = size_match.group(1).strip() if size_match else ""
-        name = FILE_SIZE_PATTERN.sub("", raw_name).strip()
-
-        attachments.append({
-            "name": name,
-            "url": download_url,
-            "size": size,
-        })
-        if size:
-            sizes.append(size)
-
-    return attachments, sizes
-
-
-def download_file(session: requests.Session, url: str, dest_path: Path) -> Path:
-    try:
-        response = session.get(url, timeout=DEFAULT_TIMEOUT, headers=DETAIL_HEADERS, stream=True)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise ScraperError(f"첨부파일 다운로드 실패: {url} | {exc}") from exc
-
-    with dest_path.open("wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-    return dest_path
-
-
-def extract_text_from_pdf(path: Path) -> str:
-    if pdfplumber is None:
-        print(f"[경고] pdfplumber 미설치로 PDF 파싱을 건너뜁니다: {path.name}")
-        return ""
-    try:
-        text_parts: List[str] = []
-        with pdfplumber.open(str(path)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                if page_text:
-                    text_parts.append(page_text)
-        return "\n".join(text_parts)
-    except Exception as exc:
-        print(f"[경고] PDF 파싱 실패 ({path.name}): {exc}")
-        return ""
-
-
-def extract_text_from_hwp(path: Path) -> str:
-    if olefile is not None:
-        try:
-            with olefile.OleFileIO(str(path)) as ole:
-                if not ole.exists("BodyText/Section0"):
-                    return ""
-                with ole.openstream("BodyText/Section0") as stream:
-                    data = stream.read()
-                    try:
-                        decompressed = zlib.decompress(data, -15)
-                    except zlib.error:
-                        decompressed = data
-                    return decompressed.decode("utf-16-le", errors="ignore")
-        except Exception as exc:
-            print(f"[경고] HWP 파싱 실패 ({path.name}): {exc}")
-
-    if _Hwp5File and _Hwp5TextTransform and closing and io:
-        try:
-            text_transform = _Hwp5TextTransform()
-            buffer = io.BytesIO()
-            with closing(_Hwp5File(str(path))) as hwp:
-                text_transform.transform_hwp5_to_text(hwp, buffer)
-            raw_bytes = buffer.getvalue()
-            try:
-                return raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                return raw_bytes.decode("cp949", errors="ignore")
-        except Exception as exc:
-            print(f"[경고] hwp5 텍스트 추출 실패 ({path.name}): {exc}")
-    else:
-        print(f"[경고] olefile 미설치로 HWP 파싱을 건너뜁니다: {path.name}")
-    return ""
-
-
-def extract_text_from_file(path: Path) -> str:
-    ext = path.suffix.lower().lstrip(".")
-    if ext == "pdf":
-        return extract_text_from_pdf(path)
-    if ext == "hwp":
-        return extract_text_from_hwp(path)
-    if ext in {"txt", "csv", "log"}:
-        try:
-            return path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return path.read_text(encoding="utf-8", errors="ignore")
-    return ""
-
-
-def is_header_line(line: str) -> bool:
-    """
-    표 헤더 라인인지 확인
-    "항목", "점검사항", "점검방식" 세 키워드가 모두 포함되어 있으면 헤더로 인식
-    """
-    normalized = line.replace(" ", "").replace("\t", "")
-    # 세 키워드가 모두 포함되어 있어야 함
-    has_item = "항목" in normalized
-    has_check = "점검사항" in normalized or "점검사" in normalized
-    has_method = "점검방식" in normalized or "점검방" in normalized
-    return has_item and has_check and has_method
-
-
-def normalize_cell(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip())
-
-
-def parse_table_from_text(text: str) -> List[Dict[str, str]]:
-    """
-    텍스트에서 표(항목, 점검사항, 점검방식)만 파싱
-    여러 표를 모두 찾아서 파싱
-    """
-    if not text:
-        return []
-    
-    lines = text.splitlines()
-    all_rows: List[Dict[str, str]] = []
-    
-    # 모든 표 헤더 위치 찾기
-    header_indices = []
-    for idx, line in enumerate(lines):
-        normalized = normalize_cell(line)
-        if is_header_line(normalized):
-            header_indices.append(idx)
-    
-    if not header_indices:
-        return []
-    
-    bullet_tokens = {"", "-", "☑", "□", "◦", "•"}
-    noise_items = {"필 수", "필수", "선 택", "선택", "구 분", "구분"}
-    check_item_pattern = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]\s*")
-    
-    def strip_bullets(text: str) -> str:
-        return text.strip("□☑◦• ·").strip()
-    
-    # 각 표 헤더마다 표 파싱
-    for header_idx, header_index in enumerate(header_indices):
-        # 다음 표 헤더까지 또는 파일 끝까지
-        end_index = header_indices[header_idx + 1] if header_idx + 1 < len(header_indices) else len(lines)
-        
-        rows: List[Dict[str, str]] = []
-        current_entry: Optional[Dict[str, str]] = None
-        current_item: str = ""
-        empty_row_count = 0
-        
-        for line in lines[header_index + 1:end_index]:
-            normalized = normalize_cell(line)
-            if not normalized:
-                empty_row_count += 1
-                # 연속된 빈 행이 5개 이상이면 표가 끝난 것으로 간주
-                if empty_row_count >= 5 and rows:
-                    break
-                continue
-            
-            empty_row_count = 0
-            
-            parts = re.split(r"\s{2,}|\t|\|", normalized)
-            parts = [normalize_cell(p) for p in parts if normalize_cell(p)]
-            
-            if len(parts) >= 3:
-                item = strip_bullets(parts[0])
-                check = strip_bullets(parts[1])
-                method = " ".join(parts[2:]).strip()
-                method = strip_bullets(method)
-                
-                # "①", "②", "③" 같은 번호를 점검사항에서 제거
-                if check_item_pattern.match(check):
-                    check = check_item_pattern.sub("", check).strip()
-                
-                # "①", "②", "③"로 시작하는 텍스트는 항상 점검사항 (항목 열에 있어도 점검사항으로 처리)
-                if check_item_pattern.match(item) and not check:
-                    check = check_item_pattern.sub("", item).strip()
-                    item = ""
-                
-                item_is_valid = item and item not in noise_items and item not in bullet_tokens
-                check_is_valid = check and check not in bullet_tokens
-                
-                # 1. 항목이 있으면 현재 항목 업데이트 (이전 entry 저장)
-                if item_is_valid:
-                    # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-                    if current_entry and current_entry.get("점 검 사 항"):
-                        rows.append(current_entry)
-                    current_item = item  # 현재 항목 저장
-                    current_entry = None  # 새 항목이 시작되므로 entry 초기화
-                
-                # 2. 점검사항이 있으면 반드시 새 entry 생성
-                if check_is_valid:
-                    # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-                    if current_entry and current_entry.get("점 검 사 항"):
-                        rows.append(current_entry)
-                    
-                    # 새 entry 생성 (항목이 비어있으면 이전 항목 유지)
-                    if current_item:
-                        # 현재 항목이 있으면 사용
-                        current_entry = {
-                            "항 목": current_item,
-                            "점 검 사 항": check,
-                            "점 검 방 식": method if method else "",
-                        }
-                    elif item_is_valid:
-                        # 새 항목이 있으면 사용하고 저장
-                        current_item = item
-                        current_entry = {
-                            "항 목": item,
-                            "점 검 사 항": check,
-                            "점 검 방 식": method if method else "",
-                        }
-                    else:
-                        # 항목이 없으면 빈 값
-                        current_entry = {
-                            "항 목": "",
-                            "점 검 사 항": check,
-                            "점 검 방 식": method if method else "",
-                        }
-                elif not current_entry:
-                    # current_entry가 없고 점검사항도 없으면 건너뜀
-                    continue
-                elif method:
-                    # 점검사항이 없고 점검방식만 있으면 현재 entry에 추가
-                    if current_entry:
-                        if current_entry["점 검 방 식"]:
-                            current_entry["점 검 방 식"] += " " + method
-                        else:
-                            current_entry["점 검 방 식"] = method
-            elif current_entry and normalized:
-                # 현재 entry가 있고 추가 텍스트가 있으면 점검방식에 추가
-                if current_entry["점 검 방 식"]:
-                    current_entry["점 검 방 식"] += " " + normalized
-                else:
-                    current_entry["점 검 방 식"] = normalized
-        
-        # 마지막 entry 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-        if current_entry and current_entry.get("점 검 사 항"):
-            rows.append(current_entry)
-        
-        # 이 표의 행들을 전체 결과에 추가
-        all_rows.extend(rows)
-    
-    return all_rows
-
-
-def parse_table_from_html(html: str, *, stop_when_found: bool = True) -> List[Dict[str, str]]:
-    """
-    HTML에서 표를 파싱. 표를 찾으면 즉시 파싱하고 중단하여 불필요한 처리 최소화
-    """
-    if not html:
-        return []
-    try:
-        soup = BeautifulSoup(html, "lxml-xml")
-    except Exception:
-        soup = BeautifulSoup(html, "lxml")
-
-    tables = soup.find_all("table")
-    parsed_rows: List[Dict[str, str]] = []
-
-    for table in tables:
-        raw_rows: List[List[str]] = []
-        for tr in table.find_all("tr"):
-            cells = [normalize_cell(cell.get_text(" ", strip=True)) for cell in tr.find_all(["th", "td"])]
-            if cells:
-                raw_rows.append(cells)
-
-        if not raw_rows:
-            continue
-
-        headers = [cell.replace(" ", "") for cell in raw_rows[0]]
-
-        def find_index(keyword: str) -> Optional[int]:
-            for idx, header in enumerate(headers):
-                if keyword in header:
-                    return idx
-            return None
-
-        idx_item = find_index("항목")
-        idx_check = find_index("점검사항")
-        idx_method = find_index("점검방식")
-
-        if None in (idx_item, idx_check, idx_method):
-            continue
-
-        bullet_tokens = {"", "-", "☑", "□", "◦", "•"}
-        noise_items = {"필 수", "필수", "선 택", "선택", "구 분", "구분"}
-
-        current_entry: Optional[Dict[str, str]] = None
-        current_item: str = ""  # 현재 항목을 별도로 추적
-
-        def strip_bullets(text: str) -> str:
-            return text.strip("□☑◦• ·").strip()
-
-        for row in raw_rows[1:]:
-            item = row[idx_item] if idx_item < len(row) else ""
-            check = row[idx_check] if idx_check < len(row) else ""
-
-            method_parts: List[str] = []
-            if idx_method < len(row):
-                method_parts.append(row[idx_method])
-            for col_idx, cell in enumerate(row):
-                if col_idx in {idx_item, idx_check, idx_method}:
-                    continue
-                method_parts.append(cell)
-            method = normalize_cell(" ".join(part for part in method_parts if part))
-
-            item = strip_bullets(item)
-            check = strip_bullets(check)
-            method = strip_bullets(method)
-
-            # "①", "②", "③" 같은 번호를 점검사항에서 제거
-            check_item_pattern = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]\s*")
-            
-            # 점검사항 열이 비어있거나 bullet_tokens만 있는지 확인
-            check_is_empty_or_bullet = not check or check in bullet_tokens or check.strip() in {"☑", "☐", "□", "☒"}
-            
-            # 점검사항에서 번호 제거
-            if check_item_pattern.match(check):
-                check = check_item_pattern.sub("", check).strip()
-            
-            # 항목 열에 번호가 있는 경우
-            if check_item_pattern.match(item):
-                if check_is_empty_or_bullet:
-                    # 항목 열에 점검사항이 들어가 있고 점검사항 열이 비어있으면 교체
-                    check = check_item_pattern.sub("", item).strip()
-                    item = ""  # 항목은 이전 항목을 유지하도록 빈 값으로 설정
-                else:
-                    # 항목 열에도 번호가 있지만 점검사항 열에도 값이 있으면 항목에서 번호만 제거
-                    item = check_item_pattern.sub("", item).strip()
-            # 항목 열에 번호는 없지만, 점검사항 열이 비어있고 항목이 유효한 텍스트인 경우
-            # (이전 항목이 있고, 항목이 noise_items가 아니면 점검사항으로 처리)
-            elif check_is_empty_or_bullet and item and item not in noise_items and item not in bullet_tokens:
-                # 항목 열의 내용을 점검사항으로 사용, 항목은 이전 항목 유지
-                # 단, 현재 항목이 이미 설정되어 있고 이것이 실제 항목 형식(숫자로 시작하는 등)이 아니면 점검사항으로 처리
-                if not (current_item and item.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "10."))):
-                    check = item
-                    item = ""  # 이전 항목 유지
-
-            item_is_valid = item and item not in noise_items and item not in bullet_tokens
-            # 점검사항은 noise_items와 bullet_tokens를 제외하고, "선 택", "필 수" 같은 것도 제외
-            check_is_valid = check and check not in bullet_tokens and check not in noise_items
-            # "선 택", "필 수" 같은 단독 텍스트는 점검사항으로 인정하지 않음
-            if check.strip() in {"선 택", "선택", "필 수", "필수", "구 분", "구분"}:
-                check_is_valid = False
-            
-            # 1. 항목이 있으면 현재 항목 업데이트 (이전 entry 저장)
-            if item_is_valid:
-                # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-                if current_entry and current_entry.get("점 검 사 항"):
-                    parsed_rows.append(current_entry)
-                current_item = item  # 현재 항목 저장
-                current_entry = None  # 새 항목이 시작되므로 entry 초기화
-            
-            # 2. 점검사항이 있으면 반드시 새 entry 생성
-            if check_is_valid:
-                # 이전 entry가 있으면 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-                if current_entry and current_entry.get("점 검 사 항"):
-                    parsed_rows.append(current_entry)
-                
-                # 새 entry 생성 (항목이 비어있으면 이전 항목 유지)
-                if current_item:
-                    # 현재 항목이 있으면 사용
-                    current_entry = {
-                        "항 목": current_item,
-                        "점 검 사 항": check,
-                        "점 검 방 식": "",
-                    }
-                elif item_is_valid:
-                    # 새 항목이 있으면 사용하고 저장
-                    current_item = item
-                    current_entry = {
-                        "항 목": item,
-                        "점 검 사 항": check,
-                        "점 검 방 식": "",
-                    }
-                else:
-                    # 항목이 없으면 빈 값 (이상한 경우지만 처리)
-                    current_entry = {
-                        "항 목": "",
-                        "점 검 사 항": check,
-                        "점 검 방 식": "",
-                    }
-                method_for_entry = method
-            elif not current_entry:
-                # current_entry가 없고 점검사항도 없으면 건너뜀
-                continue
-            elif method:
-                # 점검사항이 없고 점검방식만 있으면 현재 entry에 추가
-                method_for_entry = method
-            else:
-                method_for_entry = ""
-
-            method_for_entry = strip_bullets(method_for_entry)
-            if method_for_entry and current_entry:
-                if current_entry["점 검 방 식"]:
-                    current_entry["점 검 방 식"] += " " + method_for_entry
-                else:
-                    current_entry["점 검 방 식"] = method_for_entry
-
-        # 마지막 entry 저장 (점검방식 여부와 관계없이 점검사항이 있으면 저장)
-        if current_entry and current_entry.get("점 검 사 항"):
-            parsed_rows.append(current_entry)
-
-        if parsed_rows and stop_when_found:
-            # 표를 찾으면 즉시 중단
-            break
-
-    return parsed_rows
-
-
-def extract_table_rows_from_hwp(path: Path) -> List[Dict[str, str]]:
-    """
-    HWP 파일에서 표(항목, 점검사항, 점검방식)만 빠르게 추출
-    표를 찾으면 즉시 파싱하고 중단하여 전체 문서 파싱을 피함
-    """
-    # 1. HTML 변환 시도 (표 구조 파싱에 가장 정확)
-    if HTML_TRANSFORM and _Hwp5File and closing:
-        try:
-            with closing(_Hwp5File(str(path))) as hwp:
-                buffer = io.BytesIO()
-                HTML_TRANSFORM.transform_hwp5_to_xhtml(hwp, buffer)
-            html = buffer.getvalue().decode("utf-8", errors="ignore")
-            # 모든 표를 찾도록 변경
-            rows = parse_table_from_html(html, stop_when_found=False)
-            if rows:
-                print(f"[정보] HTML 변환으로 {len(rows)}개 행 추출: {path.name}")
-                return rows
-            else:
-                print(f"[정보] HTML 변환 성공했지만 표를 찾지 못함: {path.name}")
-        except Exception as exc:
-            print(f"[경고] HWP HTML 변환 실패 ({path.name}): {exc}")
-    else:
-        print(f"[경고] HTML 변환 도구가 없음 (HTML_TRANSFORM={HTML_TRANSFORM is not None}, _Hwp5File={_Hwp5File is not None})")
-
-    # 2. hwp5 텍스트 변환 시도
-    if _Hwp5File and _Hwp5TextTransform and closing and io:
-        try:
-            text_transform = _Hwp5TextTransform()
-            buffer = io.BytesIO()
-            with closing(_Hwp5File(str(path))) as hwp:
-                text_transform.transform_hwp5_to_text(hwp, buffer)
-            raw_bytes = buffer.getvalue()
-            try:
-                text = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw_bytes.decode("cp949", errors="ignore")
-            rows = parse_table_from_text(text)
-            if rows:
-                print(f"[정보] 텍스트 변환으로 {len(rows)}개 행 추출: {path.name}")
-                return rows
-        except Exception as exc:
-            print(f"[경고] 텍스트 변환 실패 ({path.name}): {exc}")
-
-    # 3. olefile로 텍스트 추출 시도
-    if olefile is not None:
-        try:
-            with olefile.OleFileIO(str(path)) as ole:
-                if ole.exists("BodyText/Section0"):
-                    with ole.openstream("BodyText/Section0") as stream:
-                        data = stream.read()
-                        try:
-                            decompressed = zlib.decompress(data, -15)
-                        except zlib.error:
-                            decompressed = data
-                        text = decompressed.decode("utf-16-le", errors="ignore")
-                        # 표 헤더가 있는지 확인하고 바로 파싱
-                        rows = parse_table_from_text(text)
-                        if rows:
-                            print(f"[정보] olefile로 {len(rows)}개 행 추출: {path.name}")
-                            return rows
-                        else:
-                            # 디버깅: 표 헤더 찾기 시도
-                            lines = text.splitlines()
-                            print(f"[디버그] 텍스트 라인 수: {len(lines)}, 처음 200줄 검색")
-                            found_header = False
-                            for idx, line in enumerate(lines[:200]):  # 처음 200줄 확인
-                                normalized = normalize_cell(line)
-                                if normalized and ("항목" in normalized or "점검" in normalized):
-                                    print(f"[디버그] 관련 라인 발견 (줄 {idx+1}): {normalized[:150]}")
-                                    if is_header_line(line):
-                                        print(f"[디버그] *** 표 헤더 발견! (줄 {idx+1}): {normalized[:150]}")
-                                        found_header = True
-                                        # 헤더 다음 10줄 출력
-                                        for i in range(min(10, len(lines) - idx - 1)):
-                                            next_line = normalize_cell(lines[idx+1+i])
-                                            if next_line:
-                                                print(f"[디버그]   줄 {idx+2+i}: {next_line[:150]}")
-                                        break
-                            if not found_header:
-                                print(f"[디버그] 표 헤더를 찾지 못했습니다. '항목' 포함 라인 검색...")
-                                for idx, line in enumerate(lines[:500]):
-                                    if "항목" in line:
-                                        print(f"[디버그] '항목' 포함 라인 (줄 {idx+1}): {line[:150]}")
-                                        if idx < 10:  # 처음 10개만 출력
-                                            continue
-                                        break
-        except Exception as exc:
-            print(f"[경고] olefile 파싱 실패 ({path.name}): {exc}")
-            import traceback
-            traceback.print_exc()
-
-    print(f"[경고] HWP 파일에서 표를 추출할 수 없음: {path.name}")
-    return []
-
-
-def extract_table_rows_from_file(path: Path) -> List[Dict[str, str]]:
-    text = extract_text_from_file(path)
-    if not text:
-        return []
-    return parse_table_from_text(text)
-
-
-def extract_table_rows_from_zip(
-    path: Path,
-    *,
-    stop_when_found: bool = False,
-    log: Optional[Callable[[str], None]] = None,
-) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
-    try:
-        with zipfile.ZipFile(path) as zf, tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            for idx, member in enumerate(zf.namelist(), start=1):
-                if member.endswith("/"):
-                    continue
-                inner_name = Path(member)
-                suffix_lower = inner_name.suffix.lower()
-                if suffix_lower not in {".hwp", ".pdf", ".zip"}:
-                    continue
-                safe_inner_name = re.sub(r"[^\w가-힣._-]", "_", inner_name.name) or f"file_{idx}"
-                target_path = temp_path / safe_inner_name
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as source, target_path.open("wb") as dest:
-                    shutil.copyfileobj(source, dest)
-                inner_rows = extract_table_rows_from_path(
-                    target_path,
-                    stop_when_found=stop_when_found,
-                    log=log,
-                )
-                if inner_rows:
-                    rows.extend(inner_rows)
-                    if stop_when_found:
-                        return rows
-    except Exception as exc:
-        print(f"[경고] ZIP 파싱 실패 ({path.name}): {exc}")
-    return rows
-
-
-def extract_table_rows_from_path(
-    path: Path,
-    *,
-    stop_when_found: bool = False,
-    log: Optional[Callable[[str], None]] = None,
-) -> List[Dict[str, str]]:
-    ext = path.suffix.lower().lstrip(".")
-    if ext == "zip":
-        return extract_table_rows_from_zip(
-            path,
-            stop_when_found=stop_when_found,
-            log=log,
-        )
-    if ext == "hwp":
-        if log:
-            log(f"[정보] HWP 파싱 시작: {path.name}")
-        rows = extract_table_rows_from_hwp(path)
-        if log and rows:
-            log(f"[정보] HWP 파싱 완료: {len(rows)}개 행 발견")
-    elif ext == "pdf":
-        if log:
-            log(f"[정보] PDF 파싱 시작: {path.name}")
-        rows = extract_table_rows_from_file(path)
-        if log and rows:
-            log(f"[정보] PDF 파싱 완료: {len(rows)}개 행 발견")
-        elif log:
-            log(f"[정보] PDF 파싱 완료: 표를 찾지 못함")
-    else:
-        rows = extract_table_rows_from_file(path)
-    if stop_when_found and rows:
-        return rows
-    return rows
-
-
-def extract_table_from_attachments(
-    session: requests.Session,
-    attachments: List[Dict[str, str]],
-    *,
-    log: Optional[Callable[[str], None]] = None,
-) -> List[Dict[str, str]]:
-    if not attachments:
-        return []
-    rows: List[Dict[str, str]] = []
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        for idx, attachment in enumerate(attachments, start=1):
-            url = attachment.get("url")
-            if not url:
-                continue
-            cached = _attachment_cache.get(url)
-            if cached is not None:
-                if cached:
-                    rows.extend(cached)
-                    return rows
-                continue
-
-            filename = attachment.get("name") or f"attachment_{idx}"
-            safe_name = re.sub(r"[^\w가-힣._-]", "_", filename)
-            dest = temp_path / safe_name
-            try:
-                if log:
-                    log(f"[정보] 첨부 다운로드 시작: {filename}")
-                download_file(session, url, dest)
-                if log:
-                    log(f"[정보] 첨부 다운로드 완료: {filename} ({dest.stat().st_size} bytes)")
-            except ScraperError as exc:
-                print(f"[경고] 첨부 다운로드 실패: {exc}")
-                _attachment_cache[url] = []
-                continue
-
-            extracted_rows = extract_table_rows_from_path(
-                dest,
-                stop_when_found=False,  # 모든 표를 찾도록 변경
-                log=log,
-            )
-            _attachment_cache[url] = extracted_rows
-            if extracted_rows:
-                rows.extend(extracted_rows)
-                # 모든 표를 찾았으므로 break 제거
-    return rows
-
-
-def parse_detail(
-    session: requests.Session,
-    detail_url: str,
-    *,
-    skip_table_extraction: bool = False,
-    log: Optional[Callable[[str], None]] = None,
-) -> Tuple[Dict[str, str], List[Dict[str, str]], List[Dict[str, str]]]:
-    try:
-        soup = fetch_soup(session, detail_url)
-        if log:
-            log(f"[정보] 상세 페이지 응답 수신: {detail_url}")
-    except ScraperError as exc:
-        print(f"[경고] 상세 페이지 요청 실패: {exc}")
-        return {}, [], []
-
-    view = soup.select_one("div.bd-view")
-    if not view:
-        print(f"[경고] 상세 영역을 찾을 수 없습니다: {detail_url}")
-        return {}, [], []
-
-    detail_data: Dict[str, str] = {}
-
-    content_div = view.select_one("div.dbdata")
-    if content_div:
-        content_text = content_div.get_text("\n", strip=True)
-        detail_data["상세내용"] = content_text or "-"
-    else:
-        detail_data["상세내용"] = "-"
-
-    attachments, sizes = extract_attachment_info(view)
-    if log:
-        log(f"[정보] 첨부파일 {len(attachments)}건 발견: {detail_url}")
-    if sizes:
-        detail_data["상세첨부파일크기"] = " | ".join(sizes)
-
-    table_rows: List[Dict[str, str]] = []
-    if not skip_table_extraction:
-        table_rows = extract_table_from_attachments(
-            session,
-            attachments,
-            log=log,
-        )
-
-    for dl in view.find_all("dl", recursive=False):
-        if "file-list" in (dl.get("class") or []):
-            continue
-        dts = [dt.get_text(strip=True) for dt in dl.find_all("dt")]
-        dds = [dd.get_text(" ", strip=True) for dd in dl.find_all("dd")]
-        for dt_text, dd_text in zip(dts, dds):
-            normalized_key = dt_text.replace(" ", "")
-            mapped_key = DETAIL_KEY_MAP.get(normalized_key) or DETAIL_KEY_MAP.get(dt_text) or dt_text
-            detail_data[mapped_key] = dd_text
-
-    return detail_data, attachments, table_rows
-
-
 def parse_date(date_str: str) -> Optional[tuple]:
     """등록일 문자열을 (년, 월, 일) 튜플로 변환 (비교용)"""
     if not date_str or date_str == "-":
@@ -946,11 +237,54 @@ def parse_date(date_str: str) -> Optional[tuple]:
     return None
 
 
+def extract_date_from_title(title: str) -> Optional[tuple]:
+    """
+    제목에서 날짜를 추출하여 (년, 월) 튜플로 반환
+    
+    예: "대부업 검사업무 안내서('25.7월)" -> (2025, 7)
+         "은행 검사매뉴얼('23.4월)" -> (2023, 4)
+         "자금세탁방지 검사업무 안내서('25년 6월)" -> (2025, 6)
+    """
+    if not title:
+        return None
+    
+    # 패턴: '25.7월, 25.7월, 2025.7월, '25년 6월, 25년 6월 등
+    patterns = [
+        r"'?(\d{2,4})\s*년\s*(\d{1,2})\s*월",  # '25년 6월, 25년 6월, 2025년 6월 (우선순위 높음)
+        r"'?(\d{2,4})\.(\d{1,2})월",  # '25.7월, 2025.7월
+        r"'?(\d{2,4})\s*\.\s*(\d{1,2})\s*월",  # 공백 포함
+        r"'?(\d{2,4})-(\d{1,2})월",  # 하이픈 사용
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, title)
+        if match:
+            try:
+                year_str = match.group(1)
+                month = int(match.group(2))
+                
+                # 2자리 연도를 4자리로 변환
+                if len(year_str) == 2:
+                    year_int = int(year_str)
+                    # 50 이상이면 1900년대, 미만이면 2000년대
+                    if year_int >= 50:
+                        year = 1900 + year_int
+                    else:
+                        year = 2000 + year_int
+                else:
+                    year = int(year_str)
+                
+                return (year, month)
+            except (ValueError, IndexError):
+                continue
+    
+    return None
+
+
 def scrape_all(
     session: requests.Session,
     limit: Optional[int] = None,
     *,
-    skip_table_extraction: bool = False,
     output_dir: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
     # 모든 게시글을 먼저 수집
@@ -972,8 +306,8 @@ def scrape_all(
             log(f"[경고] 목록 페이지 요청 실패: {exc}")
             break
 
-        # bd-list에서 항목 찾기
-        bd_list = soup.select_one(".bd-list, [class*='bd-list'], div.bd-list")
+        # bd-list에서 항목 찾기 (테이블일 수도 있고, 내부에 테이블이 있을 수도 있음)
+        bd_list = soup.select_one(".bd-list, [class*='bd-list'], div.bd-list, table.bd-list")
         if not bd_list:
             # bd-list가 없으면 기존 방식(테이블) 시도
             table = soup.find("table")
@@ -986,8 +320,25 @@ def scrape_all(
                 break
             rows = [parse_list_row(tr) for tr in body.find_all("tr")]
         else:
-            # bd-list에서 title 추출
-            rows = parse_bd_list(bd_list)
+            # bd-list가 테이블인 경우
+            if bd_list.name == "table":
+                body = bd_list.find("tbody")
+                if body:
+                    rows = [parse_list_row(tr) for tr in body.find_all("tr")]
+                else:
+                    rows = []
+            else:
+                # bd-list 내부에 테이블이 있는지 확인
+                inner_table = bd_list.find("table")
+                if inner_table:
+                    body = inner_table.find("tbody")
+                    if body:
+                        rows = [parse_list_row(tr) for tr in body.find_all("tr")]
+                    else:
+                        rows = []
+                else:
+                    # bd-list에서 title 추출 (div, ul 등)
+                    rows = parse_bd_list(bd_list)
         
         rows = [row for row in rows if row]
         if not rows:
@@ -1035,51 +386,69 @@ def scrape_all(
                 target_groups[matched_target] = []
             target_groups[matched_target].append(post)
     
-    # 각 대상별로 최신 등록일의 모든 데이터 선택
+    # 각 대상별로 최신 데이터 1건만 선택
     selected_posts: List[Dict[str, str]] = []
     for target, posts in target_groups.items():
-        # 등록일 기준으로 정렬 (최신순)
-        posts_with_date = []
+        # 제목에서 날짜 추출하여 정렬 (최신순)
+        posts_with_title_date = []
         for post in posts:
-            reg_date = post.get("등록일", "")
-            date_tuple = parse_date(reg_date)
-            posts_with_date.append((date_tuple, post))
+            title = post.get("제목", "")
+            title_date = extract_date_from_title(title)
+            # 제목 날짜가 없으면 등록일 사용
+            if not title_date:
+                reg_date = post.get("등록일", "")
+                date_tuple = parse_date(reg_date)
+                if date_tuple:
+                    # 등록일을 (년, 월) 형식으로 변환 (비교용)
+                    title_date = (date_tuple[0], date_tuple[1])
+            
+            posts_with_title_date.append((title_date, post))
         
         # 날짜가 있는 것만 정렬, 날짜가 없으면 맨 뒤로
-        posts_with_date.sort(key=lambda x: x[0] if x[0] else (0, 0, 0), reverse=True)
+        posts_with_title_date.sort(key=lambda x: x[0] if x[0] else (0, 0), reverse=True)
         
-        # 최신 등록일의 모든 게시글 선택
-        if posts_with_date:
-            latest_date = posts_with_date[0][0]  # 최신 등록일
-            # 최신 등록일과 같은 날짜의 모든 게시글 선택
-            latest_posts = [post for date_tuple, post in posts_with_date if date_tuple == latest_date]
-            selected_posts.extend(latest_posts)
-            log(f"[정보] {target}: 최신 등록일({posts_with_date[0][1].get('등록일', '-')})의 게시글 {len(latest_posts)}개 선택")
+        # 최신 날짜의 첫 번째 게시글 1개만 선택
+        if posts_with_title_date and posts_with_title_date[0][0]:
+            latest_post = posts_with_title_date[0][1]
+            selected_posts.append(latest_post)
+        elif posts_with_title_date:
+            # 날짜가 없어도 1건은 선택
+            latest_post = posts_with_title_date[0][1]
+            selected_posts.append(latest_post)
     
     log(f"[정보] 최신 데이터 선택 완료: {len(selected_posts)}개")
     
-    # 4단계: 선택된 게시글의 상세 정보 수집
+    # 4단계: 이전 결과 로드
+    previous_results = {}
+    if output_dir:
+        previous_results = load_previous_results(output_dir)
+        if previous_results:
+            log(f"[정보] 이전 결과 파일에서 {len(previous_results)}개 항목 로드 완료")
+    
+    # 5단계: 선택된 게시글의 정보 수집 (목록 페이지에서 이미 구분과 제목을 가져왔으므로 상세 페이지 방문 불필요)
     results: List[Dict[str, str]] = []
     for idx, row in enumerate(selected_posts, 1):
         ntt_id = row.get("nttId")
         게시글번호 = row.get("번호", "-")
-        log(f"[진행] [{idx}/{len(selected_posts)}] 게시글 {게시글번호}번 처리 시작: nttId={ntt_id} | 제목={row.get('제목', '-')}")
+        구분 = row["구분"] or "-"
+        제목 = row["제목"] or "-"
+        등록일 = row.get("등록일", "-") or "-"
         
-        detail_data, attachments, table_rows = parse_detail(
-            session,
-            row["상세페이지URL"],
-            skip_table_extraction=skip_table_extraction,
-            log=log,
-        )
-
-        # 수집 항목: 구분, 제목만 저장
+        log(f"[진행] [{idx}/{len(selected_posts)}] 게시글 {게시글번호}번 처리 시작: nttId={ntt_id} | 제목={제목}")
+        
+        # 갱신 여부 확인
+        갱신 = is_updated(구분, 제목, 등록일, previous_results)
+        
+        # 수집 항목: 구분, 제목, 등록일, 갱신
         record = {
-            "구분": row["구분"] or "-",
-            "제목": row["제목"] or "-",
+            "구분": 구분,
+            "제목": 제목,
+            "등록일": 등록일,
+            "갱신": 갱신,
         }
         results.append(record)
         
-        log(f"[완료] 게시글 {게시글번호}번 수집 완료: nttId={ntt_id}")
+        log(f"[완료] 게시글 {게시글번호}번 수집 완료: nttId={ntt_id} | 갱신={갱신}")
         
         # 각 게시글 완료 후 즉시 파일에 저장
         if output_dir:
@@ -1092,6 +461,165 @@ def scrape_all(
     return results
 
 
+def parse_date(date_str: str) -> Optional[tuple]:
+    """등록일 문자열을 (년, 월, 일) 튜플로 변환 (비교용)"""
+    if not date_str or date_str == "-":
+        return None
+    # "2024.01.15" 형식 가정
+    try:
+        parts = date_str.replace(".", "-").split("-")
+        if len(parts) == 3:
+            year, month, day = map(int, parts)
+            return (year, month, day)
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def extract_date_from_title(title: str) -> Optional[tuple]:
+    """
+    제목에서 날짜를 추출하여 (년, 월) 튜플로 반환
+    
+    예: "대부업 검사업무 안내서('25.7월)" -> (2025, 7)
+         "은행 검사매뉴얼('23.4월)" -> (2023, 4)
+         "자금세탁방지 검사업무 안내서('25년 6월)" -> (2025, 6)
+    """
+    if not title:
+        return None
+    
+    # 패턴: '25.7월, 25.7월, 2025.7월, '25년 6월, 25년 6월 등
+    patterns = [
+        r"'?(\d{2,4})\s*년\s*(\d{1,2})\s*월",  # '25년 6월, 25년 6월, 2025년 6월 (우선순위 높음)
+        r"'?(\d{2,4})\.(\d{1,2})월",  # '25.7월, 2025.7월
+        r"'?(\d{2,4})\s*\.\s*(\d{1,2})\s*월",  # 공백 포함
+        r"'?(\d{2,4})-(\d{1,2})월",  # 하이픈 사용
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, title)
+        if match:
+            try:
+                year_str = match.group(1)
+                month = int(match.group(2))
+                
+                # 2자리 연도를 4자리로 변환
+                if len(year_str) == 2:
+                    year_int = int(year_str)
+                    # 50 이상이면 1900년대, 미만이면 2000년대
+                    if year_int >= 50:
+                        year = 1900 + year_int
+                    else:
+                        year = 2000 + year_int
+                else:
+                    year = int(year_str)
+                
+                return (year, month)
+            except (ValueError, IndexError):
+                continue
+    
+    return None
+
+
+def load_previous_results(output_dir: Path) -> Dict[str, Dict[str, str]]:
+    """
+    이전 스크랩 결과 파일을 로드하여 구분을 키로 하는 딕셔너리로 반환
+    
+    Returns:
+        {구분: {"제목": "...", "날짜": (년, 월), "등록일": "..."}} 형식의 딕셔너리
+    """
+    json_path = output_dir / "inspection_results.json"
+    previous_results: Dict[str, Dict[str, str]] = {}
+    
+    if not json_path.exists():
+        return previous_results
+    
+    try:
+        with json_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            for item in data:
+                구분 = item.get("구분", "")
+                제목 = item.get("제목", "")
+                등록일 = item.get("등록일", "")
+                if 구분:
+                    previous_results[구분] = {
+                        "제목": 제목,
+                        "날짜": extract_date_from_title(제목),
+                        "등록일": 등록일,
+                    }
+    except Exception as exc:
+        print(f"[경고] 이전 결과 파일 읽기 실패: {exc}")
+    
+    return previous_results
+
+
+def is_updated(구분: str, 제목: str, 등록일: str, previous_results: Dict[str, Dict[str, str]]) -> str:
+    """
+    현재 항목이 이전 결과보다 업데이트되었는지 확인
+    
+    Returns:
+        "Y" (갱신됨) 또는 "N" (갱신 안됨)
+    """
+    if 구분 not in previous_results:
+        # 이전에 없던 항목이면 갱신
+        return "Y"
+    
+    previous_item = previous_results[구분]
+    previous_date = previous_item.get("날짜")
+    previous_reg_date = previous_item.get("등록일", "")
+    current_date = extract_date_from_title(제목)
+    
+    # 제목에 날짜가 있으면 날짜 비교
+    if current_date:
+        # 이전 날짜가 없으면 갱신
+        if not previous_date:
+            return "Y"
+        
+        # 현재 날짜가 이전 날짜보다 최신이면 갱신
+        if current_date > previous_date:
+            return "Y"
+        
+        # 같은 날짜라도 제목이 다르면 갱신 (같은 날짜에 여러 버전이 있을 수 있음)
+        if current_date == previous_date and 제목 != previous_item.get("제목", ""):
+            return "Y"
+        
+        # 같은 날짜, 같은 제목이면 갱신 안됨
+        return "N"
+    
+    # 제목에 날짜가 없으면 등록일로 비교
+    if not 등록일 or 등록일 == "-":
+        # 등록일도 없으면 제목으로만 비교 (제목이 다르면 갱신)
+        if 제목 != previous_item.get("제목", ""):
+            return "Y"
+        return "N"
+    
+    # 이전 등록일이 없으면 갱신
+    if not previous_reg_date or previous_reg_date == "-":
+        return "Y"
+    
+    # 등록일 파싱하여 비교
+    previous_reg_date_tuple = parse_date(previous_reg_date)
+    current_reg_date_tuple = parse_date(등록일)
+    
+    if not current_reg_date_tuple:
+        # 등록일 파싱 실패 시 제목으로만 비교
+        if 제목 != previous_item.get("제목", ""):
+            return "Y"
+        return "N"
+    
+    if not previous_reg_date_tuple:
+        return "Y"
+    
+    # 현재 등록일이 이전 등록일보다 최신이면 갱신
+    if current_reg_date_tuple > previous_reg_date_tuple:
+        return "Y"
+    
+    # 같은 등록일이면 제목으로 비교
+    if current_reg_date_tuple == previous_reg_date_tuple and 제목 != previous_item.get("제목", ""):
+        return "Y"
+    
+    return "N"
+
+
 def save_results(results: List[Dict[str, str]], output_dir: Path) -> Tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1101,8 +629,8 @@ def save_results(results: List[Dict[str, str]], output_dir: Path) -> Tuple[Path,
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
-    # 수집 항목: 구분, 제목만
-    fieldnames = ["구분", "제목"]
+    # 수집 항목: 구분, 제목, 등록일, 갱신
+    fieldnames = ["구분", "제목", "등록일", "갱신"]
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -1127,11 +655,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="수집할 게시글 수 제한 (기본값: 제한 없음)",
     )
-    parser.add_argument(
-        "--skip-attachments",
-        action="store_true",
-        help="첨부파일 다운로드 및 점검표 추출을 건너뜁니다.",
-    )
     return parser.parse_args()
 
 
@@ -1143,7 +666,6 @@ def main() -> None:
     results = scrape_all(
         session,
         limit=args.limit,
-        skip_table_extraction=args.skip_attachments,
         output_dir=output_dir,
     )
     print(f"[정보] 총 {len(results)}건 수집 완료")
@@ -1155,3 +677,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

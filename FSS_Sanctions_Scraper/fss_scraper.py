@@ -22,8 +22,9 @@ except ImportError:
     Image = None
 
 class FSSCraper:
-    def __init__(self):
+    def __init__(self, limit=None):
         self.base_url = "https://www.fss.or.kr"
+        self.limit = limit  # 수집할 최대 항목 수 (None이면 전체)
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -321,6 +322,8 @@ class FSSCraper:
         """전체 스크래핑 실행"""
         print("=" * 60)
         print("금융감독원 제재조치 현황 스크래핑 시작")
+        if self.limit:
+            print(f"(최대 {self.limit}개 항목만 수집)")
         print("=" * 60)
         
         # 26페이지 모두 스크래핑
@@ -328,6 +331,13 @@ class FSSCraper:
         for page in range(1, 27):
             items = self.scrape_list_page(page)
             all_items.extend(items)
+            
+            # limit 체크
+            if self.limit and len(all_items) >= self.limit:
+                all_items = all_items[:self.limit]
+                print(f"\n limit 도달: {self.limit}개 항목 수집 완료")
+                break
+            
             time.sleep(1)  # 서버 부하 방지
         
         print(f"\n총 {len(all_items)}개 항목 수집 완료")
@@ -400,7 +410,13 @@ class FSSCraper:
             traceback.print_exc()
 
 if __name__ == "__main__":
-    scraper = FSSCraper()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='금융감독원 제재조치 현황 스크래핑')
+    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
+    args = parser.parse_args()
+    
+    scraper = FSSCraper(limit=args.limit)
     results = scraper.scrape_all()
     scraper.save_results()
     
