@@ -107,6 +107,54 @@ class BokScraper(BaseScraper):
         cleaned = re.sub(r"[\s\W]+", "", text)
         return cleaned.lower()
     
+    def _parse_date(self, date_text: str) -> Optional[tuple]:
+        """날짜 텍스트를 파싱하여 (year, month, day) 튜플로 반환
+        예: "2024.01.15" -> (2024, 1, 15)
+        """
+        if not date_text:
+            return None
+        
+        # 공백 제거 및 정규화
+        cleaned = date_text.strip().replace(" ", "").replace("-", ".")
+        
+        # 날짜 패턴 찾기 (YYYY.MM.DD 또는 YYYY-MM-DD)
+        date_pattern = r'(\d{4})[\.\-](\d{1,2})[\.\-](\d{1,2})'
+        match = re.search(date_pattern, cleaned)
+        
+        if match:
+            try:
+                year = int(match.group(1))
+                month = int(match.group(2))
+                day = int(match.group(3))
+                return (year, month, day)
+            except (ValueError, IndexError):
+                pass
+        
+        return None
+    
+    def _remove_parentheses(self, text: str) -> str:
+        """타이틀에서 괄호와 그 뒤의 텍스트를 제거
+        예: "규정명 (부칙)" -> "규정명"
+        예: "규정명 [개정]" -> "규정명"
+        """
+        if not text:
+            return ""
+        
+        # 소괄호, 대괄호, 중괄호, 전각 괄호 제거
+        # 괄호부터 끝까지 제거
+        patterns = [
+            r'[\(（].*?[\)）]',  # 소괄호 (일반, 전각)
+            r'\[.*?\]',          # 대괄호
+            r'\{.*?\}',          # 중괄호
+        ]
+        
+        cleaned = text
+        for pattern in patterns:
+            cleaned = re.sub(pattern, '', cleaned)
+        
+        # 앞뒤 공백 제거
+        return cleaned.strip()
+    
     def is_target_regulation(self, title: str) -> bool:
         """제목이 대상 규정인지 확인 (CSV 목록 기반)"""
         if not title or not self.target_laws:
@@ -618,8 +666,8 @@ class BokScraper(BaseScraper):
                                     print(f"  ✓ 최근개정일: {extracted_info['revision_date']}")
                             else:
                                 print(f"  ⚠ HWP 내용 추출 실패")
-            else:
-                print(f"  ⚠ 첨부파일을 찾지 못했습니다.")
+                    else:
+                        print(f"  ⚠ 첨부파일을 찾지 못했습니다.")
             
         except Exception as e:
             print(f"  ⚠ 상세 페이지 추출 실패: {e}")
@@ -761,6 +809,47 @@ class BokScraper(BaseScraper):
             all_revision_dates.sort(key=lambda x: x[1], reverse=True)
             year, month, day = all_revision_dates[0][2], all_revision_dates[0][3], all_revision_dates[0][4]
             result["revision_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+        
+        # 최종 Fallback: 문서 내 모든 날짜를 스캔해 제정/최근개정 보정
+        # 이미 추출된 revision_date가 있어도 더 최신 날짜가 있으면 덮어쓴다.
+        date_candidates = []
+        for match in re.finditer(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?', content):
+            try:
+                from datetime import datetime
+                y, m, d = match.groups()
+                date_obj = datetime(int(y), int(m), int(d))
+                date_candidates.append((date_obj, y, m, d))
+            except Exception:
+                continue
+        for match in re.finditer(r'(\d{4})-(\d{1,2})-(\d{1,2})', content):
+            try:
+                from datetime import datetime
+                y, m, d = match.groups()
+                date_obj = datetime(int(y), int(m), int(d))
+                date_candidates.append((date_obj, y, m, d))
+            except Exception:
+                continue
+
+        if date_candidates:
+            if not result.get("enactment_date"):
+                oldest = min(date_candidates, key=lambda x: x[0])
+                result["enactment_date"] = f"{oldest[1]}-{oldest[2].zfill(2)}-{oldest[3].zfill(2)}"
+
+            latest = max(date_candidates, key=lambda x: x[0])
+            latest_dt, ly, lm, ld = latest
+
+            def _parse_existing(dt_str: str):
+                try:
+                    from datetime import datetime
+                    parts = dt_str.split("-")
+                    return datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                except Exception:
+                    return None
+
+            existing_rev_dt = _parse_existing(result.get("revision_date", ""))
+            # 더 최신 날짜가 있으면 최근개정일 덮어쓰기
+            if (existing_rev_dt is None) or (latest_dt > existing_rev_dt):
+                result["revision_date"] = f"{ly}-{lm.zfill(2)}-{ld.zfill(2)}"
         
         return result
     
@@ -925,74 +1014,196 @@ class BokScraper(BaseScraper):
                     
                     # 페이지 로딩 대기
                     time.sleep(2)
-                    
+
                     # 디버깅 HTML 저장 (첫 번째 검색만)
                     if idx == 1:
                         soup = BeautifulSoup(driver.page_source, 'html.parser')
                         self.save_debug_html(soup, filename="debug_bok_search.html")
-                    
-                    # XPath로 첫 번째 검색 결과 링크 찾기 및 클릭
+                
+                    # 검색 결과 목록에서 모든 항목 찾기 및 등록일 비교
                     try:
-                        # XPath: /html/body/div/div[2]/main/div[1]/div/form/div[4]/div[2]/ul/li[1]/a
-                        xpath = "/html/body/div/div[2]/main/div[1]/div/form/div[4]/div[2]/ul/li[1]/a"
-                        
-                        # 요소가 로드될 때까지 대기
                         wait = WebDriverWait(driver, 10)
-                        first_link = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
                         
-                        # 제목 추출
-                        title = first_link.text.strip()
-                        print(f"  ✓ 첫 번째 검색 결과 발견: {title}")
+                        # 검색 결과 목록 컨테이너 찾기 (여러 방법 시도)
+                        list_items = []
+                        list_selectors = [
+                            ("CSS", "#frm > div.tsh-main > div.search-main > ul > li"),
+                            ("CSS", "div.search-main ul li"),
+                            ("CSS", ".search-main ul li"),
+                            ("CSS", "ul.search-list li"),
+                            ("CSS", ".bdLine.type4 ul li"),
+                        ]
                         
-                        # 링크 URL 추출
-                        detail_link = first_link.get_attribute("href")
-                        if detail_link:
-                            # 상대 경로인 경우 절대 경로로 변환
-                            if detail_link.startswith("/"):
-                                detail_link = self.BASE_URL + detail_link
-                            elif not detail_link.startswith("http"):
-                                detail_link = urljoin(self.BASE_URL, detail_link)
-                            print(f"  → 상세 링크: {detail_link}")
+                        for method, selector in list_selectors:
+                            try:
+                                if method == "CSS":
+                                    list_items = driver.find_elements(By.CSS_SELECTOR, selector)
+                                if list_items:
+                                    print(f"  ✓ 검색 결과 목록 발견 ({method}): {len(list_items)}개 항목")
+                                    break
+                            except Exception:
+                                continue
                         
-                        # 링크 클릭하여 새 페이지로 이동
-                        print(f"  → 첫 번째 검색 결과 클릭 중...")
-                        first_link.click()
-                        
-                        # 새 페이지 로딩 대기
-                        time.sleep(2)
-                        
-                        # 현재 URL 가져오기 (클릭 후 이동한 페이지)
-                        current_url = driver.current_url
-                        print(f"  → 이동한 페이지 URL: {current_url}")
-                        
-                        # 클릭 후 이동한 URL을 detail_link로 사용
-                        if current_url and current_url != search_url:
-                            detail_link = current_url
+                        if not list_items:
+                            print(f"  ⚠ 검색 결과 목록을 찾지 못했습니다.")
+                            detail_link = None
+                            title = None
+                        else:
+                            # 각 항목에서 등록일 추출 및 비교
+                            items_with_dates = []
+                            
+                            normalized_target = self._normalize_title(regulation_name)
+                            
+                            for item_idx, li_item in enumerate(list_items, 1):
+                                try:
+                                    # 링크 요소 찾기
+                                    link_elem = None
+                                    try:
+                                        link_elem = li_item.find_element(By.TAG_NAME, "a")
+                                    except Exception:
+                                        # a 태그가 li 내부에 있을 수 있음
+                                        try:
+                                            link_elem = li_item.find_element(By.CSS_SELECTOR, "a")
+                                        except Exception:
+                                            pass
+                                    
+                                    if not link_elem:
+                                        continue
+                                    
+                                    # 제목 추출 (우선 위치 정보 span.location 시도)
+                                    item_title = ""
+                                    title_selectors = [
+                                        "span.location",
+                                        "span.title",
+                                        ".location",
+                                    ]
+                                    for t_sel in title_selectors:
+                                        try:
+                                            t_elem = link_elem.find_element(By.CSS_SELECTOR, t_sel)
+                                            item_title = t_elem.text.strip()
+                                            if item_title:
+                                                break
+                                        except Exception:
+                                            continue
+                                    if not item_title:
+                                        item_title = link_elem.text.strip()
+                                    
+                                    # 괄호와 그 뒤의 텍스트 제거 (비교를 위해)
+                                    item_title_cleaned = self._remove_parentheses(item_title)
+                                    
+                                    # 등록일 찾기 (여러 방법 시도)
+                                    date_text = None
+                                    date_selectors = [
+                                        "span.schDesc span.date",
+                                        "span.date",
+                                        ".date",
+                                        "span.schDesc > span.date",
+                                    ]
+                                    
+                                    for date_selector in date_selectors:
+                                        try:
+                                            date_elem = li_item.find_element(By.CSS_SELECTOR, date_selector)
+                                            date_text = date_elem.text.strip()
+                                            if date_text:
+                                                break
+                                        except Exception:
+                                            continue
+                                    
+                                    # 링크 URL 추출
+                                    item_link = link_elem.get_attribute("href")
+                                    if item_link:
+                                        if item_link.startswith("/"):
+                                            item_link = self.BASE_URL + item_link
+                                        elif not item_link.startswith("http"):
+                                            item_link = urljoin(self.BASE_URL, item_link)
+                                    
+                                    if date_text:
+                                        parsed_date = self._parse_date(date_text)
+                                        if parsed_date:
+                                            items_with_dates.append({
+                                                'index': item_idx,
+                                                'title': item_title,
+                                                'title_cleaned': item_title_cleaned,
+                                                'link': item_link,
+                                                'date': parsed_date,
+                                                'date_text': date_text,
+                                                'element': link_elem
+                                            })
+                                            print(f"  → 항목 {item_idx}: {item_title[:50]}... (등록일: {date_text})")
+                                        else:
+                                            print(f"  ⚠ 항목 {item_idx}: 날짜 파싱 실패 ({date_text})")
+                                    else:
+                                        # 등록일이 없는 경우도 링크만 저장
+                                        if item_link:
+                                            items_with_dates.append({
+                                                'index': item_idx,
+                                                'title': item_title,
+                                                'title_cleaned': item_title_cleaned,
+                                                'link': item_link,
+                                                'date': None,
+                                                'date_text': '',
+                                                'element': link_elem
+                                            })
+                                            print(f"  → 항목 {item_idx}: {item_title[:50]}... (등록일 없음)")
+                                
+                                except Exception as e:
+                                    print(f"  ⚠ 항목 {item_idx} 처리 중 오류: {e}")
+                                    continue
+                            
+                            # 가장 최근 날짜이면서 제목이 검색어와 일치하는 항목 우선 선택
+                            if items_with_dates:
+                                def title_matches(item_title_cleaned: str) -> bool:
+                                    norm = self._normalize_title(item_title_cleaned)
+                                    return normalized_target and (norm == normalized_target or normalized_target in norm or norm in normalized_target)
+
+                                matching_items = [item for item in items_with_dates if title_matches(item.get('title_cleaned', item.get('title', '')))]
+
+                                if not matching_items:
+                                    print(f"  ⚠ 검색어와 일치하는 제목이 없습니다. 규정명으로만 빈 결과를 추가합니다.")
+                                    detail_link = None
+                                    title = None
+                                else:
+                                    items_with_valid_dates = [item for item in matching_items if item['date'] is not None]
+                                    
+                                    if items_with_valid_dates:
+                                        selected_item = max(items_with_valid_dates, key=lambda x: x['date'])
+                                        print(f"  ✓ 가장 최근 등록일(제목 일치) 항목 선택: {selected_item['title'][:50]}... (등록일: {selected_item['date_text']})")
+                                    else:
+                                        selected_item = matching_items[0]
+                                        print(f"  ⚠ 등록일 정보가 없어 첫 번째 일치 항목 선택: {selected_item['title'][:50]}...")
+                                    
+                                    title = selected_item['title']
+                                    detail_link = selected_item['link']
+                                    
+                                    # 선택된 항목 클릭
+                                    print(f"  → 선택된 검색 결과 클릭 중...")
+                                    selected_item['element'].click()
+                                    
+                                    # 새 페이지 로딩 대기
+                                    time.sleep(2)
+                                    
+                                    # 현재 URL 가져오기 (클릭 후 이동한 페이지)
+                                    current_url = driver.current_url
+                                    print(f"  → 이동한 페이지 URL: {current_url}")
+                                    
+                                    # 클릭 후 이동한 URL을 detail_link로 사용
+                                    if current_url and current_url != search_url:
+                                        detail_link = current_url
+                            else:
+                                print(f"  ⚠ 검색 결과 항목을 찾지 못했습니다.")
+                                detail_link = None
+                                title = None
                     
                     except TimeoutException:
-                        print(f"  ⚠ XPath로 첫 번째 검색 결과를 찾지 못했습니다: {xpath}")
-                        # 대체 선택자 시도
-                        try:
-                            # CSS 선택자로 시도
-                            first_link = driver.find_element(By.CSS_SELECTOR, ".bdLine.type4 ul li:first-child a")
-                            title = first_link.text.strip()
-                            detail_link = first_link.get_attribute("href")
-                            if detail_link and not detail_link.startswith("http"):
-                                detail_link = urljoin(self.BASE_URL, detail_link)
-                            print(f"  ✓ CSS 선택자로 첫 번째 검색 결과 발견: {title}")
-                            first_link.click()
-                            time.sleep(2)
-                            current_url = driver.current_url
-                            if current_url and current_url != search_url:
-                                detail_link = current_url
-                        except NoSuchElementException:
-                            print(f"  ⚠ 검색 결과를 찾지 못했습니다.")
-                            detail_link = None
+                        print(f"  ⚠ 검색 결과 목록 로딩 시간 초과")
+                        detail_link = None
+                        title = None
                     except Exception as e:
-                        print(f"  ⚠ 검색 결과 클릭 중 오류: {e}")
+                        print(f"  ⚠ 검색 결과 처리 중 오류: {e}")
                         import traceback
                         traceback.print_exc()
                         detail_link = None
+                        title = None
                     
                     if not detail_link:
                         print(f"  ⚠ 검색 결과에서 규정을 찾지 못했습니다.")

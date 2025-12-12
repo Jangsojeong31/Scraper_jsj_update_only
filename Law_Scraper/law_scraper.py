@@ -1026,6 +1026,480 @@ class LawGoKrScraper(BaseScraper):
             traceback.print_exc()
             return None
     
+    def extract_enactment_and_revision_dates_from_list(self, driver, law_name: str = "") -> Dict[str, str]:
+        """
+        검색 결과 목록에서 부칙 버튼을 클릭하여 부칙 목록의 날짜 추출 (테스트용)
+        
+        Args:
+            driver: Selenium WebDriver 인스턴스
+            law_name: 법령명 (디버깅용)
+            
+        Returns:
+            {'enactment_date': str, 'revision_date': str} 딕셔너리
+        """
+        from datetime import datetime
+        import re
+        
+        result = {
+            'enactment_date': '',
+            'revision_date': ''
+        }
+        
+        try:
+            # 검색 결과 목록에서 부칙 버튼 찾기
+            # 패턴: #liBgcolor1 > div > ul > li:nth-child(2) > a (부칙 버튼)
+            print(f"    → 검색 결과 목록에서 부칙 버튼 찾는 중...")
+            
+            ar_button = None
+            
+            # 방법 1: class="on"인 liBgcolor 요소에서 부칙 버튼 찾기
+            try:
+                # 모든 liBgcolor 요소 찾기
+                all_li_elements = driver.find_elements(By.CSS_SELECTOR, "li[id^='liBgcolor']")
+                print(f"    → liBgcolor 요소 {len(all_li_elements)}개 발견")
+                
+                # class="on"인 항목 찾기
+                li_on_element = None
+                for li_elem in all_li_elements:
+                    li_class = li_elem.get_attribute('class') or ''
+                    if 'on' in li_class:
+                        li_on_element = li_elem
+                        print(f"    ✓ class='on'인 liBgcolor 항목 발견 (ID: {li_elem.get_attribute('id')})")
+                        break
+                
+                if li_on_element:
+                    # #liBgcolor > div > ul > li:nth-child(2) > a 패턴 (부칙 버튼)
+                    ar_buttons = li_on_element.find_elements(By.CSS_SELECTOR, "div > ul > li:nth-child(2) > a")
+                    if not ar_buttons:
+                        # 대체 패턴: div > ul > li > a (부칙 관련, onclick에 SpanAr 포함)
+                        ar_buttons = li_on_element.find_elements(By.XPATH, ".//div//ul//li[2]//a[contains(@onclick, 'SpanAr')]")
+                    if not ar_buttons:
+                        # onclick에 'SpanAr'이 포함된 모든 a 태그
+                        ar_buttons = li_on_element.find_elements(By.XPATH, ".//a[contains(@onclick, 'SpanAr')]")
+                    
+                    if ar_buttons:
+                        ar_button = ar_buttons[0]
+                        print(f"    ✓ class='on' 항목에서 부칙 버튼 발견")
+            except Exception as e:
+                print(f"    ⚠ class='on' 항목에서 부칙 버튼 찾기 실패: {e}")
+            
+            # 방법 2: class="on"인 항목을 찾지 못한 경우, 모든 liBgcolor 요소에서 찾기
+            if not ar_button:
+                try:
+                    all_li_elements = driver.find_elements(By.CSS_SELECTOR, "li[id^='liBgcolor']")
+                    for li_elem in all_li_elements:
+                        ar_buttons = li_elem.find_elements(By.XPATH, ".//div//ul//li[2]//a[contains(@onclick, 'SpanAr')]")
+                        if not ar_buttons:
+                            ar_buttons = li_elem.find_elements(By.XPATH, ".//a[contains(@onclick, 'SpanAr')]")
+                        
+                        if ar_buttons:
+                            ar_button = ar_buttons[0]
+                            print(f"    ✓ liBgcolor 항목에서 부칙 버튼 발견 (ID: {li_elem.get_attribute('id')})")
+                            break
+                except Exception as e:
+                    print(f"    ⚠ liBgcolor 요소에서 부칙 버튼 찾기 실패: {e}")
+            
+            # 방법 3: 일반적인 패턴으로 찾기
+            if not ar_button:
+                try:
+                    xpath_patterns = [
+                        "//li[@id='liBgcolor1']//div//ul//li[2]//a[contains(@onclick, 'SpanAr')]",
+                        "//li[starts-with(@id, 'liBgcolor')]//div//ul//li[2]//a[contains(@onclick, 'SpanAr')]",
+                        "//a[contains(@onclick, 'fSelectJoListAncTree') and contains(@onclick, 'SpanAr')]",
+                    ]
+                    
+                    for xpath in xpath_patterns:
+                        try:
+                            ar_button = driver.find_element(By.XPATH, xpath)
+                            if ar_button:
+                                print(f"    ✓ 부칙 버튼 발견 (XPath)")
+                                break
+                        except:
+                            continue
+                except Exception as e:
+                    print(f"    ⚠ 부칙 버튼 찾기 실패 (XPath): {e}")
+            
+            if not ar_button:
+                print(f"    ⚠ 검색 결과 목록에서 부칙 버튼을 찾을 수 없습니다.")
+                return result
+            
+            # 부칙 버튼 클릭 (접힌 상태를 열기)
+            try:
+                print(f"    → 부칙 버튼 클릭 중... (접힌 목록 열기)")
+                driver.execute_script("arguments[0].scrollIntoView(true);", ar_button)
+                time.sleep(0.3)
+                
+                # 부칙 목록이 이미 열려있는지 확인
+                li_id = None
+                try:
+                    # 부칙 버튼의 onclick에서 li ID 추출
+                    onclick = ar_button.get_attribute('onclick') or ''
+                    import re
+                    id_match = re.search(r"['\"]liBgcolor(\d+)['\"]", onclick)
+                    if id_match:
+                        li_id = f"liBgcolor{id_match.group(1)}"
+                except:
+                    pass
+                
+                # 부칙 목록이 닫혀있는지 확인 (SpanAr이 숨겨져 있는지)
+                is_closed = True
+                if li_id:
+                    try:
+                        span_ar = driver.find_element(By.CSS_SELECTOR, f"#{li_id}SpanAr")
+                        # display 스타일 확인
+                        display_style = span_ar.value_of_css_property('display')
+                        if display_style and display_style != 'none':
+                            is_closed = False
+                    except:
+                        pass
+                
+                if is_closed:
+                    # 부칙 버튼 클릭하여 열기
+                    driver.execute_script("arguments[0].click();", ar_button)
+                    time.sleep(0.5)  # 클릭 후 짧은 대기
+                    
+                    # 부칙 목록이 열릴 때까지 대기
+                    if li_id:
+                        try:
+                            WebDriverWait(driver, 3).until(
+                                lambda d: d.find_element(By.CSS_SELECTOR, f"#{li_id}SpanAr").value_of_css_property('display') != 'none'
+                            )
+                            print(f"    ✓ 부칙 목록이 열렸습니다")
+                        except:
+                            print(f"    ⚠ 부칙 목록 열기 대기 시간 초과")
+                    else:
+                        time.sleep(1)  # 대체 대기
+                else:
+                    print(f"    ✓ 부칙 목록이 이미 열려있습니다")
+                
+                print(f"    ✓ 부칙 버튼 클릭 완료")
+            except Exception as e:
+                print(f"    ⚠ 부칙 버튼 클릭 실패: {e}")
+                import traceback
+                traceback.print_exc()
+                return result
+            
+            # 부칙 목록이 나타날 때까지 대기 (더 확실하게)
+            try:
+                if li_id:
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, f"#{li_id}SpanAr ul li"))
+                    )
+                else:
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "[id^='liBgcolor'][id$='SpanAr'] ul li"))
+                    )
+                print(f"    ✓ 부칙 목록 로드 완료")
+                time.sleep(0.5)  # 추가 안정화 대기
+            except Exception as e:
+                print(f"    ⚠ 부칙 목록 로드 대기 시간 초과: {e}")
+                # 계속 진행 (이미 열려있을 수 있음)
+            
+            # 부칙 목록에서 날짜 링크 추출
+            # 패턴: #liBgcolor1SpanAr > ul > li > ul > li:nth-child(1) > a
+            date_elements = []
+            date_pattern = re.compile(r'\d{4}\s*[.\-]\s*\d{1,2}\s*[.\-]\s*\d{1,2}')
+            
+            try:
+                # 부칙 목록 영역 찾기 (li_id가 있으면 우선 사용)
+                ar_list_area = None
+                
+                if li_id:
+                    try:
+                        ar_list_area = driver.find_element(By.CSS_SELECTOR, f"#{li_id}SpanAr")
+                        print(f"    ✓ 부칙 목록 영역 발견: #{li_id}SpanAr")
+                    except:
+                        pass
+                
+                if not ar_list_area:
+                    # 대체 방법: 일반적인 패턴으로 찾기
+                    ar_list_selectors = [
+                        "[id^='liBgcolor'][id$='SpanAr']",
+                        "div[id^='liBgcolor'][id$='SpanAr']",
+                    ]
+                    
+                    for selector in ar_list_selectors:
+                        try:
+                            ar_list_area = driver.find_element(By.CSS_SELECTOR, selector)
+                            if ar_list_area:
+                                print(f"    ✓ 부칙 목록 영역 발견: {selector}")
+                                break
+                        except:
+                            continue
+                
+                if ar_list_area:
+                    # 부칙 목록이 실제로 보이는지 확인
+                    try:
+                        display_style = ar_list_area.value_of_css_property('display')
+                        if display_style == 'none':
+                            print(f"    ⚠ 부칙 목록이 숨겨져 있습니다 (display: none)")
+                    except:
+                        pass
+                    
+                    # 부칙 목록의 모든 링크 찾기 (여러 패턴 시도)
+                    ar_links = []
+                    
+                    # 패턴 1: ul li ul li a (일반적인 구조)
+                    ar_links = ar_list_area.find_elements(By.CSS_SELECTOR, "ul li ul li a")
+                    if not ar_links:
+                        # 패턴 2: ul > li > ul > li > a
+                        ar_links = ar_list_area.find_elements(By.CSS_SELECTOR, "ul > li > ul > li > a")
+                    if not ar_links:
+                        # 패턴 3: 모든 a 태그
+                        ar_links = ar_list_area.find_elements(By.CSS_SELECTOR, "a")
+                    
+                    print(f"    → 부칙 목록 링크 {len(ar_links)}개 발견")
+                    
+                    for link in ar_links:
+                        try:
+                            # 링크가 보이는지 확인
+                            if not link.is_displayed():
+                                continue
+                            
+                            link_text = link.text.strip()
+                            # title 속성도 확인
+                            title_text = link.get_attribute('title') or ''
+                            
+                            # 날짜 패턴 확인 (링크 텍스트와 title 모두)
+                            for text in [link_text, title_text]:
+                                if text and date_pattern.search(text):
+                                    date_match = date_pattern.search(text)
+                                    if date_match:
+                                        date_str = date_match.group(0).strip()
+                                        if date_str not in date_elements:
+                                            date_elements.append(date_str)
+                                            print(f"    ✓ 날짜 발견: {date_str} (텍스트: {text[:50]})")
+                                            break
+                        except Exception as e:
+                            continue
+                    
+                    # 링크에서 날짜를 찾지 못한 경우, 부칙 목록 전체 텍스트에서 날짜 찾기
+                    if not date_elements:
+                        try:
+                            ar_list_text = ar_list_area.text
+                            all_dates = date_pattern.findall(ar_list_text)
+                            for date_str in all_dates:
+                                date_str = date_str.strip()
+                                if date_str not in date_elements:
+                                    date_elements.append(date_str)
+                                    print(f"    ✓ 날짜 발견 (전체 텍스트): {date_str}")
+                        except Exception as e:
+                            pass
+                else:
+                    # 대체 방법: 페이지 소스에서 찾기
+                    print(f"    → Selenium 요소를 찾지 못해 HTML 소스에서 검색 중...")
+                    page_source = driver.page_source
+                    soup = BeautifulSoup(page_source, 'lxml')
+                    ar_div = soup.find('div', id=lambda x: x and x.startswith('liBgcolor') and x.endswith('SpanAr'))
+                    if ar_div:
+                        # display:none이 아닌지 확인
+                        style = ar_div.get('style', '')
+                        if 'display:none' not in style and 'display: none' not in style:
+                            all_links = ar_div.find_all('a')
+                            for link in all_links:
+                                link_text = link.get_text(strip=True)
+                                if date_pattern.search(link_text):
+                                    date_match = date_pattern.search(link_text)
+                                    if date_match:
+                                        date_str = date_match.group(0).strip()
+                                        if date_str not in date_elements:
+                                            date_elements.append(date_str)
+                                            print(f"    ✓ 날짜 발견 (HTML): {date_str}")
+            except Exception as e:
+                print(f"    ⚠ 부칙 목록에서 날짜 추출 실패: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            if not date_elements:
+                print(f"    ⚠ 부칙 목록에서 날짜를 찾을 수 없습니다.")
+                return result
+            
+            # 날짜 파싱 및 정렬
+            parsed_dates = []
+            for date_str in date_elements:
+                cleaned_date = re.sub(r'\s+', '', date_str)
+                normalized_date = cleaned_date.replace('.', '-')
+                
+                parsed_date = None
+                try:
+                    date_match = re.search(r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', normalized_date)
+                    if date_match:
+                        year, month, day = date_match.groups()
+                        date_str_formatted = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        parsed_date = datetime.strptime(date_str_formatted, '%Y-%m-%d')
+                except ValueError:
+                    continue
+                
+                if parsed_date:
+                    parsed_dates.append((parsed_date, date_str))
+            
+            if not parsed_dates:
+                print(f"    ⚠ 날짜 파싱 실패 (발견된 날짜 문자열: {date_elements})")
+                return result
+            
+            # 날짜 정렬 (오래된 순)
+            parsed_dates.sort(key=lambda x: x[0])
+            
+            # 가장 오래된 날짜 = 제정일
+            result['enactment_date'] = parsed_dates[0][1]
+            
+            # 가장 최근 날짜 = 최근 개정일 (날짜가 2개 이상일 때만 설정)
+            if len(parsed_dates) > 1:
+                result['revision_date'] = parsed_dates[-1][1]
+            else:
+                result['revision_date'] = ''  # 날짜가 하나만 있으면 최근 개정일은 비움
+            
+            print(f"    ✓ 날짜 추출 완료: 제정일={result['enactment_date']}, 최근 개정일={result['revision_date']} (발견된 날짜: {len(parsed_dates)}개)")
+            
+        except Exception as e:
+            print(f"    ⚠ 부칙 목록에서 날짜 추출 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return result
+    
+    def extract_enactment_and_revision_dates(self, soup: BeautifulSoup) -> Dict[str, str]:
+        """
+        법령 상세 페이지의 부칙 영역에서 제정일과 최근 개정일 추출
+        
+        Args:
+            soup: BeautifulSoup 객체 (법령 상세 페이지)
+            
+        Returns:
+            {'enactment_date': str, 'revision_date': str} 딕셔너리
+        """
+        from datetime import datetime
+        import re
+        
+        result = {
+            'enactment_date': '',
+            'revision_date': ''
+        }
+        
+        if soup is None:
+            return result
+        
+        # 부칙 영역 찾기 (#arDivArea)
+        ar_div_area = soup.find('div', id='arDivArea')
+        if not ar_div_area:
+            # CSS 선택자로도 시도
+            ar_div_area = soup.select_one('#arDivArea')
+        
+        # 다른 가능한 ID나 클래스로도 시도
+        if not ar_div_area:
+            # '부칙' 텍스트가 포함된 div 찾기
+            all_divs = soup.find_all('div')
+            for div in all_divs:
+                div_text = div.get_text(strip=True)
+                if '부칙' in div_text and len(div_text) < 100:  # 제목 정도의 길이
+                    # 부칙 제목 div의 다음 형제나 부모 찾기
+                    parent = div.parent
+                    if parent:
+                        ar_div_area = parent
+                        break
+        
+        if not ar_div_area:
+            # 디버깅: 부칙 영역을 찾지 못한 경우
+            print(f"    ⚠ 부칙 영역(#arDivArea)을 찾을 수 없습니다.")
+            return result
+        
+        # 부칙 영역 내의 모든 날짜 링크 찾기
+        # 예: p.pty3 > a > span 또는 다른 패턴
+        date_elements = []
+        
+        # 날짜 패턴 (공백 포함 가능: "2025. 4. 22." 형식도 처리)
+        date_pattern = re.compile(r'\d{4}\s*[.\-]\s*\d{1,2}\s*[.\-]\s*\d{1,2}')
+        
+        # 방법 1: span 태그 내의 날짜 텍스트 찾기 (부칙 날짜 링크)
+        date_spans = ar_div_area.find_all('span')
+        for span in date_spans:
+            span_text = span.get_text(strip=True)
+            # 날짜 형식 확인 (YYYY.MM.DD 또는 YYYY-MM-DD 등, 공백 포함 가능)
+            if date_pattern.search(span_text):
+                date_match = date_pattern.search(span_text)
+                if date_match:
+                    date_elements.append(date_match.group(0).strip())
+        
+        # 방법 2: a 태그 내의 날짜 텍스트 찾기
+        date_links = ar_div_area.find_all('a')
+        for link in date_links:
+            link_text = link.get_text(strip=True)
+            # 날짜 형식 확인
+            if date_pattern.search(link_text):
+                date_match = date_pattern.search(link_text)
+                if date_match:
+                    date_str = date_match.group(0).strip()
+                    if date_str not in date_elements:
+                        date_elements.append(date_str)
+        
+        # 방법 3: p.pty3 클래스를 가진 요소 내의 날짜 찾기
+        pty3_elements = ar_div_area.find_all('p', class_='pty3')
+        for pty3 in pty3_elements:
+            # pty3 내의 모든 a 태그와 span 태그 확인
+            for elem in pty3.find_all(['a', 'span']):
+                elem_text = elem.get_text(strip=True)
+                if date_pattern.search(elem_text):
+                    date_match = date_pattern.search(elem_text)
+                    if date_match:
+                        date_str = date_match.group(0).strip()
+                        if date_str not in date_elements:
+                            date_elements.append(date_str)
+        
+        # 방법 4: 부칙 영역 전체 텍스트에서 날짜 패턴 찾기
+        if not date_elements:
+            ar_div_text = ar_div_area.get_text()
+            all_dates = date_pattern.findall(ar_div_text)
+            for date_str in all_dates:
+                date_str = date_str.strip()
+                if date_str not in date_elements:
+                    date_elements.append(date_str)
+        
+        if not date_elements:
+            print(f"    ⚠ 부칙 영역에서 날짜를 찾을 수 없습니다. (부칙 영역 텍스트 길이: {len(ar_div_area.get_text())}자)")
+            return result
+        
+        # 날짜 파싱 및 정렬
+        parsed_dates = []
+        for date_str in date_elements:
+            # 날짜 문자열 정리 (공백 제거)
+            cleaned_date = re.sub(r'\s+', '', date_str)  # 모든 공백 제거
+            # 날짜 형식 정규화 (YYYY.MM.DD 또는 YYYY-MM-DD)
+            normalized_date = cleaned_date.replace('.', '-')
+            
+            # 날짜 파싱 시도
+            parsed_date = None
+            try:
+                # 날짜 문자열에서 숫자만 추출하여 파싱
+                date_match = re.search(r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', normalized_date)
+                if date_match:
+                    year, month, day = date_match.groups()
+                    date_str_formatted = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                    parsed_date = datetime.strptime(date_str_formatted, '%Y-%m-%d')
+            except ValueError:
+                continue
+            
+            if parsed_date:
+                # 원본 날짜 문자열 저장 (공백 포함 가능)
+                parsed_dates.append((parsed_date, date_str))
+        
+        if not parsed_dates:
+            print(f"    ⚠ 날짜 파싱 실패 (발견된 날짜 문자열: {date_elements})")
+            return result
+        
+        # 날짜 정렬 (오래된 순)
+        parsed_dates.sort(key=lambda x: x[0])
+        
+        # 가장 오래된 날짜 = 제정일
+        result['enactment_date'] = parsed_dates[0][1]
+        
+        # 가장 최근 날짜 = 최근 개정일 (날짜가 2개 이상일 때만 설정)
+        if len(parsed_dates) > 1:
+            result['revision_date'] = parsed_dates[-1][1]
+        else:
+            result['revision_date'] = ''  # 날짜가 하나만 있으면 최근 개정일은 비움
+        
+        return result
+    
     def extract_law_detail(self, soup: BeautifulSoup) -> str:
         """
         법령 상세 페이지에서 법령 내용 추출
@@ -1082,6 +1556,186 @@ class LawGoKrScraper(BaseScraper):
         # 연속된 개행을 최대 2개로 제한 (너무 많은 빈 줄 방지)
         content = re.sub(r'\n{3,}', '\n\n', content)
         return content.strip()
+    
+    def extract_department_from_detail(self, soup: BeautifulSoup, driver=None, is_adm_rul: bool = False) -> str:
+        """
+        법령 상세 페이지에서 소관부서 추출
+        
+        Args:
+            soup: BeautifulSoup 객체 (법령 상세 페이지)
+            driver: Selenium WebDriver (XPath 사용 시 필요)
+            is_adm_rul: 행정규칙 페이지 여부 (True면 감독규정 등)
+            
+        Returns:
+            추출된 소관부서 (문자열, 괄호 앞부분만)
+        """
+        if soup is None:
+            return ""
+        
+        department = ""
+        
+        def clean_department_text(text: str) -> str:
+            """
+            소관부서 텍스트를 정리하여 괄호 앞부분만 반환
+            예: "금융위원회(서민금융과), 02-2100-2612" -> "금융위원회"
+            """
+            if not text:
+                return ""
+            import re
+            # 괄호 앞부분만 추출
+            match = re.match(r'^([^(,]+)', text.strip())
+            if match:
+                cleaned = match.group(1).strip()
+                # 쉼표나 전화번호 패턴 제거
+                cleaned = re.sub(r',\s*\d{2,3}-\d{3,4}-\d{4}.*$', '', cleaned)
+                cleaned = cleaned.strip()
+                return cleaned
+            return text.strip()
+        
+        # 방법 1: 행정규칙 페이지 (감독규정)의 경우 우선 처리
+        if is_adm_rul:
+            # 방법 1-1: Selenium driver를 사용하여 XPath로 직접 추출
+            if driver:
+                try:
+                    # 행정규칙 페이지 XPath: /html/body/form[1]/div[1]/div[2]/div[4]/div/div/div/div[2]/div[1]
+                    xpath = "/html/body/form[1]/div[1]/div[2]/div[4]/div/div/div/div[2]/div[1]"
+                    element = driver.find_element(By.XPATH, xpath)
+                    department_raw = element.text.strip()
+                    if department_raw:
+                        department = clean_department_text(department_raw)
+                        print(f"  ✓ 행정규칙 페이지 XPath로 소관부서 추출: {department_raw} -> {department}")
+                        return department
+                except Exception as e:
+                    print(f"  ⚠ 행정규칙 페이지 XPath로 소관부서 추출 실패: {e}")
+            
+            # 방법 1-2: CSS 선택자로 추출 (#conScroll > div.subtit2)
+            try:
+                element = soup.select_one('#conScroll > div.subtit2')
+                if element:
+                    department_raw = element.get_text(strip=True)
+                    if department_raw:
+                        department = clean_department_text(department_raw)
+                        print(f"  ✓ 행정규칙 페이지 CSS 선택자로 소관부서 추출: {department_raw} -> {department}")
+                        return department
+            except Exception as e:
+                print(f"  ⚠ 행정규칙 페이지 CSS 선택자로 소관부서 추출 실패: {e}")
+            
+            # 방법 1-3: BeautifulSoup로 form[1] 경로 따라가기
+            try:
+                forms = soup.find_all('form')
+                if len(forms) >= 1:
+                    form1 = forms[0]  # 인덱스 0 = 첫 번째 form
+                    # 경로를 따라가기: div[1]/div[2]/div[4]/div/div/div/div[2]/div[1]
+                    current = form1
+                    divs = current.find_all('div', recursive=False)
+                    if divs:
+                        current = divs[0]  # div[1]
+                        divs = current.find_all('div', recursive=False)
+                        if len(divs) >= 2:
+                            current = divs[1]  # div[2]
+                            divs = current.find_all('div', recursive=False)
+                            if len(divs) >= 4:
+                                current = divs[3]  # div[4] (인덱스 3)
+                                # div/div/div/div[2]/div[1]
+                                target = current.select_one('div > div > div > div:nth-child(2) > div:nth-child(1)')
+                                if target:
+                                    department_raw = target.get_text(strip=True)
+                                    if department_raw:
+                                        department = clean_department_text(department_raw)
+                                        print(f"  ✓ 행정규칙 페이지 BeautifulSoup로 소관부서 추출: {department_raw} -> {department}")
+                                        return department
+            except Exception as e:
+                print(f"  ⚠ 행정규칙 페이지 BeautifulSoup로 소관부서 추출 실패: {e}")
+        
+        # 방법 2: 일반 법령 페이지 (form[2] 사용)
+        if driver:
+            try:
+                # XPath: /html/body/form[2]/div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]
+                xpath = "/html/body/form[2]/div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]"
+                element = driver.find_element(By.XPATH, xpath)
+                department_raw = element.text.strip()
+                if department_raw:
+                    department = clean_department_text(department_raw)
+                    print(f"  ✓ XPath로 소관부서 추출: {department_raw} -> {department}")
+                    return department
+            except Exception as e:
+                print(f"  ⚠ XPath로 소관부서 추출 실패: {e}")
+                # 다른 XPath 패턴 시도
+                try:
+                    # 대체 XPath 패턴들
+                    alt_xpaths = [
+                        "/html/body/form[2]//div[6]//div[2]//p//a//span[1]",
+                        "//form[2]//div[6]//div[2]//p//a//span[1]",
+                        "//p//a//span[1]",
+                    ]
+                    for alt_xpath in alt_xpaths:
+                        try:
+                            element = driver.find_element(By.XPATH, alt_xpath)
+                            department_raw = element.text.strip()
+                            if department_raw:
+                                department = clean_department_text(department_raw)
+                                if department and len(department) < 50:  # 너무 긴 텍스트는 제외
+                                    print(f"  ✓ 대체 XPath로 소관부서 추출: {department_raw} -> {department}")
+                                    return department
+                        except:
+                            continue
+                except:
+                    pass
+        
+        # 방법 2: BeautifulSoup로 경로를 따라가서 추출
+        try:
+            # form[2] 찾기
+            forms = soup.find_all('form')
+            if len(forms) >= 2:
+                form2 = forms[1]  # 인덱스 1 = 두 번째 form
+                
+                # 경로를 따라가기: div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]
+                current = form2
+                
+                # div[1]
+                divs = current.find_all('div', recursive=False)
+                if divs:
+                    current = divs[0]
+                    # div[2]
+                    divs = current.find_all('div', recursive=False)
+                    if len(divs) >= 2:
+                        current = divs[1]
+                        # div[6]
+                        divs = current.find_all('div', recursive=False)
+                        if len(divs) >= 6:
+                            current = divs[5]  # 인덱스 5 = 6번째 div
+                            # div/div[1]/div/div/div[2]/div[1]/p/a/span[1]
+                            # 더 깊이 들어가기
+                            p_tag = current.select_one('div > div:nth-child(1) > div > div > div:nth-child(2) > div:nth-child(1) > p')
+                            if p_tag:
+                                a_tag = p_tag.find('a')
+                                if a_tag:
+                                    span_tag = a_tag.find('span')
+                                    if span_tag:
+                                        department_raw = span_tag.get_text(strip=True)
+                                        if department_raw:
+                                            department = clean_department_text(department_raw)
+                                            print(f"  ✓ BeautifulSoup로 소관부서 추출: {department_raw} -> {department}")
+                                            return department
+        except Exception as e:
+            print(f"  ⚠ BeautifulSoup로 소관부서 추출 실패: {e}")
+        
+        # 방법 3: CSS 선택자로 일반적인 패턴 찾기
+        try:
+            # p > a > span[1] 패턴으로 찾기
+            spans = soup.select('p > a > span:first-child')
+            for span in spans:
+                text_raw = span.get_text(strip=True)
+                # 소관부서로 보이는 짧은 텍스트 (50자 이하, 부서명 같은 패턴)
+                if text_raw and len(text_raw) < 50 and ('부' in text_raw or '청' in text_raw or '원' in text_raw or '위원회' in text_raw):
+                    department = clean_department_text(text_raw)
+                    if department:
+                        print(f"  ✓ CSS 선택자로 소관부서 추출: {text_raw} -> {department}")
+                        return department
+        except Exception as e:
+            print(f"  ⚠ CSS 선택자로 소관부서 추출 실패: {e}")
+        
+        return department
     
     def extract_law_search_results(self, soup: BeautifulSoup, base_url: str = None, is_adm_rul: bool = False, skip_target_filter: bool = False) -> Dict:
         """
@@ -1150,6 +1804,17 @@ class LawGoKrScraper(BaseScraper):
                         item = {}
                         cells = row.find_all('td')
                         
+                        # 디버깅: 첫 번째 행의 셀 구조 확인
+                        if not hasattr(self, '_table_structure_logged') and cells:
+                            cell_info = []
+                            for idx, cell in enumerate(cells):
+                                cell_text = cell.get_text(strip=True)[:30]  # 처음 30자만
+                                cell_class = ' '.join(cell.get('class', []))
+                                cell_info.append(f"셀[{idx}]: '{cell_text}' (class: {cell_class})")
+                            print(f"  [디버그] 테이블 구조: {len(cells)}개 셀 발견")
+                            print(f"  [디버그] " + " | ".join(cell_info))
+                            self._table_structure_logged = True
+                        
                         # 법령명 추출: td.tl > a (CSS 선택자 사용)
                         law_name_link = None
                         law_name_cell = row.find('td', class_='tl')
@@ -1193,8 +1858,8 @@ class LawGoKrScraper(BaseScraper):
                                 # 링크가 없으면 검색 URL 사용
                                 item['link'] = base_url if base_url else ''
                         
-                        # 각 셀에서 정보 추출 (테이블 구조에 맞게)
-                        # 구조: 인덱스 | 법령명 | 공포일자 | 법령종류 | 법령번호 | 시행일자 | 타법개정 | 소관부처
+                        # 각 셀에서 정보 추출 (실제 테이블 구조에 맞게 동적으로 처리)
+                        # 주의: 테이블 구조는 페이지마다 다를 수 있으므로 셀 개수와 내용을 확인하여 추출
                         for i, cell in enumerate(cells):
                             cell_text = cell.get_text(strip=True)
                             cell_class = cell.get('class', [])
@@ -1203,19 +1868,26 @@ class LawGoKrScraper(BaseScraper):
                             if 'tl' in cell_class:
                                 continue
                             
-                            # 셀 위치에 따라 정보 추출
-                            if i == 2:  # 공포일자 (셀 인덱스 2)
-                                if '년' in cell_text or '.' in cell_text:
+                            # 셀 내용을 기반으로 정보 추출 (위치 기반이 아닌 내용 기반)
+                            # 공포일자: 날짜 형식이 포함된 경우
+                            if ('년' in cell_text or '.' in cell_text) and not item.get('promulgation_date'):
+                                # 법령번호가 아닌지 확인 (제XXX호 형식 제외)
+                                if '호' not in cell_text and '제' not in cell_text[:5]:
                                     item['promulgation_date'] = cell_text
-                            elif i == 3:  # 법령종류 (셀 인덱스 3)
-                                if cell_text and not item.get('law_type'):
-                                    item['law_type'] = cell_text
-                            elif i == 5:  # 시행일자 (셀 인덱스 5)
-                                if '년' in cell_text or '.' in cell_text:
+                            # 시행일자: 날짜 형식이 포함된 경우
+                            elif ('년' in cell_text or '.' in cell_text) and not item.get('enforcement_date'):
+                                if '호' not in cell_text and '제' not in cell_text[:5]:
                                     item['enforcement_date'] = cell_text
-                            elif i == len(cells) - 1:  # 마지막 셀 (소관부처)
+                            # 법령종류: 짧은 텍스트이고 날짜가 아닌 경우
+                            elif cell_text and len(cell_text) < 20 and not item.get('law_type'):
+                                if '년' not in cell_text and '.' not in cell_text and '호' not in cell_text:
+                                    item['law_type'] = cell_text
+                            # 소관부처: 마지막 셀이고 법령번호가 아닌 경우
+                            elif i == len(cells) - 1:
                                 if cell_text and '호' not in cell_text and '제' not in cell_text:
                                     item['ministry'] = cell_text
+                                    # department도 동일하게 설정 (호환성을 위해)
+                                    item['department'] = cell_text
                         
                         if item.get('law_name'):  # 법령명이 있는 경우만 추가
                             # skip_target_filter가 True이면 필터링 건너뛰기 (엑셀 파일에서 읽은 법령 처리 시)
@@ -1257,7 +1929,10 @@ class LawGoKrScraper(BaseScraper):
                         if len(cells) > 3:
                             item['enforcement_date'] = cells[3].get_text(strip=True)
                         if len(cells) > 4:
-                            item['ministry'] = cells[4].get_text(strip=True)
+                            cell_text = cells[4].get_text(strip=True)
+                            item['ministry'] = cell_text
+                            # department도 동일하게 설정 (호환성을 위해)
+                            item['department'] = cell_text
                         
                         if item.get('law_name'):
                             # 대상 법령인지 확인
@@ -1307,8 +1982,8 @@ class LawGoKrScraper(BaseScraper):
             print(f"저장할 데이터가 없습니다.")
             return
 
-        # KFB_Scraper와 동일한 헤더 정의
-        headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]
+        # 헤더 정의 (번호, 파일 다운로드 링크 제거, 구분 추가)
+        headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 이름"]
 
         with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=headers)
@@ -1432,12 +2107,14 @@ def main():
     parser.add_argument('--limit', type=int, default=0, help='검색 목록에서 가져올 개수 제한 (0=전체)')
     parser.add_argument('--details-limit', type=int, default=0, help='상세 내용 스크래핑 개수 제한 (0=전체)')
     parser.add_argument('--content', type=int, default=0, help='본문 길이 제한 (0=제한 없음, 문자 수)')
+    parser.add_argument('--no-download', action='store_true', help='파일 다운로드 및 저장 기능 스킵')
     args = parser.parse_args()
 
     keyword = args.query.strip()
     list_limit = max(0, int(args.limit))
     details_limit = max(0, int(args.details_limit))
     content_limit = max(0, int(args.content))
+    no_download = args.no_download
 
     crawler = LawGoKrScraper(delay=1.0)
     
@@ -1580,32 +2257,147 @@ def main():
                                 driver.get(search_url)
                                 time.sleep(2)
                                 
-                                # 검색 결과 테이블 대기
+                                # 검색 결과 목록 대기 (liBgcolor 요소 또는 테이블)
                                 WebDriverWait(driver, 10).until(
-                                    EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a"))
+                                    EC.any_of(
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, "li[id^='liBgcolor']")),
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a"))
+                                    )
                                 )
                                 
-                                # 정확히 일치하는 법령명 링크 찾기 (검색 키워드로 비교)
-                                anchors = driver.find_elements(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
+                                # 방법 1: class="on"인 liBgcolor 항목 찾기 (우선)
+                                target_li = None
                                 target_anchor = None
                                 
-                                # 검색 키워드로 정규화하여 비교
-                                normalized_search_keyword = normalize_law_name(search_keyword)
-                                
-                                for anchor in anchors:
-                                    anchor_text = anchor.text.strip()
-                                    normalized_anchor = normalize_law_name(anchor_text)
-                                    # 검색 키워드가 앵커 텍스트에 포함되거나 일치하는 경우
-                                    if normalized_search_keyword in normalized_anchor or normalized_anchor in normalized_search_keyword:
-                                        target_anchor = anchor
-                                        break
-                                
-                                # 정확히 일치하는 항목이 없으면 첫 번째 항목 사용
-                                if not target_anchor and anchors:
-                                    target_anchor = anchors[0]
+                                try:
+                                    # 모든 liBgcolor 요소 찾기 (0, 1, 2...)
+                                    all_li_elements = driver.find_elements(By.CSS_SELECTOR, "li[id^='liBgcolor']")
+                                    print(f"  → liBgcolor 요소 {len(all_li_elements)}개 발견")
+                                    
+                                    # class="on"인 항목 찾기
+                                    li_on_element = None
+                                    for li_elem in all_li_elements:
+                                        li_class = li_elem.get_attribute('class') or ''
+                                        if 'on' in li_class:
+                                            li_on_element = li_elem
+                                            print(f"  ✓ class='on'인 liBgcolor 항목 발견 (ID: {li_elem.get_attribute('id')})")
+                                            break
+                                    
+                                    if li_on_element:
+                                        # 검색 키워드로 정규화하여 비교
+                                        normalized_search_keyword = normalize_law_name(search_keyword)
+                                        
+                                        # liBgcolor 내부에서 법령명 링크 찾기
+                                        # 여러 패턴 시도: span.tx > a, 또는 직접 a 태그
+                                        law_name_links = li_on_element.find_elements(By.CSS_SELECTOR, "span.tx a, a span.tx, a")
+                                        
+                                        for link in law_name_links:
+                                            link_text = link.text.strip()
+                                            # span.tx 내부의 텍스트도 확인
+                                            if not link_text:
+                                                # span.tx 내부의 strong 태그 텍스트 확인
+                                                strong_tags = link.find_elements(By.CSS_SELECTOR, "strong")
+                                                if strong_tags:
+                                                    link_text = ' '.join([s.text.strip() for s in strong_tags])
+                                            
+                                            if link_text:
+                                                normalized_link = normalize_law_name(link_text)
+                                                # 검색 키워드와 일치하는지 확인
+                                                if normalized_search_keyword == normalized_link or normalized_search_keyword in normalized_link or normalized_link in normalized_search_keyword:
+                                                    target_li = li_on_element
+                                                    target_anchor = link
+                                                    print(f"  ✓ class='on' 항목에서 법령명 일치: {link_text[:50]}... (ID: {li_on_element.get_attribute('id')})")
+                                                    break
+                                        
+                                        # 검색 키워드와 일치하는 링크를 찾지 못한 경우, class='on' 항목의 첫 번째 링크 사용
+                                        if not target_anchor and law_name_links:
+                                            target_li = li_on_element
+                                            target_anchor = law_name_links[0]
+                                            print(f"  ⚠ class='on' 항목에서 검색 키워드와 일치하는 링크를 찾지 못해 첫 번째 링크 사용: {target_anchor.text[:50]}...")
+                                    else:
+                                        # class="on"인 항목을 찾지 못한 경우, 모든 liBgcolor 요소에서 검색 키워드와 일치하는 항목 찾기
+                                        print(f"  ⚠ class='on'인 항목을 찾을 수 없습니다. 모든 liBgcolor 요소에서 검색 중...")
+                                        normalized_search_keyword = normalize_law_name(search_keyword)
+                                        
+                                        for li_elem in all_li_elements:
+                                            try:
+                                                # liBgcolor 내부의 a 태그 찾기
+                                                a_tags = li_elem.find_elements(By.CSS_SELECTOR, "a")
+                                                
+                                                for a_tag in a_tags:
+                                                    # title 속성 확인
+                                                    title_text = a_tag.get_attribute('title') or ''
+                                                    # span.tx 내부의 텍스트 확인
+                                                    span_tx = a_tag.find_elements(By.CSS_SELECTOR, "span.tx")
+                                                    link_text = ''
+                                                    
+                                                    if span_tx:
+                                                        link_text = span_tx[0].text.strip()
+                                                        # strong 태그 텍스트도 확인
+                                                        if not link_text:
+                                                            strong_tags = span_tx[0].find_elements(By.CSS_SELECTOR, "strong")
+                                                            if strong_tags:
+                                                                link_text = ' '.join([s.text.strip() for s in strong_tags])
+                                                    
+                                                    # title이나 link_text에서 검색 키워드와 일치하는지 확인
+                                                    if title_text:
+                                                        normalized_title = normalize_law_name(title_text)
+                                                        if normalized_search_keyword == normalized_title or normalized_search_keyword in normalized_title or normalized_title in normalized_search_keyword:
+                                                            target_li = li_elem
+                                                            target_anchor = a_tag
+                                                            print(f"  ✓ liBgcolor 항목에서 타이틀 일치: {title_text[:50]}... (ID: {li_elem.get_attribute('id')})")
+                                                            break
+                                                    
+                                                    if link_text:
+                                                        normalized_link = normalize_law_name(link_text)
+                                                        if normalized_search_keyword == normalized_link or normalized_search_keyword in normalized_link or normalized_link in normalized_search_keyword:
+                                                            target_li = li_elem
+                                                            target_anchor = a_tag
+                                                            print(f"  ✓ liBgcolor 항목에서 법령명 일치: {link_text[:50]}... (ID: {li_elem.get_attribute('id')})")
+                                                            break
+                                                
+                                                if target_anchor:
+                                                    break
+                                            except Exception as e:
+                                                continue
+                                        
+                                        if not target_anchor:
+                                            print(f"  ⚠ 모든 liBgcolor 요소에서 검색 키워드와 일치하는 항목을 찾을 수 없습니다.")
+                                    
+                                    # liBgcolor1에서 찾지 못한 경우, 테이블에서 찾기
+                                    if not target_anchor:
+                                        print(f"  → liBgcolor1에서 찾지 못해 테이블에서 검색 중...")
+                                        anchors = driver.find_elements(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
+                                        
+                                        for anchor in anchors:
+                                            anchor_text = anchor.text.strip()
+                                            normalized_anchor = normalize_law_name(anchor_text)
+                                            if normalized_search_keyword == normalized_anchor or normalized_search_keyword in normalized_anchor or normalized_anchor in normalized_search_keyword:
+                                                target_anchor = anchor
+                                                print(f"  ✓ 테이블에서 항목 발견: {anchor_text[:50]}...")
+                                                break
+                                    
+                                except Exception as e:
+                                    print(f"  ⚠ liBgcolor 요소 찾기 실패: {e}")
+                                    # 대체 방법: 테이블에서 찾기
+                                    anchors = driver.find_elements(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
+                                    normalized_search_keyword = normalize_law_name(search_keyword)
+                                    
+                                    for anchor in anchors:
+                                        anchor_text = anchor.text.strip()
+                                        normalized_anchor = normalize_law_name(anchor_text)
+                                        if normalized_search_keyword == normalized_anchor or normalized_search_keyword in normalized_anchor or normalized_anchor in normalized_search_keyword:
+                                            target_anchor = anchor
+                                            break
+                                    
+                                    if not target_anchor and anchors:
+                                        target_anchor = anchors[0]
                                 
                                 if target_anchor:
                                     # JavaScript로 클릭 시도
+                                    print(f"  → 법령 링크 클릭 중...")
+                                    driver.execute_script("arguments[0].scrollIntoView(true);", target_anchor)
+                                    time.sleep(0.5)
                                     driver.execute_script("arguments[0].click();", target_anchor)
                                     time.sleep(2)
                                     
@@ -1615,15 +2407,29 @@ def main():
                                     )
                                     time.sleep(1)
                                     detail_soup = BeautifulSoup(driver.page_source, 'lxml')
+                                    print(f"  ✓ 상세 페이지 로드 완료")
                                 else:
                                     print(f"  ⚠ 클릭할 링크를 찾을 수 없습니다.")
                             except Exception as e:
                                 print(f"  ⚠ Selenium 클릭 실패: {str(e)[:100]}")
+                                import traceback
+                                traceback.print_exc()
                         else:
                             # 일반 링크인 경우 직접 접근
                             detail_soup = crawler.fetch_page(law_link, use_selenium=True, driver=driver)
                         
                         if detail_soup:
+                            # 디버깅: 첫 번째 상세 페이지만 HTML 저장
+                            if not hasattr(crawler, '_debug_html_saved'):
+                                debug_dir = crawler.output_dir / "debug"
+                                debug_dir.mkdir(parents=True, exist_ok=True)
+                                debug_file = debug_dir / "debug_law_detail.html"
+                                if not debug_file.exists():
+                                    with open(debug_file, 'w', encoding='utf-8') as f:
+                                        f.write(detail_soup.prettify())
+                                    print(f"  ✓ 디버그 HTML 저장: {debug_file}")
+                                    crawler._debug_html_saved = True
+                            
                             law_content = crawler.extract_law_detail(detail_soup)
                             target_item['law_content'] = law_content
                             if law_content and len(law_content.strip()) > 100:  # 의미있는 내용인지 확인
@@ -1631,52 +2437,118 @@ def main():
                             else:
                                 print(f"  ⚠ 본문 추출 실패 또는 빈 내용")
                             
-                            # 파일 다운로드 (Selenium을 사용하여 팝업 처리)
-                            # 상세 페이지가 이미 Selenium으로 열려있으므로 driver 사용 가능
-                            print(f"  → 파일 다운로드 시도 중...")
+                            # 부칙 영역에서 제정일과 최근 개정일 추출
+                            # 방법 1: 검색 결과 목록에서 부칙 버튼 클릭하여 추출 (테스트)
+                            date_info = {'enactment_date': '', 'revision_date': ''}
                             
-                            # Selenium으로 파일 다운로드 (팝업 처리)
-                            downloaded_file_path = crawler._download_file_with_selenium(driver, regulation_name=original_law_name)
-                            
-                            if downloaded_file_path and downloaded_file_path.get('file_path'):
-                                target_item['file_download_link'] = downloaded_file_path.get('file_url', '')
-                                target_item['file_name'] = downloaded_file_path.get('file_name', '')
-                                
-                                file_path = downloaded_file_path['file_path']
-                                if file_path.lower().endswith('.pdf'):
-                                    print(f"  → PDF 내용 추출 중...")
-                                    pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
-                                    if pdf_content:
-                                        # PDF 내용이 있으면 본문으로 사용
-                                        target_item['law_content'] = pdf_content
-                                        print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
-                            else:
-                                # Selenium 다운로드 실패 시 기존 방법 시도
-                                file_info = crawler._extract_file_links(detail_soup, law_link)
-                                if file_info['download_links']:
-                                    target_item['file_download_link'] = file_info['download_links'][0]
-                                    target_item['file_name'] = file_info['file_names'][0] if file_info['file_names'] else ''
+                            # 검색 결과 목록 페이지로 돌아가서 부칙 버튼 클릭 시도
+                            if 'lsSc.do' in law_link or 'javascript:' in law_link or not law_link.startswith('http'):
+                                try:
+                                    print(f"  → 검색 결과 목록에서 부칙 목록 추출 시도 중...")
+                                    # 검색 페이지로 다시 이동
+                                    driver.get(search_url)
+                                    time.sleep(2)
                                     
-                                    # 파일 다운로드 및 비교
-                                    downloaded_file_path = crawler._download_and_compare_file(
-                                        file_info['download_links'][0],
-                                        file_info['file_names'][0] if file_info['file_names'] else '파일.pdf',
-                                        regulation_name=original_law_name
+                                    # 검색 결과 테이블 대기
+                                    WebDriverWait(driver, 10).until(
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a"))
                                     )
                                     
-                                    # PDF 파일이면 내용 추출
-                                    if downloaded_file_path and downloaded_file_path.get('file_path'):
-                                        file_path = downloaded_file_path['file_path']
-                                        if file_path.lower().endswith('.pdf'):
-                                            print(f"  → PDF 내용 추출 중...")
-                                            pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
-                                            if pdf_content:
-                                                # PDF 내용이 있으면 본문으로 사용
-                                                target_item['law_content'] = pdf_content
-                                                print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
+                                    # 부칙 목록에서 날짜 추출 시도
+                                    date_info_from_list = crawler.extract_enactment_and_revision_dates_from_list(driver, law_name=original_law_name)
+                                    
+                                    if date_info_from_list.get('enactment_date') or date_info_from_list.get('revision_date'):
+                                        print(f"  ✓ 검색 결과 목록 방식으로 날짜 추출 성공")
+                                        date_info = date_info_from_list
+                                    else:
+                                        print(f"  ⚠ 검색 결과 목록 방식으로 날짜 추출 실패, 상세 페이지 방식 시도")
+                                except Exception as e:
+                                    print(f"  ⚠ 검색 결과 목록에서 부칙 추출 실패: {e}")
+                            
+                            # 방법 2: 상세 페이지의 부칙 영역에서 추출 (기존 방식)
+                            if not (date_info.get('enactment_date') or date_info.get('revision_date')):
+                                print(f"  → 상세 페이지 부칙 영역에서 날짜 추출 중...")
+                                date_info = crawler.extract_enactment_and_revision_dates(detail_soup)
+                                if date_info.get('enactment_date') or date_info.get('revision_date'):
+                                    print(f"  ✓ 상세 페이지 방식으로 날짜 추출 성공")
+                            
+                            if date_info.get('enactment_date'):
+                                target_item['enactment_date'] = date_info['enactment_date']
+                                print(f"  ✓ 제정일 추출: {date_info['enactment_date']}")
+                            else:
+                                target_item['enactment_date'] = ''
+                                print(f"  ⚠ 제정일 추출 실패 (부칙 영역에서 날짜를 찾을 수 없음)")
+                            if date_info.get('revision_date'):
+                                target_item['revision_date'] = date_info['revision_date']
+                                print(f"  ✓ 최근 개정일 추출: {date_info['revision_date']}")
+                            else:
+                                target_item['revision_date'] = ''
+                                print(f"  ⚠ 최근 개정일 추출 실패 (부칙 영역에서 날짜를 찾을 수 없음)")
+                            
+                            # 상세 페이지에서 소관부서 추출
+                            print(f"  → 상세 페이지에서 소관부서 추출 시도 중...")
+                            department_from_detail = crawler.extract_department_from_detail(detail_soup, driver=driver, is_adm_rul=is_adm_rul)
+                            if department_from_detail:
+                                # 상세 페이지에서 추출한 소관부서가 있으면 우선 사용
+                                target_item['department'] = department_from_detail
+                                target_item['ministry'] = department_from_detail
+                                print(f"  ✓ 소관부서 추출: {department_from_detail}")
+                            elif not target_item.get('ministry') and not target_item.get('department'):
+                                # 검색 결과 목록에서 추출하지 못했고, 상세 페이지에서도 추출하지 못한 경우
+                                print(f"  ⚠ 소관부서 추출 실패")
+                            
+                            # 파일 다운로드 (Selenium을 사용하여 팝업 처리)
+                            # --no-download 플래그가 있으면 파일 다운로드 스킵
+                            if no_download:
+                                print(f"  → 파일 다운로드 스킵 (--no-download 플래그 활성화)")
+                                target_item['file_download_link'] = ''
+                                target_item['file_name'] = ''
+                            else:
+                                # 상세 페이지가 이미 Selenium으로 열려있으므로 driver 사용 가능
+                                print(f"  → 파일 다운로드 시도 중...")
+                                
+                                # Selenium으로 파일 다운로드 (팝업 처리)
+                                downloaded_file_path = crawler._download_file_with_selenium(driver, regulation_name=original_law_name)
+                                
+                                if downloaded_file_path and downloaded_file_path.get('file_path'):
+                                    target_item['file_download_link'] = downloaded_file_path.get('file_url', '')
+                                    target_item['file_name'] = downloaded_file_path.get('file_name', '')
+                                    
+                                    file_path = downloaded_file_path['file_path']
+                                    if file_path.lower().endswith('.pdf'):
+                                        print(f"  → PDF 내용 추출 중...")
+                                        pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
+                                        if pdf_content:
+                                            # PDF 내용이 있으면 본문으로 사용
+                                            target_item['law_content'] = pdf_content
+                                            print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
                                 else:
-                                    target_item['file_download_link'] = ''
-                                    target_item['file_name'] = ''
+                                    # Selenium 다운로드 실패 시 기존 방법 시도
+                                    file_info = crawler._extract_file_links(detail_soup, law_link)
+                                    if file_info['download_links']:
+                                        target_item['file_download_link'] = file_info['download_links'][0]
+                                        target_item['file_name'] = file_info['file_names'][0] if file_info['file_names'] else ''
+                                        
+                                        # 파일 다운로드 및 비교
+                                        downloaded_file_path = crawler._download_and_compare_file(
+                                            file_info['download_links'][0],
+                                            file_info['file_names'][0] if file_info['file_names'] else '파일.pdf',
+                                            regulation_name=original_law_name
+                                        )
+                                        
+                                        # PDF 파일이면 내용 추출
+                                        if downloaded_file_path and downloaded_file_path.get('file_path'):
+                                            file_path = downloaded_file_path['file_path']
+                                            if file_path.lower().endswith('.pdf'):
+                                                print(f"  → PDF 내용 추출 중...")
+                                                pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
+                                                if pdf_content:
+                                                    # PDF 내용이 있으면 본문으로 사용
+                                                    target_item['law_content'] = pdf_content
+                                                    print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
+                                    else:
+                                        target_item['file_download_link'] = ''
+                                        target_item['file_name'] = ''
                         else:
                             print(f"  ✗ 상세 페이지 가져오기 실패")
                             target_item['law_content'] = ""
@@ -1791,9 +2663,27 @@ def main():
                         print(f"  ✓ 내용 추출 완료 ({len(law_content)}자)")
                     else:
                         print(f"  ⚠ 내용 추출 실패 또는 빈 내용")
+                    
+                    # 부칙 영역에서 제정일과 최근 개정일 추출
+                    print(f"  → 부칙 영역에서 날짜 추출 중...")
+                    date_info = crawler.extract_enactment_and_revision_dates(detail_soup)
+                    if date_info.get('enactment_date'):
+                        item['enactment_date'] = date_info['enactment_date']
+                        print(f"  ✓ 제정일 추출: {date_info['enactment_date']}")
+                    else:
+                        item['enactment_date'] = ''
+                        print(f"  ⚠ 제정일 추출 실패 (부칙 영역에서 날짜를 찾을 수 없음)")
+                    if date_info.get('revision_date'):
+                        item['revision_date'] = date_info['revision_date']
+                        print(f"  ✓ 최근 개정일 추출: {date_info['revision_date']}")
+                    else:
+                        item['revision_date'] = ''
+                        print(f"  ⚠ 최근 개정일 추출 실패 (부칙 영역에서 날짜를 찾을 수 없음)")
                 else:
                     print(f"  ✗ 페이지 가져오기 실패")
                     item['law_content'] = ""
+                    item['enactment_date'] = ''
+                    item['revision_date'] = ''
             else:
                 print(f"[{idx}/{len(all_results)}] 링크가 없어 건너뜀")
                 item['law_content'] = ""
@@ -1843,14 +2733,13 @@ def main():
             truncated_content = truncate_content(full_content)
             
             law_item = {
-                '번호': item.get('no', ''),
+                '구분': item.get('division', ''),  # CSV의 구분 값
                 '규정명': regulation_name,  # 원본 법령명 (괄호 포함) 사용
                 '기관명': item.get('organization', '법제처'),
                 '본문': truncated_content,
-                '제정일': item.get('enactment_date', item.get('promulgation_date', '')),
-                '최근 개정일': item.get('revision_date', item.get('enforcement_date', '')),
+                '제정일': item.get('enactment_date', ''),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
+                '최근 개정일': item.get('revision_date', ''),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
                 '소관부서': item.get('department', item.get('ministry', '')),
-                '파일 다운로드 링크': item.get('file_download_link', item.get('download_link', '')),
                 '파일 이름': item.get('file_name', '')
             }
             law_results.append(law_item)
@@ -1898,16 +2787,20 @@ def main():
                 matched_item['본문'] = truncate_content(matched_item.get('본문', ''))
                 final_results.append(matched_item)
             else:
+                # CSV에서 구분 정보 가져오기
+                division = ''
+                if isinstance(target, dict):
+                    division = target.get('구분', '')
+                
                 final_results.append(
                     {
-                        '번호': '',
+                        '구분': division,
                         '규정명': original_name,
                         '기관명': '법제처',
                         '본문': '',
                         '제정일': '',
                         '최근 개정일': '',
                         '소관부서': '',
-                        '파일 다운로드 링크': '',
                         '파일 이름': '',
                     }
                 )
