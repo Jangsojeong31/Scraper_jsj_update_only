@@ -44,6 +44,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from common.base_scraper import BaseScraper
+from common.file_extractor import FileExtractor
+from common.file_comparator import FileComparator
 
 
 class KofiaScraper(BaseScraper):
@@ -55,8 +57,26 @@ class KofiaScraper(BaseScraper):
     
     def __init__(self, delay: float = 1.0, csv_path: Optional[str] = None):
         super().__init__(delay)
-        self.download_dir = os.path.join("output", "downloads")
-        os.makedirs(self.download_dir, exist_ok=True)
+        
+        # 출력 디렉토리 설정
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        self.downloads_dir = self.output_dir / "downloads"
+        self.previous_dir = self.downloads_dir / "previous"
+        self.current_dir = self.downloads_dir / "current"
+        
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        
+        # FileExtractor 초기화 (current 디렉토리 사용)
+        self.file_extractor = FileExtractor(download_dir=str(self.current_dir), session=self.session)
+        # 파일 비교기 초기화
+        self.file_comparator = FileComparator(base_dir=str(self.downloads_dir))
+        
+        # 하위 호환성을 위해 기존 download_dir도 유지
+        self.download_dir = str(self.downloads_dir)
+        
         self.csv_path = csv_path or self.DEFAULT_CSV_PATH
         self.target_laws = self._load_target_laws(self.csv_path)
         self.target_lookup = {
@@ -385,6 +405,202 @@ class KofiaScraper(BaseScraper):
         return selected_links, missing_targets
 
     # ------------------------------------------------------------------
+    # 파일 다운로드 및 비교
+    # ------------------------------------------------------------------
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.downloads_dir / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
+    
+    def _download_file_by_clicking_button(
+        self, driver: webdriver.Chrome, button_selector: str, file_name: str, 
+        file_type: str, regulation_name: str = ""
+    ) -> Optional[Dict]:
+        """버튼 클릭을 통해 파일 다운로드 및 이전 파일과 비교
+        Args:
+            driver: Selenium WebDriver
+            button_selector: 다운로드 버튼 CSS 선택자 (iframe01 내부 기준)
+            file_name: 파일명
+            file_type: 파일 타입 (hwp/pdf)
+            regulation_name: 규정명 (이전 파일 매칭용)
+        Returns:
+            비교 결과 딕셔너리 또는 None
+        """
+        try:
+            import shutil
+            
+            # 파일 확장자
+            ext = f".{file_type}" if file_type else ".pdf"
+            
+            # 안전한 파일명 생성 (규정명 + 확장자만 사용, 중복 허용)
+            if regulation_name:
+                safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
+                safe_reg_name = safe_reg_name.replace(' ', '_')
+                safe_filename = f"{safe_reg_name}{ext}"
+            else:
+                base_name = re.sub(r'[^\w\s.-]', '', file_name).replace(' ', '_')
+                if not base_name.endswith(ext):
+                    base_name = base_name.rsplit('.', 1)[0] if '.' in base_name else base_name
+                    safe_filename = f"{base_name}{ext}"
+                else:
+                    safe_filename = base_name
+            
+            # 새 파일 다운로드 경로 (current 디렉토리)
+            new_file_path = self.current_dir / safe_filename
+            
+            # 이전 파일 경로 (previous 디렉토리)
+            previous_file_path = self.previous_dir / safe_filename
+            
+            # iframe01로 전환하여 버튼 클릭
+            print(f"  → 파일 다운로드 중: {file_name}")
+            try:
+                # iframe01로 전환
+                driver.switch_to.default_content()
+                content_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#iframe01")
+                driver.switch_to.frame(content_iframe)
+                time.sleep(1)
+                
+                # 버튼 찾기 및 클릭
+                download_button = driver.find_element(By.CSS_SELECTOR, button_selector)
+                driver.execute_script("arguments[0].click();", download_button)
+                print(f"  ✓ 다운로드 버튼 클릭 완료")
+                
+                # 다운로드 완료 대기 (최대 30초)
+                time.sleep(3)  # 초기 대기
+                max_wait = 30
+                waited = 0
+                while waited < max_wait:
+                    # 다운로드 디렉토리에서 파일 확인
+                    downloaded_files = list(self.current_dir.glob("*"))
+                    # .crdownload 파일이 있으면 아직 다운로드 중
+                    crdownload_files = [f for f in downloaded_files if f.name.endswith('.crdownload')]
+                    if not crdownload_files:
+                        # 다운로드 완료된 파일 찾기
+                        downloaded_file = None
+                        for f in downloaded_files:
+                            if f.is_file() and not f.name.endswith('.crdownload'):
+                                # 최근 수정된 파일이면 다운로드된 파일일 가능성
+                                if not downloaded_file or f.stat().st_mtime > downloaded_file.stat().st_mtime:
+                                    downloaded_file = f
+                        if downloaded_file:
+                            break
+                    time.sleep(1)
+                    waited += 1
+                
+                # 메인 프레임으로 복귀
+                driver.switch_to.default_content()
+                
+                # 다운로드된 파일 찾기
+                downloaded_file = None
+                downloaded_files = list(self.current_dir.glob("*"))
+                for f in downloaded_files:
+                    if f.is_file() and not f.name.endswith('.crdownload'):
+                        if not downloaded_file or f.stat().st_mtime > downloaded_file.stat().st_mtime:
+                            downloaded_file = f
+                
+                if not downloaded_file or not downloaded_file.exists():
+                    print(f"  ⚠ 파일 다운로드 실패 (파일을 찾을 수 없음)")
+                    return None
+                
+                # 다운로드한 파일을 최종 파일명으로 이동/이름 변경
+                if str(downloaded_file) != str(new_file_path):
+                    if new_file_path.exists():
+                        new_file_path.unlink()
+                    shutil.move(downloaded_file, new_file_path)
+                    print(f"  ✓ 파일 저장: {new_file_path}")
+                else:
+                    print(f"  ✓ 파일 저장 완료: {new_file_path}")
+                
+            except Exception as e:
+                print(f"  ⚠ 버튼 클릭 실패: {e}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
+                return None
+            
+            # 이전 파일과 비교
+            comparison_result = None
+            if previous_file_path.exists():
+                print(f"  → 이전 파일과 비교 중...")
+                comparison_result = self.file_comparator.compare_and_report(
+                    str(new_file_path),
+                    str(previous_file_path),
+                    save_diff=True
+                )
+                
+                if comparison_result['changed']:
+                    print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                else:
+                    print(f"  ✓ 파일 동일 (변경 없음)")
+            else:
+                print(f"  ✓ 새 파일 (이전 파일 없음)")
+            
+            return {
+                'file_path': str(new_file_path),
+                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
+                'comparison': comparison_result,
+            }
+            
+        except Exception as e:
+            print(f"  ⚠ 파일 다운로드/비교 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    # ------------------------------------------------------------------
     # 트리 링크 클릭 및 콘텐츠 추출
     # ------------------------------------------------------------------
     def click_tree_link_and_extract(
@@ -665,7 +881,7 @@ class KofiaScraper(BaseScraper):
     # ------------------------------------------------------------------
     def _extract_files_from_iframe01(self, soup: BeautifulSoup) -> Optional[Dict]:
         """
-        iframe01 내부에서 첨부파일(#lawbtn) 추출
+        iframe01 내부에서 첨부파일(#lawbtn) 정보 추출 (버튼 정보만, 링크는 저장하지 않음)
         - HWP 파일: #lawbtn > ul.btn > li:nth-child(3) > a
         - PDF 파일: #lawbtn > ul.btn > li:nth-child(4) > a
         """
@@ -674,7 +890,8 @@ class KofiaScraper(BaseScraper):
         
         file_info = {
             "file_names": [],
-            "download_links": [],
+            "file_types": [],  # 파일 타입 (hwp/pdf)
+            "file_buttons": [],  # 버튼 선택자 정보
         }
         
         # 디버깅: #lawbtn 요소 확인
@@ -698,12 +915,6 @@ class KofiaScraper(BaseScraper):
             # 모든 li 요소 확인
             li_elements = ul_btn.select("li")
             print(f"  디버깅: ul 내부의 li 개수: {len(li_elements)}")
-            for idx, li in enumerate(li_elements, 1):
-                a_tag = li.select_one("a")
-                if a_tag:
-                    href = a_tag.get("href", "").strip()
-                    text = a_tag.get_text(strip=True)
-                    print(f"    li[{idx}]: {text[:50]}... (href: {href[:50] if href else '없음'}...)")
         else:
             li_elements = []
 
@@ -758,11 +969,15 @@ class KofiaScraper(BaseScraper):
                 else:
                     name = f"파일.{file_type[1]}"
 
+            # 버튼 선택자 생성 (iframe01 내부에서의 위치)
+            button_selector = f"#lawbtn > ul.btn > li:nth-child({idx}) > a"
+            
             file_info["file_names"].append(name)
-            file_info["download_links"].append(full_href)
-            print(f"  ✓ {file_type[0]} 파일 추출: {name} (href: {full_href[:60]}...)")
+            file_info["file_types"].append(file_type[1])
+            file_info["file_buttons"].append(button_selector)
+            print(f"  ✓ {file_type[0]} 파일 발견: {name}")
 
-        if file_info["download_links"]:
+        if file_info["file_names"]:
             return file_info
 
         return None
@@ -779,7 +994,8 @@ class KofiaScraper(BaseScraper):
             "content": "",
             "department": "",
             "file_names": [],  # 여러 첨부파일 지원
-            "download_links": [],  # 여러 첨부파일 링크 지원
+            "file_types": [],  # 파일 타입 (hwp/pdf)
+            "file_buttons": [],  # 버튼 선택자 정보
             "enactment_date": "",
             "revision_date": "",
         }
@@ -799,8 +1015,14 @@ class KofiaScraper(BaseScraper):
         for selector in content_selectors:
             element = soup.select_one(selector)
             if element:
-                text = element.get_text(" ", strip=True)
+                # 개행 유지하면서 추출
+                text = element.get_text(separator="\n", strip=True)
                 if text and len(text) > 20:
+                    # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                    text = text.replace("\r\n", "\n").replace("\r", "\n")
+                    # 1000자 제한
+                    if len(text) > 1000:
+                        text = text[:1000]
                     info["content"] = text
                     print(f"  ✓ 본문 추출 성공 (셀렉터: {selector}, {len(text)}자)")
                     break
@@ -848,9 +1070,10 @@ class KofiaScraper(BaseScraper):
         # soup 객체에 file_info 속성이 있으면 사용 (iframe01에서 추출한 것)
         if hasattr(soup, 'file_info') and soup.file_info:
             info["file_names"] = soup.file_info.get("file_names", [])
-            info["download_links"] = soup.file_info.get("download_links", [])
+            info["file_types"] = soup.file_info.get("file_types", [])
+            info["file_buttons"] = soup.file_info.get("file_buttons", [])
             if info["file_names"]:
-                print(f"  ✓ 첨부파일 추출: {len(info['file_names'])}개 (iframe01에서)")
+                print(f"  ✓ 첨부파일 발견: {len(info['file_names'])}개 (iframe01에서)")
         else:
             # fallback: 현재 soup에서 직접 찾기 시도 (혹시 모를 경우)
             # 하지만 본문의 별표/서식 파일은 제외해야 하므로 여기서는 찾지 않음
@@ -878,6 +1101,11 @@ class KofiaScraper(BaseScraper):
             download_files: 파일 다운로드 여부
             content_limit: 본문 길이 제한 (0=제한 없음, 문자 수)
         """
+        # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+        self._backup_current_to_previous()
+        # 이전 실행의 diff 파일 정리
+        self._clear_diffs_directory()
+        
         all_results: List[Dict] = []
         driver: Optional[webdriver.Chrome] = None
 
@@ -888,11 +1116,15 @@ class KofiaScraper(BaseScraper):
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--lang=ko-KR")
+            # Chrome 다운로드 디렉토리 설정 (current 디렉토리)
             prefs = {
-                "download.default_directory": os.path.abspath(self.download_dir),
+                "download.default_directory": os.path.abspath(str(self.current_dir)),
                 "download.prompt_for_download": False,
                 "download.directory_upgrade": True,
+                "plugins.always_open_pdf_externally": True,  # PDF를 외부에서 열기
                 "safebrowsing.enabled": True,
+                "profile.default_content_setting_values.notifications": 2,
+                "profile.default_content_setting_values.automatic_downloads": 1
             }
             chrome_options.add_experimental_option("prefs", prefs)
             driver = webdriver.Chrome(options=chrome_options)
@@ -963,14 +1195,44 @@ class KofiaScraper(BaseScraper):
                     # 콘텐츠에서 정보 추출
                     content_info = self.extract_content_from_iframe(content_soup)
                     
-                    # 본문 길이 제한 적용
-                    if content_limit > 0 and content_info.get("content"):
-                        original_length = len(content_info["content"])
-                        content_info["content"] = content_info["content"][:content_limit]
-                        if original_length > content_limit:
-                            print(f"  ⚠ 본문 길이 제한 적용: {original_length}자 → {content_limit}자")
+                    # 본문 길이 제한 적용 (1000자로 제한, 개행 유지)
+                    if content_info.get("content"):
+                        content = content_info["content"]
+                        # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                        content = content.replace("\r\n", "\n").replace("\r", "\n")
+                        # 1000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 1000자)
+                        max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                        if len(content) > max_length:
+                            original_length = len(content)
+                            content = content[:max_length]
+                            if original_length > max_length:
+                                print(f"  ⚠ 본문 길이 제한 적용: {original_length}자 → {max_length}자")
+                        content_info["content"] = content
                     
                     item.update(content_info)
+                    
+                    # 파일 다운로드 및 비교
+                    if download_files and content_info.get("file_names"):
+                        regulation_name = item.get("target_name") or item.get("regulation_name") or item.get("title", "")
+                        file_names = content_info.get("file_names", [])
+                        file_types = content_info.get("file_types", [])
+                        file_buttons = content_info.get("file_buttons", [])
+                        
+                        # 여러 첨부파일 다운로드
+                        for file_idx, (file_name, file_type, button_selector) in enumerate(zip(file_names, file_types, file_buttons)):
+                            if button_selector:
+                                print(f"  → 첨부파일 다운로드 중 [{file_idx + 1}/{len(file_names)}]: {file_name}")
+                                comparison_result = self._download_file_by_clicking_button(
+                                    driver,
+                                    button_selector,
+                                    file_name,
+                                    file_type,
+                                    regulation_name=regulation_name
+                                )
+                                if comparison_result:
+                                    print(f"  ✓ 파일 다운로드 완료: {file_name}")
+                                else:
+                                    print(f"  ⚠ 파일 다운로드 실패: {file_name}")
 
                     # 본문 내용이 있는지 확인 (20자 이상이면 본문이 있다고 판단)
                     has_content = content_info.get("content") and len(content_info.get("content", "").strip()) > 20
@@ -1091,7 +1353,6 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
                     "content": "",  # 빈 본문
                     "department": "",
                     "file_names": [],
-                    "download_links": [],
                     "enactment_date": "",
                     "revision_date": "",
                 }
@@ -1112,17 +1373,13 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
     for item in records:
         # 여러 첨부파일 처리
         file_names = item.get("file_names", [])
-        download_links = item.get("download_links", [])
         
-        # 하위 호환성: 기존 file_name, download_link도 확인
+        # 하위 호환성: 기존 file_name도 확인
         if not file_names and item.get("file_name"):
             file_names = [item.get("file_name")]
-        if not download_links and item.get("download_link"):
-            download_links = [item.get("download_link")]
         
         # 여러 첨부파일을 세미콜론으로 구분하여 저장
         file_names_str = "; ".join(file_names) if file_names else ""
-        download_links_str = "; ".join(download_links) if download_links else ""
         
         law_item = {
             "규정명": item.get("regulation_name", item.get("title", "")),
@@ -1131,7 +1388,6 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
             "제정일": item.get("enactment_date", ""),
             "최근 개정일": item.get("revision_date", ""),
             "소관부서": item.get("department", ""),
-            "첨부파일링크": download_links_str,
             "첨부파일이름": file_names_str,
         }
         law_results.append(law_item)
@@ -1162,7 +1418,6 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         "제정일",
         "최근 개정일",
         "소관부서",
-        "첨부파일링크",
         "첨부파일이름",
     ]
     # CSV 저장 - output/csv 디렉토리에 저장
@@ -1173,9 +1428,15 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         writer = csv.DictWriter(f, fieldnames=csv_headers)
         writer.writeheader()
         for law_item in law_results:
-            # CSV 저장 시 본문의 줄바꿈 처리
+            # 본문 내용 처리 (개행 유지, 1000자 제한)
+            content = law_item.get("본문", "") or ""
+            # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+            content = content.replace("\r\n", "\n").replace("\r", "\n")
+            if len(content) > 1000:
+                content = content[:1000]
+            
             csv_item = law_item.copy()
-            csv_item["본문"] = csv_item.get("본문", "").replace("\n", " ").replace("\r", " ")
+            csv_item["본문"] = content
             writer.writerow(csv_item)
     print(f"CSV 저장 완료: {csv_path}")
 

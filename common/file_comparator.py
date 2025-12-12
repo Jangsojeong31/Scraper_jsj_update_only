@@ -108,6 +108,15 @@ class FileComparator:
                     # PDF 파일인 경우 텍스트 추출 후 비교
                     pdf_diff_summary = self._get_pdf_diff_summary(old_file, new_file)
                     result['diff_summary'] = pdf_diff_summary
+                elif self._is_doc_file(new_file) and self._is_doc_file(old_file):
+                    # DOC/DOCX 파일인 경우 바이너리 비교만 (텍스트 추출 불가)
+                    size_diff = result['new_size'] - result['old_size']
+                    if size_diff > 0:
+                        result['diff_summary'] = f'DOC 파일 크기 증가: {result["old_size"]} → {result["new_size"]} bytes (+{size_diff})'
+                    elif size_diff < 0:
+                        result['diff_summary'] = f'DOC 파일 크기 감소: {result["old_size"]} → {result["new_size"]} bytes ({size_diff})'
+                    else:
+                        result['diff_summary'] = f'DOC 파일 내용 변경 (크기 동일: {result["new_size"]} bytes, 바이너리 비교만 가능)'
                 else:
                     # 바이너리 파일인 경우 크기 비교만
                     size_diff = result['new_size'] - result['old_size']
@@ -129,9 +138,14 @@ class FileComparator:
     def _is_text_file(self, filepath: str) -> bool:
         """파일이 텍스트 파일인지 확인"""
         try:
+            # 바이너리 파일 확장자 제외 (DOC, DOCX, HWP, PDF 등)
+            binary_extensions = ['.doc', '.docx', '.hwp', '.pdf', '.zip', '.xls', '.xlsx', '.ppt', '.pptx', '.exe', '.dll', '.bin']
+            ext = Path(filepath).suffix.lower()
+            if ext in binary_extensions:
+                return False
+            
             # 확장자로 판단
             text_extensions = ['.txt', '.csv', '.json', '.xml', '.html', '.htm', '.py', '.js', '.md']
-            ext = Path(filepath).suffix.lower()
             if ext in text_extensions:
                 return True
             
@@ -156,6 +170,24 @@ class FileComparator:
                 with open(filepath, 'rb') as f:
                     first_bytes = f.read(4)
                     return first_bytes[:4] == b'%PDF'
+            return False
+        except:
+            return False
+    
+    def _is_doc_file(self, filepath: str) -> bool:
+        """파일이 DOC/DOCX 파일인지 확인"""
+        try:
+            ext = Path(filepath).suffix.lower()
+            if ext in ['.doc', '.docx']:
+                # DOC 파일 시그니처 확인
+                with open(filepath, 'rb') as f:
+                    first_bytes = f.read(8)
+                    # DOC 파일: OLE2 시그니처 (0xD0CF11E0A1B11AE1)
+                    if first_bytes[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+                        return True
+                    # DOCX 파일: ZIP 시그니처 (PK\x03\x04)
+                    if first_bytes[:4] == b'PK\x03\x04':
+                        return True
             return False
         except:
             return False
@@ -575,11 +607,13 @@ class FileComparator:
         
         # diff 파일 저장
         if save_diff and result['changed'] and result['new_exists'] and result['old_exists']:
-            # 텍스트 파일 또는 PDF 파일인 경우 diff 저장
+            # 텍스트 파일 또는 PDF 파일인 경우 diff 저장 (DOC 파일은 제외)
             is_text = self._is_text_file(new_file) and self._is_text_file(old_file)
             is_pdf = self._is_pdf_file(new_file) and self._is_pdf_file(old_file)
+            is_doc = self._is_doc_file(new_file) and self._is_doc_file(old_file)
             
-            if is_text or is_pdf:
+            # DOC 파일은 바이너리이므로 텍스트 diff 생성 불가
+            if (is_text or is_pdf) and not is_doc:
                 # diff 파일 경로 생성
                 old_name = Path(old_file).stem
                 new_name = Path(new_file).stem
@@ -592,6 +626,8 @@ class FileComparator:
                     html_file = diff_file.with_suffix('.html')
                     print(f"  ✓ Diff 파일 저장: {diff_file}")
                     print(f"  ✓ HTML Diff 파일 저장: {html_file}")
+            elif is_doc:
+                print(f"  ⚠ DOC 파일은 바이너리 형식이므로 텍스트 diff를 생성할 수 없습니다. 해시/크기 비교만 수행됩니다.")
         
         return result
 

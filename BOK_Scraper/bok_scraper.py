@@ -48,19 +48,24 @@ class BokScraper(BaseScraper):
     
     BASE_URL = "https://www.bok.or.kr"
     # 검색 URL 템플릿 (검색어를 파라미터로 받음)
-    SEARCH_URL_TEMPLATE = "https://www.bok.or.kr/portal/singl/law/listSearch.do?menuNo=200200&parentlawseq=&detaillawseq=&lawseq=&search_text={search_text}"
+    SEARCH_URL_TEMPLATE = "https://www.bok.or.kr/portal/search/search/main.do?menuNo=201693&query={query}"
     DEFAULT_CSV_PATH = "BOK_Scraper/input/list.csv"
     
     def __init__(self, delay: float = 1.0, csv_path: Optional[str] = None):
         super().__init__(delay)
-        self.download_dir = os.path.join("output", "downloads")
-        self.previous_dir = os.path.join("output", "downloads", "previous", "bok")
-        os.makedirs(self.download_dir, exist_ok=True)
-        os.makedirs(self.previous_dir, exist_ok=True)
-        # FileExtractor 초기화 (session 전달)
-        self.file_extractor = FileExtractor(download_dir=self.download_dir, session=self.session)
+        # 출력 디렉토리 설정
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        (self.output_dir / "downloads").mkdir(parents=True, exist_ok=True)
+        # previous와 current 디렉토리 설정
+        self.previous_dir = self.output_dir / "downloads" / "previous"
+        self.current_dir = self.output_dir / "downloads" / "current"
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        # FileExtractor 초기화 (current 디렉토리 사용)
+        self.file_extractor = FileExtractor(download_dir=str(self.current_dir), session=self.session)
         # 파일 비교기 초기화
-        self.file_comparator = FileComparator(base_dir=self.download_dir)
+        self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
         # CSV에서 대상 규정 목록 로드
         self.csv_path = csv_path or self.DEFAULT_CSV_PATH
         self.target_laws = self._load_target_laws(self.csv_path)
@@ -115,25 +120,119 @@ class BokScraper(BaseScraper):
                 return True
         return False
     
-    def extract_regulation_list(self, soup: BeautifulSoup) -> List[Dict]:
-        """법규 목록에서 대상 규정만 추출"""
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.output_dir / "downloads" / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
+    
+    def extract_regulation_list(self, soup: BeautifulSoup, search_keyword: str = "") -> List[Dict]:
+        """검색 결과 목록에서 첫 번째 항목 추출"""
         results = []
+        
+        # 검색 결과 영역 찾기 (메뉴나 사이드바 제외)
+        search_result_containers = [
+            ".bdLine.type4",  # 한국은행 법규 검색 결과 영역
+            ".bdLine",  # bdLine 클래스를 가진 영역
+            "div.content .bdLine",  # content 안의 bdLine
+            "#searchResult",  # 검색 결과 컨테이너
+            ".search-result", 
+            ".search-results",
+            ".result-area",
+            ".result-list",
+            "main .list",
+            "main ul",
+            ".content ul",
+            "#content ul",
+        ]
+        
+        result_container = None
+        for container_selector in search_result_containers:
+            container = soup.select_one(container_selector)
+            if container:
+                result_container = container
+                print(f"  ✓ 검색 결과 영역 발견: {container_selector}")
+                break
+        
+        # 검색 결과 영역이 없으면 전체 페이지에서 찾기
+        if not result_container:
+            result_container = soup
         
         # 페이지 구조에 따라 다양한 선택자 시도
         # 검색 결과 페이지는 보통 리스트 형태로 표시됨
         selectors = [
-            "ul li",  # 리스트 항목
+            ".bdLine.type4 ul li",  # 한국은행 법규 검색 결과 리스트
+            ".bdLine ul li",  # bdLine 클래스를 가진 ul의 li
+            "div.bdLine li",  # bdLine div 안의 li
+            "li a[href*='view.do']",  # view.do를 포함한 링크가 있는 li
+            "li a[href*='/portal/singl/law/view.do']",  # 법규 상세 페이지 링크
+            "li[class*='result']",  # result 클래스를 포함한 li
+            "li[class*='item']",  # item 클래스를 포함한 li
+            ".search-result-list li",  # 검색 결과 리스트
+            ".result-list li",
+            ".search-list li",
+            "ul.search-result li",
+            "ul.result li",
+            "li a[href*='bbs']",  # bbs를 포함한 링크가 있는 li
             "table tbody tr",  # 테이블 행
             ".list-item",
             ".law-item",
             ".regulation-item",
             "div.list li",
-            "li a",  # 링크가 있는 리스트 항목
         ]
         
         found_items = []
         for selector in selectors:
-            items = soup.select(selector)
+            items = result_container.select(selector)
             if items and len(items) > 0:
                 # 빈 항목이나 헤더 제외하고 실제 데이터 항목만 필터링
                 valid_items = []
@@ -141,12 +240,50 @@ class BokScraper(BaseScraper):
                     # 링크가 있거나 텍스트가 있는 항목만 포함
                     link = item.select_one("a")
                     text = item.get_text(strip=True)
-                    if (link or text) and len(text) > 10:  # 최소한의 텍스트 길이 확인
-                        valid_items.append(item)
+                    
+                    # 필터링 조건:
+                    # 1. 링크가 있어야 함
+                    # 2. 텍스트 길이가 충분해야 함
+                    # 3. 검색어와 관련이 있어야 함 (검색어가 제공된 경우)
+                    # 4. view.do나 bbs를 포함한 링크여야 함 (법규 상세 페이지로 가는 링크)
+                    if link:
+                        href = link.get("href", "")
+                        # 법규 상세 페이지 링크인지 확인
+                        # /portal/singl/law/view.do 또는 /portal/bbs/.../view.do 형식
+                        is_regulation_link = (
+                            ("view.do" in href and ("/portal/singl/law/" in href or "/portal/bbs/" in href)) or
+                            ("bbs" in href and "view.do" in href) or
+                            ("/portal/singl/law/view.do" in href)
+                        )
+                        
+                        # 메뉴나 사이드바 링크 제외 (ecos, youtube, facebook 등)
+                        is_excluded = any(excluded in href.lower() for excluded in [
+                            "ecos.bok.or.kr",
+                            "youtube.com",
+                            "facebook.com",
+                            "instagram.com",
+                            "twitter.com",
+                            "#",
+                            "javascript:",
+                            "list.do",  # 목록 페이지 제외
+                        ])
+                        
+                        if (is_regulation_link and 
+                            not is_excluded and 
+                            len(text) > 10 and
+                            (not search_keyword or search_keyword in text or search_keyword[:5] in text)):
+                            valid_items.append(item)
                 
                 if valid_items:
                     found_items = valid_items
-                    print(f"  ✓ 선택자 '{selector}'로 {len(valid_items)}개 항목 발견")
+                    print(f"  ✓ 선택자 '{selector}'로 {len(valid_items)}개 유효한 항목 발견")
+                    # 디버깅: 처음 몇 개 항목의 링크 출력
+                    for i, item in enumerate(valid_items[:3], 1):
+                        link_elem = item.select_one("a[href]")
+                        if link_elem:
+                            href = link_elem.get("href", "")
+                            title = link_elem.get_text(strip=True) or item.get_text(strip=True)[:50]
+                            print(f"    [{i}] {title[:30]}... -> {href[:80]}")
                     break
         
         if not found_items:
@@ -156,13 +293,19 @@ class BokScraper(BaseScraper):
             print("  💡 디버그 HTML을 확인하여 실제 페이지 구조를 파악해주세요.")
             return results
         
-        for item in found_items:
+        # 첫 번째 항목만 추출
+        if found_items:
+            item = found_items[0]
             try:
                 # 제목 추출 (다양한 방법 시도)
                 title = None
                 title_elem = (
+                    item.select_one("span.col a span.title") or  # 한국은행 법규 검색 결과 형식
+                    item.select_one("span.col a") or  # 한국은행 법규 검색 결과 형식
+                    item.select_one("a span.title") or
                     item.select_one("a") or
                     item.select_one(".title") or
+                    item.select_one(".result-title") or
                     item.select_one("td:first-child") or
                     item.select_one(".name") or
                     item.select_one("strong") or
@@ -183,16 +326,22 @@ class BokScraper(BaseScraper):
                 
                 # 제목이 없으면 스킵
                 if not title or len(title) < 5:
-                    continue
+                    print(f"  ⚠ 첫 번째 항목에서 제목을 추출하지 못했습니다.")
+                    return results
                 
-                # 모든 규정을 추출 (필터링은 나중에 _filter_regulations_by_targets에서 수행)
-                # print(f"  ✓ 규정 발견: {title}")
+                print(f"  ✓ 첫 번째 검색 결과 발견: {title}")
                 
                 # 상세 링크 추출
                 detail_link = ""
-                link_elem = item.select_one("a[href]")
+                # 한국은행 법규 검색 결과 형식: span.col > a
+                link_elem = (
+                    item.select_one("span.col a[href]") or
+                    item.select_one("a[href*='view.do']") or
+                    item.select_one("a[href]")
+                )
                 if link_elem:
                     href = link_elem.get("href", "")
+                    print(f"  → 원본 href: {href}")
                     if href:
                         # 상대 경로인 경우 절대 경로로 변환
                         if href.startswith("/"):
@@ -201,6 +350,18 @@ class BokScraper(BaseScraper):
                             detail_link = href
                         else:
                             detail_link = urljoin(self.BASE_URL, href)
+                        print(f"  → 최종 상세 링크: {detail_link}")
+                        
+                        # 올바른 링크 형식인지 확인
+                        # /portal/singl/law/view.do 또는 /portal/bbs/.../view.do 형식
+                        if ("view.do" in detail_link and 
+                            ("/portal/singl/law/view.do" in detail_link or 
+                             "/portal/bbs/" in detail_link or 
+                             "nttId" in detail_link or
+                             "lawseq" in detail_link)):
+                            print(f"  ✓ 올바른 법규 상세 페이지 링크 형식 확인됨")
+                        else:
+                            print(f"  ⚠ 경고: 예상과 다른 링크 형식입니다.")
                 
                 # 추가 정보 추출 (개정일, 번호 등)
                 regulation_info = {
@@ -219,8 +380,11 @@ class BokScraper(BaseScraper):
                 # 개정일 추출 시도 (다양한 패턴)
                 date_text = None
                 date_elem = (
+                    item.select_one("span.fs_date") or  # 한국은행 법규 검색 결과 형식
+                    item.select_one("div.col.dataInfo1 span.fs_date") or  # 한국은행 법규 검색 결과 형식
                     item.select_one(".date") or
                     item.select_one(".revision-date") or
+                    item.select_one(".result-date") or
                     item.select_one("td:nth-child(3)") or
                     item.select_one("td:nth-child(2)") or
                     item.select_one("span.date") or
@@ -247,7 +411,6 @@ class BokScraper(BaseScraper):
                 print(f"  ⚠ 항목 추출 중 오류: {e}")
                 import traceback
                 traceback.print_exc()
-                continue
         
         return results
     
@@ -263,14 +426,101 @@ class BokScraper(BaseScraper):
         }
         
         try:
-            soup = self.fetch_page(url, use_selenium=True)
+            print(f"  → 상세 페이지 접근 중: {url}")
+            # 올바른 URL 형식인지 확인
+            # /portal/singl/law/view.do 또는 /portal/bbs/.../view.do 형식
+            if ("view.do" in url and 
+                ("/portal/singl/law/view.do" in url or 
+                 "/portal/bbs/" in url or 
+                 "nttId" in url or
+                 "lawseq" in url)):
+                print(f"  ✓ 올바른 법규 상세 페이지 URL 형식 확인됨")
+            else:
+                print(f"  ⚠ 경고: 예상과 다른 URL 형식입니다.")
+                print(f"     URL: {url}")
             
-            # 파일링크와 파일명 추출: #main-container > div.content > div.bdView > div > div > table > tbody > tr:nth-child(1) > td:nth-child(3) > a
-            file_selector = "#main-container > div.content > div.bdView > div > div > table > tbody > tr:nth-child(1) > td:nth-child(3) > a"
-            file_elem = soup.select_one(file_selector)
+            # Selenium driver 생성 (XPath로 소관부서 추출을 위해)
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.common.exceptions import TimeoutException, NoSuchElementException
             
-            if file_elem:
-                href = file_elem.get("href", "")
+            chrome_options = self._build_default_chrome_options()
+            driver = self._create_webdriver(chrome_options)
+            
+            try:
+                driver.get(url)
+                time.sleep(2)
+                
+                # XPath로 소관부서 추출
+                try:
+                    department_xpath = "/html/body/div/div[2]/main/div[1]/form/div/div[1]/dl[3]/dd"
+                    wait = WebDriverWait(driver, 10)
+                    department_elem = wait.until(EC.presence_of_element_located((By.XPATH, department_xpath)))
+                    department_text = department_elem.text.strip()
+                    if department_text:
+                        # 첫 번째 '(' 앞의 텍스트만 추출 (예: "국제총괄팀(02-759-5748)" → "국제총괄팀")
+                        if '(' in department_text:
+                            department_text = department_text.split('(')[0].strip()
+                        detail_info["department"] = department_text
+                        print(f"  ✓ 소관부서 (XPath): {department_text}")
+                except (TimeoutException, NoSuchElementException):
+                    print(f"  ⚠ XPath로 소관부서를 찾지 못했습니다: {department_xpath}")
+                except Exception as e:
+                    print(f"  ⚠ 소관부서 추출 중 오류: {e}")
+                
+                # BeautifulSoup으로 변환
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+            finally:
+                driver.quit()
+            
+            # 첨부파일 목록 찾기: ul > li > a 구조
+            # 다양한 선택자 시도
+            file_list_selectors = [
+                "main form div dl dd ul li a",  # 일반적인 구조
+                "form div dl dd ul li a",
+                "dl dd ul li a",
+                "ul li a[href*='download']",
+                "ul li a[href*='file']",
+            ]
+            
+            file_links = []
+            for selector in file_list_selectors:
+                links = soup.select(selector)
+                if links:
+                    file_links = links
+                    print(f"  ✓ 첨부파일 목록 발견: {len(links)}개 (셀렉터: {selector})")
+                    break
+            
+            if not file_links:
+                # 디버깅을 위해 HTML 저장
+                self.save_debug_html(soup, filename="debug_bok_detail.html")
+                print(f"  ⚠ 첨부파일 목록을 찾지 못했습니다. 디버그 HTML 저장: output/debug/debug_bok_detail.html")
+            
+            # PDF 파일 우선, 없으면 HWP 파일 찾기
+            selected_file_elem = None
+            file_type = None
+            
+            for link in file_links:
+                href = link.get("href", "")
+                link_text = link.get_text(strip=True)
+                
+                # href나 텍스트에서 파일 확장자 확인
+                if href:
+                    href_lower = href.lower()
+                    if '.pdf' in href_lower or link_text.lower().endswith('.pdf'):
+                        selected_file_elem = link
+                        file_type = 'pdf'
+                        print(f"  ✓ PDF 파일 발견: {link_text}")
+                        break
+                    elif '.hwp' in href_lower or link_text.lower().endswith('.hwp'):
+                        if not selected_file_elem:  # PDF가 없을 때만 HWP 선택
+                            selected_file_elem = link
+                            file_type = 'hwp'
+                            print(f"  ✓ HWP 파일 발견: {link_text}")
+            
+            if selected_file_elem:
+                href = selected_file_elem.get("href", "")
                 if href:
                     # 상대 경로인 경우 절대 경로로 변환
                     if href.startswith("/"):
@@ -280,25 +530,30 @@ class BokScraper(BaseScraper):
                     else:
                         file_url = urljoin(self.BASE_URL, href)
                     
-                    # 파일명 추출: href의 fileNm 파라미터에서 추출
+                    # 파일명 추출
                     file_name = None
                     from urllib.parse import urlparse, parse_qs, unquote
                     
-                    try:
-                        # URL 파싱
-                        parsed_url = urlparse(href)
-                        query_params = parse_qs(parsed_url.query)
-                        
-                        # fileNm 파라미터 추출
-                        if 'fileNm' in query_params:
-                            file_name = query_params['fileNm'][0]
-                            # URL 디코딩 (한글 등이 인코딩되어 있을 수 있음)
-                            file_name = unquote(file_name)
-                        else:
-                            # fileNm이 없으면 href에서 직접 추출 시도
-                            if 'fileNm=' in href:
+                    # 링크 텍스트에서 파일명 추출 시도
+                    link_text = selected_file_elem.get_text(strip=True)
+                    if link_text and ('.pdf' in link_text.lower() or '.hwp' in link_text.lower()):
+                        # 텍스트에서 파일명 추출
+                        import re
+                        match = re.search(r'([^/]+\.(pdf|hwp))', link_text, re.IGNORECASE)
+                        if match:
+                            file_name = match.group(1)
+                    
+                    # href의 fileNm 파라미터에서 추출 시도
+                    if not file_name:
+                        try:
+                            parsed_url = urlparse(href)
+                            query_params = parse_qs(parsed_url.query)
+                            
+                            if 'fileNm' in query_params:
+                                file_name = query_params['fileNm'][0]
+                                file_name = unquote(file_name)
+                            elif 'fileNm=' in href:
                                 file_nm_part = href.split('fileNm=')[1]
-                                # & 또는 &amp; 또는 끝까지
                                 if '&' in file_nm_part:
                                     file_name = file_nm_part.split('&')[0]
                                 elif '&amp;' in file_nm_part:
@@ -306,29 +561,27 @@ class BokScraper(BaseScraper):
                                 else:
                                     file_name = file_nm_part
                                 file_name = unquote(file_name)
-                    except Exception as e:
-                        print(f"  ⚠ 파일명 추출 중 오류: {e}")
+                        except Exception as e:
+                            print(f"  ⚠ 파일명 추출 중 오류: {e}")
                     
                     # 파일명을 찾지 못한 경우 fallback
                     if not file_name:
-                        # span 텍스트는 "첨부파일 있습니다"이므로 사용하지 않음
-                        # href에서 파일 확장자로 파일명 추정
-                        if '.pdf' in href.lower():
+                        if file_type == 'pdf':
                             file_name = "파일.pdf"
-                        elif '.hwp' in href.lower():
+                        elif file_type == 'hwp':
                             file_name = "파일.hwp"
                         else:
                             file_name = "파일"
                     
                     detail_info["download_links"].append(file_url)
                     detail_info["file_names"].append(file_name)
-                    print(f"  ✓ 첨부파일 발견: {file_name}")
+                    print(f"  ✓ 첨부파일 다운로드: {file_name}")
                     print(f"    링크: {file_url}")
                     
                     # 파일 다운로드 및 비교
                     downloaded_file_path = self._download_and_compare_file(file_url, file_name, regulation_name=regulation_name)
                     
-                    # PDF 파일이면 내용 추출
+                    # PDF 또는 HWP 파일이면 내용 추출
                     if downloaded_file_path and downloaded_file_path.get('file_path'):
                         file_path = downloaded_file_path['file_path']
                         if file_path.lower().endswith('.pdf'):
@@ -338,30 +591,35 @@ class BokScraper(BaseScraper):
                                 detail_info["content"] = pdf_content
                                 print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
                                 
-                                # PDF에서 소관부서와 제정일 추출
+                                # PDF에서 제정일과 최근개정일 추출
                                 extracted_info = self._extract_info_from_pdf_content(pdf_content)
-                                if extracted_info.get("department"):
-                                    detail_info["department"] = extracted_info["department"]
-                                    print(f"  ✓ 소관부서: {extracted_info['department']}")
                                 if extracted_info.get("enactment_date"):
                                     detail_info["enactment_date"] = extracted_info["enactment_date"]
                                     print(f"  ✓ 제정일: {extracted_info['enactment_date']}")
+                                if extracted_info.get("revision_date"):
+                                    detail_info["revision_date"] = extracted_info["revision_date"]
+                                    print(f"  ✓ 최근개정일: {extracted_info['revision_date']}")
                             else:
                                 print(f"  ⚠ PDF 내용 추출 실패")
+                        elif file_path.lower().endswith('.hwp'):
+                            print(f"  HWP 내용 추출 중...")
+                            hwp_content = self.file_extractor.extract_hwp_content(file_path)
+                            if hwp_content:
+                                detail_info["content"] = hwp_content
+                                print(f"  ✓ HWP에서 {len(hwp_content)}자 추출 완료")
+                                
+                                # HWP에서 제정일과 최근개정일 추출
+                                extracted_info = self._extract_info_from_pdf_content(hwp_content)
+                                if extracted_info.get("enactment_date"):
+                                    detail_info["enactment_date"] = extracted_info["enactment_date"]
+                                    print(f"  ✓ 제정일: {extracted_info['enactment_date']}")
+                                if extracted_info.get("revision_date"):
+                                    detail_info["revision_date"] = extracted_info["revision_date"]
+                                    print(f"  ✓ 최근개정일: {extracted_info['revision_date']}")
+                            else:
+                                print(f"  ⚠ HWP 내용 추출 실패")
             else:
-                print(f"  ⚠ 파일 링크를 찾지 못했습니다 (셀렉터: {file_selector})")
-            
-            # 최근개정일 추출: #main-container > div.content > div.bdView > div > div > table > tbody > tr:nth-child(1) > td:nth-child(1) > a
-            date_selector = "#main-container > div.content > div.bdView > div > div > table > tbody > tr:nth-child(1) > td:nth-child(1) > a"
-            date_elem = soup.select_one(date_selector)
-            
-            if date_elem:
-                date_text = date_elem.get_text(strip=True)
-                if date_text:
-                    detail_info["revision_date"] = date_text
-                    print(f"  ✓ 최근개정일: {date_text}")
-            else:
-                print(f"  ⚠ 최근개정일을 찾지 못했습니다 (셀렉터: {date_selector})")
+                print(f"  ⚠ 첨부파일을 찾지 못했습니다.")
             
         except Exception as e:
             print(f"  ⚠ 상세 페이지 추출 실패: {e}")
@@ -371,10 +629,11 @@ class BokScraper(BaseScraper):
         return detail_info
     
     def _extract_info_from_pdf_content(self, content: str) -> Dict[str, str]:
-        """PDF 내용에서 소관부서와 제정일 추출"""
+        """PDF 내용에서 소관부서, 제정일, 최근개정일 추출"""
         result = {
             "department": "",
             "enactment_date": "",
+            "revision_date": "",
         }
         
         if not content:
@@ -382,7 +641,11 @@ class BokScraper(BaseScraper):
         
         # 제정일 패턴 찾기 (YYYY년 MM월 DD일 또는 YYYY-MM-DD 형식)
         # 예: "2023년 1월 12일", "2023-01-12", "제정일: 2023.01.12"
+        # 예: "<2008. 1.24일 제 정>", "<2008.1.24일 제 정>"
+        # 예: "제정개정 | 1999. 4. 3.1999. 6. 7.2000. 8. 31." (표 형식, 첫 번째 날짜가 제정일)
         date_patterns = [
+            r'<(\d{4})\.\s*(\d{1,2})\.(\d{1,2})일\s*제\s*정>',  # <2008. 1.24일 제 정> 형식
+            r'<(\d{4})\.(\d{1,2})\.(\d{1,2})일\s*제\s*정>',  # <2008.1.24일 제 정> 형식 (공백 없음)
             r'제정일[:\s]*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일',
             r'제정일[:\s]*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})',
             r'제정일[:\s]*(\d{4})-(\d{1,2})-(\d{1,2})',
@@ -391,13 +654,23 @@ class BokScraper(BaseScraper):
             r'제정[:\s]*(\d{4})-(\d{1,2})-(\d{1,2})',
         ]
         
-        for pattern in date_patterns:
-            match = re.search(pattern, content)
-            if match:
-                year, month, day = match.groups()
-                # YYYY-MM-DD 형식으로 변환
+        # 표 형식 처리: "제정개정 | 1999. 4. 3.1999. 6. 7.2000. 8. 31." 형식
+        # "제정개정" 텍스트를 찾고 그 다음에 나오는 첫 번째 날짜를 제정일로 사용
+        if not result.get("enactment_date"):
+            enactment_table_match = re.search(r'제정개정[^\d]*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.', content)
+            if enactment_table_match:
+                year, month, day = enactment_table_match.groups()
                 result["enactment_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                break
+        
+        # 일반 패턴으로 제정일 찾기
+        if not result.get("enactment_date"):
+            for pattern in date_patterns:
+                match = re.search(pattern, content)
+                if match:
+                    year, month, day = match.groups()
+                    # YYYY-MM-DD 형식으로 변환
+                    result["enactment_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                    break
         
         # 소관부서 패턴 찾기 (마지막 개정일 부분에서 추출)
         # 예: "개정 2025. 6. 24. 국장결재 국제총괄팀- 793"
@@ -424,6 +697,70 @@ class BokScraper(BaseScraper):
             # 위치 기준으로 정렬하여 마지막 것 선택
             all_matches.sort(key=lambda x: x[0])
             result["department"] = all_matches[-1][1]
+        
+        # 최근개정일 패턴 찾기
+        # 예: "<2025. 2.28일 제9차 개정>", "<2025.2.28일 제9차 개정>"
+        # 예: "개정 2025. 6. 24.", "개정2025.6.24."
+        # 예: "개정 2000. 7.26 총재결재...", "2002. 3.18 총재결재..." (개정 생략)
+        # 예: "제정개정 | 1999. 4. 3.1999. 6. 7.2000. 8. 31.2002. 1. 5." (표 형식, 모든 날짜 추출)
+        revision_date_patterns = [
+            r'<(\d{4})\.\s*(\d{1,2})\.(\d{1,2})일\s*제\d*차\s*개정>',  # <2025. 2.28일 제9차 개정> 형식
+            r'<(\d{4})\.(\d{1,2})\.(\d{1,2})일\s*제\d*차\s*개정>',  # <2025.2.28일 제9차 개정> 형식 (공백 없음)
+            r'개정\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.',  # 개정 2025. 6. 24. 형식
+            r'개정\s*(\d{4})\.(\d{1,2})\.(\d{1,2})\.',  # 개정 2025.6.24. 형식
+            r'개정\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\s+',  # 개정 2000. 7.26 총재결재... 형식
+            r'개정\s*(\d{4})\.(\d{1,2})\.(\d{1,2})\s+',  # 개정 2000.7.26 총재결재... 형식
+            r'^(\d{4})\.\s*(\d{1,2})\.(\d{1,2})\s+[가-힣]',  # 2002. 3.18 총재결재... 형식 (개정 생략, 줄 시작)
+            r'\n(\d{4})\.\s*(\d{1,2})\.(\d{1,2})\s+[가-힣]',  # 2002. 3.18 총재결재... 형식 (개정 생략, 줄바꿈 후)
+            r'개정\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})',  # 개정 2025. 6. 24 형식
+            r'개정\s*(\d{4})\.(\d{1,2})\.(\d{1,2})',  # 개정 2025.6.24 형식
+        ]
+        
+        # 표 형식 처리: "제정개정 | 1999. 4. 3.1999. 6. 7.2000. 8. 31.2002. 1. 5.2002. 3. 14.2004. 2. 4.2005. 3. 29.2006. 10. 13."
+        # "제정개정" 텍스트를 찾고 그 다음에 나오는 모든 날짜를 추출하여 가장 최신 것을 사용
+        table_dates = []
+        table_match = re.search(r'제정개정[^\d]*((?:\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.)+)', content)
+        if table_match:
+            dates_str = table_match.group(1)
+            # 모든 날짜 패턴 추출 (YYYY. M. D. 형식)
+            date_matches = re.finditer(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.', dates_str)
+            for match in date_matches:
+                year, month, day = match.groups()
+                try:
+                    from datetime import datetime
+                    date_obj = datetime(int(year), int(month), int(day))
+                    table_dates.append((match.start(), date_obj, year, month, day))
+                except:
+                    pass
+        
+        # 모든 개정일을 찾아서 가장 최신 것 사용
+        all_revision_dates = []
+        
+        # 표 형식에서 찾은 날짜들 추가 (첫 번째는 제정일이므로 제외)
+        if table_dates and len(table_dates) > 1:
+            # 첫 번째는 제정일이므로 제외하고 나머지를 개정일로 사용
+            for date_info in table_dates[1:]:
+                all_revision_dates.append(date_info)
+        
+        # 일반 패턴으로 개정일 찾기
+        for pattern in revision_date_patterns:
+            matches = re.finditer(pattern, content)
+            for match in matches:
+                year, month, day = match.groups()
+                # 날짜를 datetime으로 변환하여 비교
+                try:
+                    from datetime import datetime
+                    date_obj = datetime(int(year), int(month), int(day))
+                    all_revision_dates.append((match.start(), date_obj, year, month, day))
+                except:
+                    pass
+        
+        # 가장 최신 개정일 선택
+        if all_revision_dates:
+            # 날짜 기준으로 정렬하여 가장 최신 것 선택
+            all_revision_dates.sort(key=lambda x: x[1], reverse=True)
+            year, month, day = all_revision_dates[0][2], all_revision_dates[0][3], all_revision_dates[0][4]
+            result["revision_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
         
         return result
     
@@ -468,11 +805,11 @@ class BokScraper(BaseScraper):
             # 안전한 파일명 생성
             safe_filename = self._get_safe_filename(file_name, regulation_name)
             
-            # 새 파일 다운로드 경로
-            new_file_path = os.path.join(self.download_dir, safe_filename)
+            # 새 파일 다운로드 경로 (current 디렉토리)
+            new_file_path = self.current_dir / safe_filename
             
-            # 이전 파일 경로 (규정명 기반으로 찾기)
-            previous_file_path = os.path.join(self.previous_dir, safe_filename)
+            # 이전 파일 경로 (previous 디렉토리)
+            previous_file_path = self.previous_dir / safe_filename
             
             # 파일 다운로드
             print(f"  파일 다운로드 중: {file_name}")
@@ -495,20 +832,20 @@ class BokScraper(BaseScraper):
                 return None
             
             # 다운로드한 파일을 새 파일 경로로 이동/복사
-            if downloaded_path != new_file_path:
+            if str(downloaded_path) != str(new_file_path):
                 import shutil
-                if os.path.exists(new_file_path):
-                    os.remove(new_file_path)  # 기존 파일 삭제
+                if new_file_path.exists():
+                    new_file_path.unlink()  # 기존 파일 삭제
                 shutil.move(downloaded_path, new_file_path)
                 print(f"  ✓ 파일 저장: {new_file_path}")
             
             # 이전 파일과 비교
             comparison_result = None
-            if os.path.exists(previous_file_path):
-                print(f"  이전 파일과 비교 중...")
+            if previous_file_path.exists():
+                print(f"  → 이전 파일과 비교 중... (이전 파일: {previous_file_path})")
                 comparison_result = self.file_comparator.compare_and_report(
-                    new_file_path,
-                    previous_file_path,
+                    str(new_file_path),
+                    str(previous_file_path),
                     save_diff=True
                 )
                 
@@ -516,24 +853,17 @@ class BokScraper(BaseScraper):
                     print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
                     if 'diff_file' in comparison_result:
                         print(f"    Diff 파일: {comparison_result['diff_file']}")
+                        html_file = Path(comparison_result['diff_file']).with_suffix('.html')
+                        if html_file.exists():
+                            print(f"    HTML Diff 파일: {html_file}")
                 else:
                     print(f"  ✓ 파일 동일 (변경 없음)")
-                
-                # 이전 파일을 새 파일로 교체 (다음 비교를 위해)
-                import shutil
-                shutil.copy2(new_file_path, previous_file_path)
-                print(f"  ✓ 이전 파일 업데이트 완료")
             else:
                 print(f"  ✓ 새 파일 (이전 파일 없음)")
-                # 이전 파일 디렉토리에 복사 (다음 비교를 위해)
-                import shutil
-                os.makedirs(self.previous_dir, exist_ok=True)
-                shutil.copy2(new_file_path, previous_file_path)
-                print(f"  ✓ 이전 파일로 저장 완료")
             
             return {
-                'file_path': new_file_path,
-                'previous_file_path': previous_file_path if os.path.exists(previous_file_path) else None,
+                'file_path': str(new_file_path),
+                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
                 'comparison': comparison_result,
             }
             
@@ -548,6 +878,11 @@ class BokScraper(BaseScraper):
         법규정보 - 규정 스크래핑
         CSV 목록 기반으로 각 규정명을 검색어로 사용하여 수집
         """
+        # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+        self._backup_current_to_previous()
+        # 이전 실행의 diff 파일 정리
+        self._clear_diffs_directory()
+        
         print(f"\n=== 한국은행 법규 스크래핑 시작 ===")
         if not self.target_laws:
             print("⚠ CSV 목록이 없습니다.")
@@ -567,31 +902,126 @@ class BokScraper(BaseScraper):
                 print(f"\n[{idx}/{len(self.target_laws)}] {regulation_name}")
                 
                 # 검색어를 URL 인코딩
-                search_text_encoded = quote(regulation_name)
-                search_url = self.SEARCH_URL_TEMPLATE.format(search_text=search_text_encoded)
+                query_encoded = quote(regulation_name)
+                search_url = self.SEARCH_URL_TEMPLATE.format(query=query_encoded)
                 
                 print(f"  검색 URL: {search_url}")
                 
-                # 검색 결과 페이지 접근
-                soup = self.fetch_page(search_url, use_selenium=True)
+                # Selenium으로 검색 결과 페이지 접근
+                from selenium.webdriver.common.by import By
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                from selenium.common.exceptions import TimeoutException, NoSuchElementException
                 
-                # 디버깅 HTML 저장 (첫 번째 검색만)
-                if idx == 1:
-                    self.save_debug_html(soup, filename="debug_bok_search.html")
+                # Selenium driver 생성
+                chrome_options = self._build_default_chrome_options()
+                driver = self._create_webdriver(chrome_options)
                 
-                # 검색 결과에서 규정 목록 추출
-                regulation_list = self.extract_regulation_list(soup)
+                detail_link = None
+                title = None
                 
-                if not regulation_list:
-                    print(f"  ⚠ 검색 결과에서 규정을 찾지 못했습니다.")
-                    # 빈 항목으로 추가 (나중에 save_bok_results에서 처리)
-                    empty_item = {
+                try:
+                    driver.get(search_url)
+                    
+                    # 페이지 로딩 대기
+                    time.sleep(2)
+                    
+                    # 디버깅 HTML 저장 (첫 번째 검색만)
+                    if idx == 1:
+                        soup = BeautifulSoup(driver.page_source, 'html.parser')
+                        self.save_debug_html(soup, filename="debug_bok_search.html")
+                    
+                    # XPath로 첫 번째 검색 결과 링크 찾기 및 클릭
+                    try:
+                        # XPath: /html/body/div/div[2]/main/div[1]/div/form/div[4]/div[2]/ul/li[1]/a
+                        xpath = "/html/body/div/div[2]/main/div[1]/div/form/div[4]/div[2]/ul/li[1]/a"
+                        
+                        # 요소가 로드될 때까지 대기
+                        wait = WebDriverWait(driver, 10)
+                        first_link = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+                        
+                        # 제목 추출
+                        title = first_link.text.strip()
+                        print(f"  ✓ 첫 번째 검색 결과 발견: {title}")
+                        
+                        # 링크 URL 추출
+                        detail_link = first_link.get_attribute("href")
+                        if detail_link:
+                            # 상대 경로인 경우 절대 경로로 변환
+                            if detail_link.startswith("/"):
+                                detail_link = self.BASE_URL + detail_link
+                            elif not detail_link.startswith("http"):
+                                detail_link = urljoin(self.BASE_URL, detail_link)
+                            print(f"  → 상세 링크: {detail_link}")
+                        
+                        # 링크 클릭하여 새 페이지로 이동
+                        print(f"  → 첫 번째 검색 결과 클릭 중...")
+                        first_link.click()
+                        
+                        # 새 페이지 로딩 대기
+                        time.sleep(2)
+                        
+                        # 현재 URL 가져오기 (클릭 후 이동한 페이지)
+                        current_url = driver.current_url
+                        print(f"  → 이동한 페이지 URL: {current_url}")
+                        
+                        # 클릭 후 이동한 URL을 detail_link로 사용
+                        if current_url and current_url != search_url:
+                            detail_link = current_url
+                    
+                    except TimeoutException:
+                        print(f"  ⚠ XPath로 첫 번째 검색 결과를 찾지 못했습니다: {xpath}")
+                        # 대체 선택자 시도
+                        try:
+                            # CSS 선택자로 시도
+                            first_link = driver.find_element(By.CSS_SELECTOR, ".bdLine.type4 ul li:first-child a")
+                            title = first_link.text.strip()
+                            detail_link = first_link.get_attribute("href")
+                            if detail_link and not detail_link.startswith("http"):
+                                detail_link = urljoin(self.BASE_URL, detail_link)
+                            print(f"  ✓ CSS 선택자로 첫 번째 검색 결과 발견: {title}")
+                            first_link.click()
+                            time.sleep(2)
+                            current_url = driver.current_url
+                            if current_url and current_url != search_url:
+                                detail_link = current_url
+                        except NoSuchElementException:
+                            print(f"  ⚠ 검색 결과를 찾지 못했습니다.")
+                            detail_link = None
+                    except Exception as e:
+                        print(f"  ⚠ 검색 결과 클릭 중 오류: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        detail_link = None
+                    
+                    if not detail_link:
+                        print(f"  ⚠ 검색 결과에서 규정을 찾지 못했습니다.")
+                        # 빈 항목으로 추가
+                        empty_item = {
+                            "title": regulation_name,
+                            "regulation_name": regulation_name,
+                            "organization": "한국은행",
+                            "target_name": regulation_name,
+                            "target_category": target.get("category", ""),
+                            "detail_link": "",
+                            "content": "",
+                            "department": "",
+                            "file_names": [],
+                            "download_links": [],
+                            "enactment_date": "",
+                            "revision_date": "",
+                        }
+                        results.append(empty_item)
+                        continue
+                    
+                    # 상세 정보 추출
+                    matched_regulation = {
                         "title": regulation_name,
                         "regulation_name": regulation_name,
                         "organization": "한국은행",
                         "target_name": regulation_name,
                         "target_category": target.get("category", ""),
-                        "detail_link": "",
+                        "detail_link": detail_link,
                         "content": "",
                         "department": "",
                         "file_names": [],
@@ -599,30 +1029,7 @@ class BokScraper(BaseScraper):
                         "enactment_date": "",
                         "revision_date": "",
                     }
-                    results.append(empty_item)
-                    continue
-                
-                # 검색 결과에서 정확히 일치하는 규정 찾기
-                matched_regulation = None
-                for reg in regulation_list:
-                    reg_name = reg.get("regulation_name") or reg.get("title", "")
-                    if self._normalize_title(reg_name) == self._normalize_title(regulation_name):
-                        matched_regulation = reg
-                        break
-                
-                # 정확히 일치하는 것이 없으면 첫 번째 결과 사용
-                if not matched_regulation and regulation_list:
-                    matched_regulation = regulation_list[0]
-                    print(f"  ⚠ 정확히 일치하는 규정을 찾지 못해 첫 번째 결과 사용: {matched_regulation.get('title', '')}")
-                
-                if matched_regulation:
-                    matched_regulation["target_name"] = regulation_name
-                    matched_regulation["target_category"] = target.get("category", "")
-                    if target.get("law_name"):
-                        matched_regulation["regulation_name"] = target["law_name"]
                     
-                    # 상세 정보 추출
-                    detail_link = matched_regulation.get("detail_link", "")
                     if detail_link:
                         print(f"  상세 페이지 접근: {detail_link}")
                         detail_info = self.extract_regulation_detail(detail_link, regulation_name=regulation_name)
@@ -631,24 +1038,13 @@ class BokScraper(BaseScraper):
                         print(f"  ⚠ 상세 링크가 없습니다.")
                     
                     results.append(matched_regulation)
-                else:
-                    print(f"  ⚠ 검색 결과에서 규정을 찾지 못했습니다.")
-                    # 빈 항목으로 추가
-                    empty_item = {
-                        "title": regulation_name,
-                        "regulation_name": regulation_name,
-                        "organization": "한국은행",
-                        "target_name": regulation_name,
-                        "target_category": target.get("category", ""),
-                        "detail_link": "",
-                        "content": "",
-                        "department": "",
-                        "file_names": [],
-                        "download_links": [],
-                        "enactment_date": "",
-                        "revision_date": "",
-                    }
-                    results.append(empty_item)
+                    
+                finally:
+                    # Selenium driver 종료
+                    try:
+                        driver.quit()
+                    except Exception as e:
+                        print(f"  ⚠ Driver 종료 중 오류: {e}")
                 
                 time.sleep(self.delay)
             
@@ -765,11 +1161,18 @@ def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
         file_names_str = "; ".join(item.get("file_names", [])) if item.get("file_names") else ""
         download_links_str = "; ".join(item.get("download_links", [])) if item.get("download_links") else ""
         
+        # 본문 내용 처리 (개행 유지, 1000자 제한)
+        content = item.get("content", "") or ""
+        # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        if len(content) > 1000:
+            content = content[:1000]
+        
         law_item = {
             "번호": str(idx),  # 순번으로 번호 생성
             "규정명": item.get("regulation_name", item.get("title", "")),
             "기관명": item.get("organization", "한국은행"),
-            "본문": (item.get("content", "") or "").replace("\n", " ").replace("\r", " "),
+            "본문": content,
             "제정일": item.get("enactment_date", ""),
             "최근 개정일": item.get("revision_date", ""),
             "소관부서": item.get("department", ""),
@@ -833,4 +1236,3 @@ if __name__ == "__main__":
     
     print(f"\n총 {len(results)}개의 법규정보를 수집했습니다.")
     save_bok_results(results, crawler=scraper)
-

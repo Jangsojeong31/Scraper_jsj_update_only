@@ -31,8 +31,10 @@ from typing import List, Dict, Optional
 from urllib.parse import urljoin
 from common.base_scraper import BaseScraper
 from common.file_extractor import FileExtractor
+from common.file_comparator import FileComparator
 import time
 import os
+import re
 
 
 class KfbScraper(BaseScraper):
@@ -42,10 +44,25 @@ class KfbScraper(BaseScraper):
     
     def __init__(self, delay: float = 1.0):
         super().__init__(delay)
-        self.download_dir = "output/downloads"
-        os.makedirs(self.download_dir, exist_ok=True)
-        # 파일 처리 공통 모듈 사용
-        self.file_extractor = FileExtractor(download_dir=self.download_dir, session=self.session)
+        
+        # 출력 디렉토리 설정
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        self.downloads_dir = self.output_dir / "downloads"
+        self.previous_dir = self.downloads_dir / "previous"
+        self.current_dir = self.downloads_dir / "current"
+        
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        
+        # FileExtractor 초기화 (current 디렉토리 사용)
+        self.file_extractor = FileExtractor(download_dir=str(self.current_dir), session=self.session)
+        # 파일 비교기 초기화
+        self.file_comparator = FileComparator(base_dir=str(self.downloads_dir))
+        
+        # 하위 호환성을 위해 기존 download_dir도 유지
+        self.download_dir = str(self.downloads_dir)
     
     # 파일 처리 메서드들은 common.file_extractor.FileExtractor로 이동됨
     # 아래 메서드들은 하위 호환성을 위해 FileExtractor로 위임
@@ -760,6 +777,167 @@ class KfbScraper(BaseScraper):
         
         return page_urls
     
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.downloads_dir / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
+    
+    def _download_and_compare_file(
+        self, file_url: str, file_name: str, regulation_name: str = "", 
+        use_selenium: bool = False, driver=None
+    ) -> Optional[Dict]:
+        """파일 다운로드 및 이전 파일과 비교
+        Args:
+            file_url: 다운로드 URL
+            file_name: 파일명
+            regulation_name: 규정명 (파일명 생성용)
+            use_selenium: Selenium 사용 여부
+            driver: Selenium WebDriver
+        Returns:
+            비교 결과 딕셔너리 또는 None
+        """
+        try:
+            import shutil
+            
+            # 파일 확장자 추출
+            ext = Path(file_name).suffix if file_name else ''
+            if not ext:
+                # URL에서 확장자 확인
+                url_lower = file_url.lower()
+                if '.zip' in url_lower:
+                    ext = '.zip'
+                elif '.pdf' in url_lower:
+                    ext = '.pdf'
+                elif '.hwp' in url_lower:
+                    ext = '.hwp'
+                else:
+                    ext = '.hwp'  # 기본값
+            
+            # 안전한 파일명 생성 (규정명 기반)
+            if regulation_name:
+                safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
+                safe_reg_name = safe_reg_name.replace(' ', '_')
+                safe_filename = f"{safe_reg_name}{ext}"
+            else:
+                # 규정명이 없으면 원본 파일명 사용 (정리)
+                base_name = re.sub(r'[^\w\s.-]', '', file_name).replace(' ', '_')
+                if not base_name.endswith(ext):
+                    base_name = base_name.rsplit('.', 1)[0] if '.' in base_name else base_name
+                    safe_filename = f"{base_name}{ext}"
+                else:
+                    safe_filename = base_name
+            
+            # 새 파일 다운로드 경로 (current 디렉토리)
+            new_file_path = self.current_dir / safe_filename
+            
+            # 이전 파일 경로 (previous 디렉토리)
+            previous_file_path = self.previous_dir / safe_filename
+            
+            # 파일 다운로드
+            print(f"  → 파일 다운로드 중: {file_name}")
+            downloaded_result = self.file_extractor.download_file(
+                file_url,
+                safe_filename,
+                use_selenium=use_selenium,
+                driver=driver,
+                referer='https://www.kfb.or.kr/publicdata/reform_info.php'
+            )
+            
+            if downloaded_result:
+                downloaded_path, actual_filename = downloaded_result
+            else:
+                downloaded_path, actual_filename = None, None
+            
+            if not downloaded_path or not os.path.exists(downloaded_path):
+                print(f"  ⚠ 파일 다운로드 실패")
+                return None
+            
+            # 다운로드한 파일을 새 파일 경로로 이동/복사
+            if str(downloaded_path) != str(new_file_path):
+                if new_file_path.exists():
+                    new_file_path.unlink()
+                shutil.move(downloaded_path, new_file_path)
+                print(f"  ✓ 파일 저장: {new_file_path}")
+            
+            # 이전 파일과 비교
+            comparison_result = None
+            if previous_file_path.exists():
+                print(f"  → 이전 파일과 비교 중...")
+                comparison_result = self.file_comparator.compare_and_report(
+                    str(new_file_path),
+                    str(previous_file_path),
+                    save_diff=True
+                )
+                
+                if comparison_result['changed']:
+                    print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                else:
+                    print(f"  ✓ 파일 동일 (변경 없음)")
+            else:
+                print(f"  ✓ 새 파일 (이전 파일 없음)")
+            
+            return {
+                'file_path': str(new_file_path),
+                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
+                'comparison': comparison_result,
+            }
+            
+        except Exception as e:
+            print(f"  ⚠ 파일 다운로드/비교 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def crawl_self_regulation(self, limit: int = 0, download_files: bool = True, content_limit: int = 0) -> List[Dict]:
         """
         자율규제 스크래핑
@@ -770,6 +948,11 @@ class KfbScraper(BaseScraper):
             download_files: HWP 파일 다운로드 및 내용 추출 여부
             content_limit: 본문 길이 제한 (0=제한 없음, 문자 수)
         """
+        # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+        self._backup_current_to_previous()
+        # 이전 실행의 diff 파일 정리
+        self._clear_diffs_directory()
+        
         base_url = "https://www.kfb.or.kr/publicdata/reform_info.php"
         all_results = []
         
@@ -788,9 +971,9 @@ class KfbScraper(BaseScraper):
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--lang=ko-KR')
-            # 다운로드 경로 설정 (HWP 다운로드 재사용을 위해)
+            # 다운로드 경로 설정 (current 디렉토리)
             prefs = {
-                "download.default_directory": os.path.abspath(self.download_dir),
+                "download.default_directory": os.path.abspath(str(self.current_dir)),
                 "download.prompt_for_download": False,
                 "download.directory_upgrade": True,
                 "safebrowsing.enabled": True
@@ -1144,16 +1327,22 @@ class KfbScraper(BaseScraper):
                 
                 # 상세 페이지에서 본문, 소관부서, 파일명 추출
                 detail_info = self.extract_detail_page_info(detail_soup)
-                item['content'] = detail_info.get('content', '')
+                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                content = detail_info.get('content', '') or ''
+                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                if len(content) > 1000:
+                    content = content[:1000]
+                item['content'] = content
                 item['department'] = detail_info.get('department', '')
                 # 상세 페이지에서 추출한 파일명 저장 (다운로드 시 사용)
                 if detail_info.get('file_name'):
                     item['file_name'] = detail_info.get('file_name')
                     print(f"  ✓ 파일명 추출: {detail_info.get('file_name')}")
                 
-                if detail_info.get('content'):
-                    content_preview = detail_info.get('content', '')[:100].replace('\n', ' ')
-                    print(f"  ✓ 본문 내용 추출 완료 ({len(detail_info.get('content', ''))}자): {content_preview}...")
+                if content:
+                    content_preview = content[:100].replace('\n', ' ')
+                    print(f"  ✓ 본문 내용 추출 완료 ({len(content)}자): {content_preview}...")
                 else:
                     print(f"  ⚠ 본문 내용 추출 실패")
                 
@@ -1183,7 +1372,7 @@ class KfbScraper(BaseScraper):
                     chrome_options.add_argument('--disable-gpu')
                     chrome_options.add_argument('--lang=ko-KR')
                     prefs = {
-                        "download.default_directory": os.path.abspath(self.download_dir),
+                        "download.default_directory": os.path.abspath(str(self.current_dir)),
                         "download.prompt_for_download": False,
                         "download.directory_upgrade": True,
                         "safebrowsing.enabled": True
@@ -1214,124 +1403,106 @@ class KfbScraper(BaseScraper):
                 if '.hwp' in download_link.lower() or '.pdf' in download_link.lower() or '.zip' in download_link.lower() or 'download.php' in download_link:
                     print(f"[{idx}/{len(all_results)}] {item.get('title', 'N/A')[:50]}... 파일 다운로드 중")
                     
-                    # 다운로드용 파일명 생성
-                    # 상세 페이지에서 추출한 파일명이 있으면 사용, 없으면 기존 방식 사용
-                    if item.get('file_name') and item.get('file_name').strip():
-                        # 상세 페이지에서 추출한 파일명 사용
-                        filename = item.get('file_name').strip()
-                        # 파일명에서 특수 문자 정리 (경로에 사용할 수 없는 문자 제거)
-                        filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.', '(', ')', '·')).rstrip()
-                        filename = filename.replace(' ', '_')
-                    else:
-                        # 기존 방식: 번호_제목 형식
-                        filename = f"{item.get('no', idx)}_{item.get('title', 'file')[:50]}"
-                        filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
-                        filename = filename.replace(' ', '_')
+                    # 규정명 추출 (파일명 생성용)
+                    regulation_name = item.get('regulation_name', item.get('title', ''))
+                    # 파일명은 상세 페이지에서 추출한 것이 있으면 사용, 없으면 규정명 사용
+                    file_name_for_download = item.get('file_name', '').strip() if item.get('file_name') else ''
+                    if not file_name_for_download:
+                        file_name_for_download = item.get('title', 'file')
                     
-                    # 확장자 확인 및 설정
-                    # URL에서 확장자 확인
-                    download_lower = download_link.lower()
-                    if '.zip' in download_lower:
-                        if not filename.lower().endswith('.zip'):
-                            filename += '.zip'
-                    elif '.pdf' in download_lower:
-                        if not filename.lower().endswith('.pdf'):
-                            filename += '.pdf'
-                    elif '.hwp' in download_lower:
-                        if not filename.lower().endswith('.hwp'):
-                            filename += '.hwp'
-                    else:
-                        # 확장자가 없으면 기본값으로 .hwp (다운로드 후 실제 파일 형식 확인)
-                        if not any(filename.lower().endswith(ext) for ext in ['.hwp', '.pdf', '.zip']):
-                            filename += '.hwp'
+                    # 파일 다운로드 및 비교
+                    comparison_result = self._download_and_compare_file(
+                        download_link,
+                        file_name_for_download,
+                        regulation_name=regulation_name,
+                        use_selenium=(driver is not None),
+                        driver=driver
+                    )
                     
-                    # 파일 다운로드 (Selenium 사용 가능하면 사용, 아니면 requests)
-                    filepath, actual_filename = self.download_file(download_link, filename, use_selenium=(driver is not None), driver=driver)
-                    # 파일명 업데이트: 상세 페이지에서 추출한 파일명이 있으면 우선 사용, 없으면 다운로드 응답에서 추출한 파일명 사용
-                    if item.get('file_name') and item.get('file_name').strip():
-                        # 상세 페이지에서 추출한 파일명이 이미 있으면 그대로 사용
-                        pass
-                    elif actual_filename:
-                        # 다운로드 응답에서 추출한 파일명 사용
-                        item['file_name'] = actual_filename
-                    if filepath and os.path.exists(filepath):
-                        # 다운로드한 파일 형식 확인 (파일 시그니처 확인)
-                        try:
-                            with open(filepath, 'rb') as f:
-                                first_bytes = f.read(4)
-                                # PDF 시그니처: %PDF
-                                if first_bytes[:4] == b'%PDF':
-                                    # PDF 파일로 확장자 업데이트
-                                    if not filepath.lower().endswith('.pdf'):
-                                        new_filepath = filepath.rsplit('.', 1)[0] + '.pdf'
-                                        try:
-                                            os.rename(filepath, new_filepath)
-                                            filepath = new_filepath
-                                            print(f"  파일 확장자를 .pdf로 변경: {os.path.basename(filepath)}")
-                                        except:
-                                            pass
-                                # ZIP 파일 시그니처: PK\x03\x04 또는 PK\x05\x06 (빈 ZIP)
-                                elif first_bytes[:2] == b'PK':
-                                    # ZIP 파일로 확장자 업데이트
-                                    if not filepath.lower().endswith('.zip'):
-                                        new_filepath = filepath.rsplit('.', 1)[0] + '.zip'
-                                        try:
-                                            os.rename(filepath, new_filepath)
-                                            filepath = new_filepath
-                                            print(f"  파일 확장자를 .zip으로 변경: {os.path.basename(filepath)}")
-                                        except:
-                                            pass
-                        except:
-                            pass
-                        
-                        # 파일 내용 추출 (HWP, PDF, ZIP 모두 처리)
-                        hwp_content = self.extract_hwp_content(filepath)
-                        item['file_content'] = hwp_content
-                        item['file_path'] = filepath
-                        
-                        # HWP 내용에서 법규 정보 추출 (제정일/최근개정일 추출)
-                        if hwp_content:
-                            law_info = self.extract_law_info_from_content(hwp_content, item.get('title', ''))
-                            # 규정명은 파일에서 추출한 것이 더 정확할 수 있으므로 업데이트
-                            if law_info.get('regulation_name') and law_info.get('regulation_name') != item.get('title', ''):
-                                item['regulation_name'] = law_info.get('regulation_name', item.get('title', ''))
-                            # 제정일과 최근개정일만 파일에서 추출한 것으로 업데이트
-                            if law_info.get('enactment_date'):
-                                item['enactment_date'] = law_info.get('enactment_date')
-                            if law_info.get('revision_date'):
-                                item['revision_date'] = law_info.get('revision_date')
+                    if comparison_result:
+                        filepath = comparison_result.get('file_path')
+                        if filepath and os.path.exists(filepath):
+                            # 다운로드한 파일 형식 확인 (파일 시그니처 확인)
+                            try:
+                                with open(filepath, 'rb') as f:
+                                    first_bytes = f.read(4)
+                                    # PDF 시그니처: %PDF
+                                    if first_bytes[:4] == b'%PDF':
+                                        # PDF 파일로 확장자 업데이트
+                                        if not filepath.lower().endswith('.pdf'):
+                                            new_filepath = filepath.rsplit('.', 1)[0] + '.pdf'
+                                            try:
+                                                os.rename(filepath, new_filepath)
+                                                filepath = new_filepath
+                                                print(f"  파일 확장자를 .pdf로 변경: {os.path.basename(filepath)}")
+                                            except:
+                                                pass
+                                    # ZIP 파일 시그니처: PK\x03\x04 또는 PK\x05\x06 (빈 ZIP)
+                                    elif first_bytes[:2] == b'PK':
+                                        # ZIP 파일로 확장자 업데이트
+                                        if not filepath.lower().endswith('.zip'):
+                                            new_filepath = filepath.rsplit('.', 1)[0] + '.zip'
+                                            try:
+                                                os.rename(filepath, new_filepath)
+                                                filepath = new_filepath
+                                                print(f"  파일 확장자를 .zip으로 변경: {os.path.basename(filepath)}")
+                                            except:
+                                                pass
+                            except:
+                                pass
                             
-                            # 본문은 파일 내용으로 설정 (길이 제한 적용)
-                            original_length = len(hwp_content)
-                            if content_limit > 0 and hwp_content:
-                                item['content'] = hwp_content[:content_limit]
-                                if original_length > content_limit:
-                                    print(f"  ⚠ 본문 길이 제한 적용: {original_length}자 → {content_limit}자")
+                            # 파일 내용 추출 (HWP, PDF, ZIP 모두 처리)
+                            hwp_content = self.extract_hwp_content(filepath)
+                            item['file_content'] = hwp_content
+                            item['file_path'] = filepath
+                            
+                            # HWP 내용에서 법규 정보 추출 (제정일/최근개정일 추출)
+                            if hwp_content:
+                                law_info = self.extract_law_info_from_content(hwp_content, item.get('title', ''))
+                                # 규정명은 파일에서 추출한 것이 더 정확할 수 있으므로 업데이트
+                                if law_info.get('regulation_name') and law_info.get('regulation_name') != item.get('title', ''):
+                                    item['regulation_name'] = law_info.get('regulation_name', item.get('title', ''))
+                                # 제정일과 최근개정일만 파일에서 추출한 것으로 업데이트
+                                if law_info.get('enactment_date'):
+                                    item['enactment_date'] = law_info.get('enactment_date')
+                                if law_info.get('revision_date'):
+                                    item['revision_date'] = law_info.get('revision_date')
+                                
+                                # 본문은 파일 내용으로 설정 (1000자 제한, 개행 유지)
+                                original_length = len(hwp_content)
+                                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                                hwp_content = hwp_content.replace("\r\n", "\n").replace("\r", "\n")
+                                # 1000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 1000자)
+                                max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                if len(hwp_content) > max_length:
+                                    item['content'] = hwp_content[:max_length]
+                                    if original_length > max_length:
+                                        print(f"  ⚠ 본문 길이 제한 적용: {original_length}자 → {max_length}자")
+                                else:
+                                    item['content'] = hwp_content
+                                
+                                print(f"  ✓ 파일 내용 추출 완료 ({len(hwp_content)}자)")
+                                if law_info.get('enactment_date'):
+                                    print(f"    제정일: {law_info.get('enactment_date')}")
+                                if law_info.get('revision_date'):
+                                    print(f"    최근 개정일: {law_info.get('revision_date')}")
                             else:
-                                item['content'] = hwp_content
+                                # 파일 내용 추출 실패 시 제정일/최근개정일은 그대로 유지
+                                # 본문은 상세 페이지에서 추출한 내용 유지 (파일이 없을 경우)
+                                print(f"  ⚠ 파일 내용 추출 실패 또는 빈 파일")
                             
-                            print(f"  ✓ 파일 내용 추출 완료 ({len(hwp_content)}자)")
-                            if law_info.get('enactment_date'):
-                                print(f"    제정일: {law_info.get('enactment_date')}")
-                            if law_info.get('revision_date'):
-                                print(f"    최근 개정일: {law_info.get('revision_date')}")
+                            # 파일은 output/downloads/current 디렉토리에 보관
+                            print(f"  ✓ 파일 저장 완료: {filepath}")
                         else:
-                            # 파일 내용 추출 실패 시 제정일/최근개정일은 그대로 유지
-                            # 본문은 상세 페이지에서 추출한 내용 유지 (파일이 없을 경우)
-                            print(f"  ⚠ 파일 내용 추출 실패 또는 빈 파일")
-                        
-                        # 파일은 output/downloads 디렉토리에 보관
-                        print(f"  ✓ 파일 저장 완료: {filepath}")
-                    else:
-                        print(f"  ✗ 파일 다운로드 실패")
-                        item['file_content'] = ""
-                        item['file_path'] = ""
-                        # 기본 정보 설정
-                        item['regulation_name'] = item.get('title', '')
-                        item['organization'] = '은행연합회'
-                        item['content'] = ''
-                        item['enactment_date'] = ''
-                        item['revision_date'] = ""
+                            print(f"  ✗ 파일 다운로드 실패")
+                            item['file_content'] = ""
+                            item['file_path'] = ""
+                            # 기본 정보 설정
+                            item['regulation_name'] = item.get('title', '')
+                            item['organization'] = '은행연합회'
+                            item['content'] = ''
+                            item['enactment_date'] = ''
+                            item['revision_date'] = ""
             
             print(f"\n=== HWP 파일 다운로드 및 내용 추출 완료 ===")
         
@@ -1449,9 +1620,15 @@ if __name__ == "__main__":
             writer.writeheader()
             
             for law_item in law_results:
-                # CSV 저장 시 본문의 줄바꿈 처리
+                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                content = law_item.get('본문', '') or ''
+                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                if len(content) > 1000:
+                    content = content[:1000]
+                
                 csv_item = law_item.copy()
-                csv_item['본문'] = csv_item.get('본문', '').replace('\n', ' ').replace('\r', ' ')
+                csv_item['본문'] = content
                 writer.writerow(csv_item)
         
         print(f"CSV 저장 완료: {csv_path}")

@@ -1,5 +1,5 @@
 """
-PDF 내용에서 메타데이터(제재대상기관, 제재조치요구일, 제재내용) 추출 모듈
+PDF 내용에서 메타데이터(금융회사명, 제재조치일, 제재내용) 추출 모듈
 """
 import re
 
@@ -83,13 +83,17 @@ def extract_sanction_details(content):
 def extract_incidents(content):
     """
     PDF 내용에서 4번 항목의 사건 제목/내용 추출
-    가. 사건제목1 / 사건내용1, 나. 사건제목2 / 사건내용2 형태
+    
+    지원하는 형식:
+    1. 가. 제목1 / 내용1, 나. 제목2 / 내용2 형태
+    2. 가. 제목 (1) 제목1-1 / 내용1-1 (2) 제목1-2 / 내용1-2
+       나. 제목 (1) 제목2-1 / 내용2-1 형태
     
     Args:
         content: PDF에서 추출한 텍스트 내용
         
     Returns:
-        dict: {'사건제목1': '...', '사건내용1': '...', '사건제목2': '...', ...}
+        dict: {'제목1': '...', '내용1': '...', '제목2': '...', ...}
     """
     if not content or content.startswith('['):
         return {}
@@ -138,15 +142,12 @@ def extract_incidents(content):
     # 다음 항목(5. 로 시작) 또는 문서 끝까지의 내용 추출
     remaining_content = content[start_pos:]
     
-    # 다음 번호 항목(5., 6. 등) 찾기
+    # 다음 번호 항목(5., 6. 등) 또는 <관련법규> 찾기
     next_section_match = re.search(r'\n\s*[5-9]\.\s*[가-힣]', remaining_content)
     if next_section_match:
         section_content = remaining_content[:next_section_match.start()]
     else:
         section_content = remaining_content
-    
-    # 한글 번호 패턴 (가, 나, 다, 라, 마, 바, 사, 아, 자, 차, 카, 타, 파, 하)
-    korean_markers = ['가', '나', '다', '라', '마', '바', '사', '아', '자', '차', '카', '타', '파', '하']
     
     # 가. 나. 다. 등으로 시작하는 항목 찾기
     incident_pattern = r'([가나다라마바사아자차카타파하])\.\s*'
@@ -176,30 +177,86 @@ def extract_incidents(content):
         if not item_content:
             continue
         
-        # 첫 번째 줄을 제목으로, 나머지를 내용으로
-        lines = item_content.split('\n')
-        lines = [line.strip() for line in lines if line.strip()]
+        # (1), (2), (3) 등의 하위 항목이 있는지 확인
+        sub_item_pattern = r'\((\d+)\)\s*'
+        sub_matches = list(re.finditer(sub_item_pattern, item_content))
         
-        if lines:
-            title = lines[0]
-            content_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+        if sub_matches:
+            # 하위 항목이 있는 경우: 각 (1), (2) 등을 별도 사건으로 분리
+            # 먼저 상위 제목 추출 (첫 번째 (1) 이전 내용)
+            first_sub_start = sub_matches[0].start()
+            parent_title = item_content[:first_sub_start].strip()
             
-            incidents[f'사건제목{incident_num}'] = title
-            incidents[f'사건내용{incident_num}'] = content_text
-            incident_num += 1
+            # 첫 번째 줄만 상위 제목으로 사용
+            parent_title_lines = parent_title.split('\n')
+            parent_title = parent_title_lines[0].strip() if parent_title_lines else ""
+            
+            for j, sub_match in enumerate(sub_matches):
+                sub_start = sub_match.end()
+                
+                # 다음 하위 항목 또는 끝
+                if j + 1 < len(sub_matches):
+                    sub_end = sub_matches[j + 1].start()
+                else:
+                    sub_end = len(item_content)
+                
+                sub_content = item_content[sub_start:sub_end].strip()
+                
+                if not sub_content:
+                    continue
+                
+                # 하위 항목의 첫 줄을 제목으로
+                sub_lines = sub_content.split('\n')
+                sub_lines = [line.strip() for line in sub_lines if line.strip()]
+                
+                if sub_lines:
+                    sub_title = sub_lines[0]
+                    sub_content_text = '\n'.join(sub_lines[1:]) if len(sub_lines) > 1 else ""
+                    
+                    # <관련법규> 이후 내용 제거
+                    related_law_match = re.search(r'<\s*관련법규\s*>', sub_content_text)
+                    if related_law_match:
+                        sub_content_text = sub_content_text[:related_law_match.start()].strip()
+                    
+                    # 상위 제목 + 하위 제목 조합
+                    if parent_title:
+                        full_title = f"{parent_title} - {sub_title}"
+                    else:
+                        full_title = sub_title
+                    
+                    incidents[f'제목{incident_num}'] = full_title
+                    incidents[f'내용{incident_num}'] = sub_content_text
+                    incident_num += 1
+        else:
+            # 하위 항목이 없는 경우: 기존 로직 사용
+            lines = item_content.split('\n')
+            lines = [line.strip() for line in lines if line.strip()]
+            
+            if lines:
+                title = lines[0]
+                content_text = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                
+                # <관련법규> 이후 내용 제거
+                related_law_match = re.search(r'<\s*관련법규\s*>', content_text)
+                if related_law_match:
+                    content_text = content_text[:related_law_match.start()].strip()
+                
+                incidents[f'제목{incident_num}'] = title
+                incidents[f'내용{incident_num}'] = content_text
+                incident_num += 1
     
     return incidents
 
 
 def extract_metadata_from_content(content):
     """
-    PDF 내용에서 제재대상기관과 제재조치요구일 추출
+    PDF 내용에서 금융회사명과 제재조치일 추출
     
     Args:
         content: PDF에서 추출한 텍스트 내용
         
     Returns:
-        tuple: (제재대상기관, 제재조치요구일)
+        tuple: (금융회사명, 제재조치일)
     """
     institution = ""
     sanction_date = ""
@@ -207,7 +264,7 @@ def extract_metadata_from_content(content):
     if not content or content.startswith('['):
         return institution, sanction_date
     
-    # 제재대상기관 추출 패턴 (숫자 포함만)
+    # 금융회사명 추출 패턴 (숫자 포함만)
     institution_patterns = [
         # "1. 금융기관명" 형식
         r'1\.\s*금\s*융\s*기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
@@ -230,15 +287,17 @@ def extract_metadata_from_content(content):
             if institution:
                 break
     
-    # 제재조치요구일 추출 패턴 (숫자 포함만)
+    # 제재조치일 추출 패턴 (숫자 포함만)
+    # 주의: 더 구체적인 패턴(일자)을 먼저 검사해야 함
     date_patterns = [
+        # "2. 제재조치 일자 :" 형식 (다양한 공백 패턴) - 먼저 검사
+        r'2\.\s*제\s*재\s*조\s*치\s+일\s*자\s*[:：]?\s*([^\n\r]+)',
+        r'2\.\s*제재조치\s+일\s*자\s*[:：]?\s*([^\n\r]+)',
+        r'2\.\s*제재조치\s*일자\s*[:：]?\s*([^\n\r]+)',
         # "2. 제재조치일" 형식
         r'2\.\s*제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
         r'2\.\s*제재조치일\s*[:：]?\s*([^\n\r]+)',
         r'2\s*\.\s*제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
-        # "2. 제재조치 일자 :" 형식
-        r'2\.\s*제\s*재\s*조\s*치\s*일\s*자\s*[:：]\s*([^\n\r]+)',
-        r'2\.\s*제재조치\s*일자\s*[:：]\s*([^\n\r]+)',
         # "2. 조치일 :" 형식
         r'2\.\s*조\s*치\s*일\s*[:：]\s*([^\n\r]+)',
     ]
@@ -257,8 +316,8 @@ def extract_metadata_from_content(content):
 
 
 if __name__ == "__main__":
-    # 테스트용 예시
-    test_content = """
+    # 테스트용 예시 1: 기본 형태 (가. 나. 다.)
+    test_content1 = """
     1. 금융기관명: 테스트은행
     2. 제재조치일: 2024. 5. 15.
     3. 제재조치내용
@@ -275,15 +334,57 @@ if __name__ == "__main__":
     5. 기타사항: 없음
     """
     
-    institution, sanction_date = extract_metadata_from_content(test_content)
-    print(f"제재대상기관: {institution}")
-    print(f"제재조치요구일: {sanction_date}")
+    # 테스트용 예시 2: 중첩 형태 (가. (1) (2) 나. (1) (2))
+    test_content2 = """
+    1. 금융기관명: 현대차증권
+    2. 제재조치일: 2025. 10.15.
+    3. 제재조치내용
+    기 관 과태료 220,200,000 원 부과
+    4. 제재대상사실
+    가. 고객확인 의무 위반
+    (1) 국적 및 실제 소유자 미확인
+    □ 금융회사등은 계좌를 신규 개설하는 경우 외국인 고객에 대하여는 국적을 확인하여야 함에도
+    ㅇ 현대차증권은 외국인 고객 1명의 국적을 확인하지 않았음
+    (2) 고위험 고객에 대한 추가정보 미확인
+    □ 금융회사등은 고객이 자금세탁행위를 할 우려가 있는 경우 거래자금의 원천 등을 확인하여야 함에도
+    ㅇ 현대차증권은 11건의 계좌개설에 대해 추가적인 정보를 확인하지 않았음
+    나. 고액 현금거래 보고의무 위반
+    □ 금융회사등은 1천만원 이상의 현금을 지급하거나 영수한 경우 30일 이내에 보고하여야 함에도
+    ㅇ 현대차증권은 고액 현금거래 총 4건을 보고기한 내에 보고하지 아니하였음
+    <관련법규>
+    특정금융정보법 제4조의 2
+    5. 기타사항: 없음
+    """
     
-    sanction_details = extract_sanction_details(test_content)
+    print("=" * 60)
+    print("테스트 1: 기본 형태 (가. 나. 다.)")
+    print("=" * 60)
+    
+    institution, sanction_date = extract_metadata_from_content(test_content1)
+    print(f"금융회사명: {institution}")
+    print(f"제재조치일: {sanction_date}")
+    
+    sanction_details = extract_sanction_details(test_content1)
     print(f"\n제재내용:\n{sanction_details}")
     
-    incidents = extract_incidents(test_content)
-    print(f"\n사건 추출 결과:")
-    for key, value in incidents.items():
+    incidents = extract_incidents(test_content1)
+    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
+    for key, value in sorted(incidents.items()):
         print(f"  {key}: {value[:50]}..." if len(value) > 50 else f"  {key}: {value}")
+    
+    print("\n" + "=" * 60)
+    print("테스트 2: 중첩 형태 (가. (1) (2) 나.)")
+    print("=" * 60)
+    
+    institution, sanction_date = extract_metadata_from_content(test_content2)
+    print(f"금융회사명: {institution}")
+    print(f"제재조치일: {sanction_date}")
+    
+    sanction_details = extract_sanction_details(test_content2)
+    print(f"\n제재내용:\n{sanction_details}")
+    
+    incidents = extract_incidents(test_content2)
+    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
+    for key, value in sorted(incidents.items()):
+        print(f"  {key}: {value[:80]}..." if len(value) > 80 else f"  {key}: {value}")
 
