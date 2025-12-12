@@ -21,25 +21,36 @@ def log(message: str = "") -> None:
         _log_file_handle.flush()
 
 
-def run_step(script_name: str, description: str) -> None:
+def run_step(script_name: str, description: str, extra_args: list = None) -> None:
     script_path = ROOT_DIR / script_name
     if not script_path.exists():
         raise FileNotFoundError(f"{script_name} 파일을 찾을 수 없습니다.")
 
     log(f"\n[단계] {description} 실행 중...")
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
+    cmd = [sys.executable, '-u', str(script_path)]  # -u: unbuffered output
+    if extra_args:
+        cmd.extend(extra_args)
+    
+    # 실시간 출력을 위해 Popen 사용
+    process = subprocess.Popen(
+        cmd,
         cwd=ROOT_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        encoding='utf-8',
+        encoding='cp949',  # Windows 한글 인코딩
+        errors='replace',  # 디코딩 오류 시 대체 문자 사용
+        bufsize=1,  # line-buffered
     )
-    if result.stdout:
-        for line in result.stdout.splitlines():
-            log(f"  {line}")
-    if result.returncode != 0:
-        raise RuntimeError(f"{script_name} 실행이 실패했습니다 (exit code: {result.returncode}).")
+    
+    # 실시간으로 출력 읽기
+    for line in process.stdout:
+        line = line.rstrip('\n\r')
+        log(f"  {line}")
+    
+    process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(f"{script_name} 실행이 실패했습니다 (exit code: {process.returncode}).")
 
 
 def print_stats(json_path: Path) -> None:
@@ -58,25 +69,31 @@ def print_stats(json_path: Path) -> None:
     def has_value(value: str) -> bool:
         return bool(value and value.strip() and value.strip() != '-')
 
-    target_ok = sum(1 for item in data if has_value(item.get('제재대상', '')))
+    # fss_scraper_v2.py 구조에 맞게 필드명 확인
+    # 제재내용 필드 확인
     sanction_ok = sum(1 for item in data if has_value(item.get('제재내용', '')))
-    both_ok = sum(1 for item in data if has_value(item.get('제재대상', '')) and has_value(item.get('제재내용', '')))
 
     def to_pct(count: int) -> str:
         return f"{count} / {total} ({count / total * 100:.1f}%)"
 
-    log("\n[통계] 제재대상/제재내용 추출 현황")
-    log(f" - 제재대상 추출 성공: {to_pct(target_ok)}")
+    log("\n[통계] 제재내용 추출 현황")
     log(f" - 제재내용 추출 성공: {to_pct(sanction_ok)}")
-    log(f" - 둘 다 추출 성공: {to_pct(both_ok)}")
 
 
 def main() -> None:
+    # 기본 검색 종료일: 오늘 날짜
+    today = datetime.now()
+    default_edate = today.strftime('%Y-%m-%d')
+    
     parser = argparse.ArgumentParser(description="금감원 제재조치 현황 스크래핑 전체 파이프라인")
     parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
     parser.add_argument('--skip-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 생략')
     parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
     parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
+    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
+    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
+    parser.add_argument('--edate', type=str, default=default_edate, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
+    parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
     args = parser.parse_args()
 
     json_path = ROOT_DIR / 'fss_results.json'
@@ -99,11 +116,20 @@ def main() -> None:
             return
 
         if not args.skip_scrape:
-            run_step('fss_scraper.py', '1. 목록 및 PDF 스크래핑')
+            scraper_args = []
+            if args.limit:
+                scraper_args.extend(['--limit', str(args.limit)])
+            if args.sdate:
+                scraper_args.extend(['--sdate', args.sdate])
+            if args.edate:
+                scraper_args.extend(['--edate', args.edate])
+            if args.after:
+                scraper_args.extend(['--after', args.after])
+            run_step('fss_scraper_v2.py', '1. 목록 및 PDF 스크래핑', scraper_args if scraper_args else None)
         else:
             log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
 
-        run_step('extract_sanctions.py', '2. 제재대상/제재내용 추출 (OCR 후처리 포함)')
+        run_step('extract_sanctions.py', '2. 제재내용 보완 (OCR 후처리 포함)')
 
         ocr_retry_script = ROOT_DIR / 'ocr_failed_items.py'
         if not args.skip_ocr_retry and ocr_retry_script.exists():

@@ -1,3 +1,15 @@
+"""
+extract_sanctions.py - 제재내용 보완 및 정제 스크립트
+
+역할:
+- fss_scraper_v2.py에서 기본 추출이 완료된 데이터를 보완/정제
+- 제재내용 보완 (OCR 공백 제거, 더 정확한 추출 시도)
+- OCR 공백 제거 (제재내용, 제목, 내용 필드)
+
+주의:
+- 사건 추출(extract_incidents)은 fss_scraper_v2.py에서 이미 처리됨
+- 이 스크립트는 보완/정제에만 집중
+"""
 import json
 import re
 import csv
@@ -8,7 +20,11 @@ split_syllable_pattern = re.compile(r'((?:[가-힣]\s){2,}[가-힣])')
 
 
 def collapse_split_syllables(text: str) -> str:
-    """한글 음절 사이에 삽입된 불필요한 공백을 제거"""
+    """
+    한글 음절 사이에 삽입된 불필요한 공백을 제거 (OCR 보완/정제)
+    
+    예: "기 관 과 태 료" -> "기관과태료"
+    """
     if not text:
         return text
     return split_syllable_pattern.sub(lambda m: m.group(0).replace(' ', ''), text)
@@ -17,201 +33,23 @@ def collapse_split_syllables(text: str) -> str:
 # UTF-8 인코딩 설정
 sys.stdout.reconfigure(encoding='utf-8')
 
-def extract_incidents(content):
-    """
-    제재조치내용에서 사건제목과 사건내용 추출
-    
-    두 가지 타입을 처리:
-    1. 첫 번째 타입: "4. 제 재 대 상 사 실\n가. 고객위험평가 관련 절차" -> "고객위험평가 관련 절차"가 사건제목
-    2. 두 번째 타입: "4. 제 재 대 상 사 실\n가. 문 책 사 항\n(1) 직무 관련 정보의 이용 금지 위반" -> "직무 관련 정보의 이용 금지 위반"이 사건제목
-    """
-    if not content or content.startswith('[') or content.startswith('[오류'):
-        return []
-    
-    incidents = []
-    
-    # "제재대상사실" 또는 "제 재 대 상 사 실" 섹션 찾기
-    # 다양한 패턴 지원: "4. 제재대상사실", "4. 제 재 대 상 사 실", "Ⅳ. 제재대상사실" 등
-    section_patterns = [
-        r'4\.\s*제\s*재\s*대\s*상\s*사\s*실',
-        r'4\.\s*제재대상사실',
-        r'Ⅳ\.\s*제\s*재\s*대\s*상\s*사\s*실',
-        r'Ⅳ\.\s*제재대상사실',
-        r'IV\.\s*제\s*재\s*대\s*상\s*사\s*실',
-        r'IV\.\s*제재대상사실',
-    ]
-    
-    section_start = -1
-    section_text = ""
-    
-    for pattern in section_patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            section_start = match.end()
-            # 다음 섹션까지 추출 (5. 또는 다음 주요 섹션)
-            next_section_pattern = r'(?:5\.|Ⅴ\.|V\.|5\s*\.|제\s*재\s*조\s*치\s*내\s*용|결\s*론|참\s*고\s*사\s*항)'
-            next_match = re.search(next_section_pattern, content[section_start:], re.IGNORECASE)
-            if next_match:
-                section_text = content[section_start:section_start + next_match.start()].strip()
-            else:
-                section_text = content[section_start:].strip()
-            break
-    
-    if not section_text:
-        return incidents
-    
-    lines = section_text.split('\n')
-    current_title = None
-    current_content = []
-    in_incident = False
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            i += 1
-            continue
-        
-        # 두 번째 타입 체크: "가. 문 책 사 항" 또는 "가. 문책사항" 다음에 "(1) ..." 패턴
-        # 이 패턴을 먼저 체크해야 함 (첫 번째 타입보다 우선)
-        second_type_header_pattern = r'^[가-하]\.\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항)(.*)$'
-        second_header_match = re.match(second_type_header_pattern, line)
-        
-        if second_header_match:
-            # 이전 사건 저장
-            if current_title and current_content:
-                incidents.append({
-                    '사건제목': current_title,
-                    '사건내용': '\n'.join(current_content).strip()
-                })
-            
-            # 문책사항 헤더는 사건제목이 아니므로 다음 줄을 확인
-            current_title = None
-            current_content = []
-            in_incident = False
-            i += 1
-            
-            # 다음 줄에서 "(1)" 또는 "⑴" 패턴 찾기
-            if i < len(lines):
-                next_line = lines[i].strip()
-                # "(1) 직무 관련 정보의 이용 금지 위반" 또는 "⑴ 직무 관련 정보의 이용 금지 위반" 같은 패턴
-                # "⑴"는 전각 괄호 숫자 (U+2474-U+247C)
-                numbered_pattern = r'^(?:[\(（](\d+)[\)）]|[\u2474-\u247C])\s*(.+)$'
-                numbered_match = re.match(numbered_pattern, next_line)
-                
-                if numbered_match:
-                    # 그룹이 2개일 수 있음: (1) 패턴이면 group(1)이 숫자, group(2)가 제목
-                    # ⑴ 패턴이면 group(1)이 None, group(2)가 제목
-                    if numbered_match.lastindex >= 2:
-                        current_title = numbered_match.group(2).strip()
-                    elif numbered_match.lastindex >= 1 and numbered_match.group(1):
-                        current_title = numbered_match.group(1).strip()
-                    else:
-                        # ⑴ 패턴인 경우
-                        current_title = next_line.replace('⑴', '').replace('⑵', '').replace('⑶', '').replace('⑷', '').replace('⑸', '').replace('⑹', '').replace('⑺', '').replace('⑻', '').replace('⑼', '').strip()
-                    current_content = []
-                    in_incident = True
-                    i += 1
-                    continue
-            
-            continue
-        
-        # 첫 번째 타입: "가. 고객위험평가 관련 절차" 같은 패턴
-        # 문책사항이 아닌 일반 항목
-        first_type_pattern = r'^[가-하]\.\s*(.+)$'
-        first_match = re.match(first_type_pattern, line)
-        
-        if first_match:
-            # 이전 사건 저장
-            if current_title and current_content:
-                incidents.append({
-                    '사건제목': current_title,
-                    '사건내용': '\n'.join(current_content).strip()
-                })
-            
-            # 새 사건 시작
-            title_text = first_match.group(1).strip()
-            # 문책사항이 아닌 경우에만 사건제목으로 사용
-            if not re.match(r'^(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항)', title_text):
-                current_title = title_text
-                current_content = []
-                in_incident = True
-            else:
-                # 문책사항인 경우 다음 줄 확인
-                current_title = None
-                current_content = []
-                in_incident = False
-            i += 1
-            continue
-        
-        # 두 번째 타입의 번호 패턴: "(1) 직무 관련 정보의 이용 금지 위반" 또는 "⑴ 직무 관련 정보의 이용 금지 위반"
-        # "⑴"는 전각 괄호 숫자 (U+2474-U+247C)
-        numbered_pattern = r'^(?:[\(（](\d+)[\)）]|[\u2474-\u247C])\s*(.+)$'
-        numbered_match = re.match(numbered_pattern, line)
-        
-        if numbered_match:
-            # 이전 사건 저장
-            if current_title and current_content:
-                incidents.append({
-                    '사건제목': current_title,
-                    '사건내용': '\n'.join(current_content).strip()
-                })
-            
-            # 새 사건 시작
-            # 그룹이 2개일 수 있음: (1) 패턴이면 group(1)이 숫자, group(2)가 제목
-            # ⑴ 패턴이면 group(1)이 None, group(2)가 제목
-            if numbered_match.lastindex >= 2:
-                current_title = numbered_match.group(2).strip()
-            elif numbered_match.lastindex >= 1 and numbered_match.group(1):
-                current_title = numbered_match.group(1).strip()
-            else:
-                # ⑴ 패턴인 경우 - 전각 숫자 제거
-                current_title = line.replace('⑴', '').replace('⑵', '').replace('⑶', '').replace('⑷', '').replace('⑸', '').replace('⑹', '').replace('⑺', '').replace('⑻', '').replace('⑼', '').strip()
-            current_content = []
-            in_incident = True
-            i += 1
-            continue
-        
-        # 하위 목차 패턴: "(가)", "(나)", "(다)" 등은 사건제목이 아니라 사건내용의 일부
-        sub_item_pattern = r'^\([가-하]\)\s*(.+)$'
-        sub_item_match = re.match(sub_item_pattern, line)
-        
-        if sub_item_match:
-            # 사건내용으로 추가
-            if in_incident and current_title:
-                current_content.append(line)
-            i += 1
-            continue
-        
-        # 사건 내용으로 추가
-        if in_incident and current_title:
-            # 다음 사건 제목이 나오기 전까지는 모두 내용
-            # 다음 "가.", "나." 등이 나오거나 "(1)", "(2)", "⑴", "⑵" 등이 나오면 중단
-            if re.match(r'^[가-하]\.\s*', line) or re.match(r'^[\(（]\d+[\)）]\s*', line) or re.match(r'^[\u2474-\u247C]', line):
-                # 이전 사건 저장
-                if current_title and current_content:
-                    incidents.append({
-                        '사건제목': current_title,
-                        '사건내용': '\n'.join(current_content).strip()
-                    })
-                # 새 사건 시작은 위에서 처리됨
-                continue
-            
-            current_content.append(line)
-        
-        i += 1
-    
-    # 마지막 사건 저장
-    if current_title and current_content:
-        incidents.append({
-            '사건제목': current_title,
-            '사건내용': '\n'.join(current_content).strip()
-        })
-    
-    return incidents
+# extract_incidents 함수는 fss_scraper_v2.py에서 이미 처리되므로 제거
+# (fss_scraper_v2.py는 KoFIU_Scraper/extract_metadata.py의 extract_incidents를 사용)
 
 def extract_sanction_info(content):
-    """제재조치내용에서 제재대상과 제재내용 추출"""
+    """
+    제재조치내용에서 제재내용 추출 (보완/정제용)
+    
+    이 함수는 fss_scraper_v2.py에서 기본 추출이 완료된 후,
+    더 정확한 제재내용 추출을 위해 사용됩니다.
+    
+    특징:
+    - 다양한 OCR 패턴 지원
+    - OCR 오류 보정 (예: "오 혐 설 계 사" -> "보험설계사")
+    - 복잡한 표 형식 처리
+    
+    주의: 제재대상은 추출하지 않음 (제재내용만 반환)
+    """
     if not content or content.startswith('[') or content.startswith('[오류'):
         return '', ''
     
@@ -432,14 +270,13 @@ def truncate_after_subsections(text: str) -> str:
 
         return table_entries
 
-    inline_pattern = re.compile(r'(?:제재대상|대상)\s*(?:제재내용|내용)\s*(기관|임원|직원|임직원)\s*([^\r\n]+)', re.DOTALL)
+    inline_pattern = re.compile(r'(?:제재대상|대상)\s*(?:제재내용|내용)\s*(?:기관|임원|직원|임직원)\s*([^\r\n]+)', re.DOTALL)
     simple_inline_match = inline_pattern.search(content)
     if simple_inline_match:
-        target_simple = simple_inline_match.group(1)
-        sanction_simple = clean_fragment(simple_inline_match.group(2))
+        sanction_simple = clean_fragment(simple_inline_match.group(1))
         sanction_simple = truncate_after_subsections(sanction_simple)
         if sanction_simple:
-            return target_simple, sanction_simple
+            return None, sanction_simple  # 제재대상은 반환하지 않음
 
     lines = content.split('\n')
     for idx, line in enumerate(lines):
@@ -471,10 +308,9 @@ def truncate_after_subsections(text: str) -> str:
                 if simple_targets and len(simple_targets) == len(simple_sanctions):
                     break
             if simple_targets and simple_sanctions:
-                target_result = '|'.join(simple_targets)
                 sanction_result = ' | '.join(simple_sanctions)
                 sanction_result = truncate_after_subsections(sanction_result)
-                return target_result, sanction_result
+                return None, sanction_result  # 제재대상은 반환하지 않음
             break
 
     table_entries = parse_table_entries(content)
@@ -504,10 +340,9 @@ def truncate_after_subsections(text: str) -> str:
             if row_text:
                 sanction_rows.append(row_text)
 
-        target_result = '|'.join(unique_targets) if unique_targets else '-'
         sanction_result = ' | '.join(sanction_rows) if sanction_rows else '-'
         sanction_result = truncate_after_subsections(sanction_result)
-        return target_result, sanction_result
+        return None, sanction_result  # 제재대상은 반환하지 않음
     
     # 패턴 0-1: "3. 조치내용" 변형 (조치내용, 조치, 제재조치 내용, 제 재 조 치 내 용 등)
     # 예: "3. 조치내용\n대상 내용\n직원 ◦ 자율처리..." 또는 "3. 제 재 조 치 내 용\n대상 내 용..."
@@ -1134,12 +969,11 @@ def truncate_after_subsections(text: str) -> str:
                 if cleaned_sanction:
                     sanction_rows.append(cleaned_sanction)
 
-            target_result = '|'.join(unique_targets) if unique_targets else '-'
             sanction_result = ' | '.join(sanction_rows) if sanction_rows else '-'
             sanction_result = truncate_after_subsections(sanction_result)
             if (('재심' in content and '재조치 내용' in content) or '재심 처리안' in content) and '제재대상 제재내용' not in content:
-                return '재심', '재조치 내용 참조'
-            return target_result, sanction_result
+                return None, '재조치 내용 참조'
+            return None, sanction_result  # 제재대상은 반환하지 않음
         elif targets and sanctions:
             unique_targets = []
             for target_value in targets:
@@ -1154,18 +988,17 @@ def truncate_after_subsections(text: str) -> str:
                     if normalized_component not in unique_targets:
                         unique_targets.append(normalized_component)
  
-            target_str = '|'.join(unique_targets) if unique_targets else '-'
             sanction_values = [clean_fragment(s) for s in sanctions if clean_fragment(s)]
             sanction_str = ' | '.join(sanction_values) if sanction_values else '-'
             sanction_str = truncate_after_subsections(sanction_str)
             if (('재심' in content and '재조치 내용' in content) or '재심 처리안' in content) and '제재대상 제재내용' not in content:
-                return '재심', '재조치 내용 참조'
-            return target_str, sanction_str
+                return None, '재조치 내용 참조'
+            return None, sanction_str  # 제재대상은 반환하지 않음
 
     if (('재심' in content and '재조치 내용' in content) or '재심 처리안' in content) and '제재대상 제재내용' not in content:
-        return '재심', '재조치 내용 참조'
+        return None, '재조치 내용 참조'
  
-    return '-', '-'
+    return None, '-'  # 제재대상은 반환하지 않음
 
 if __name__ == "__main__":
     # JSON 파일 읽기
@@ -1175,48 +1008,51 @@ if __name__ == "__main__":
 
     print(f"총 {len(data)}개 항목 로드 완료")
 
-    # 각 항목에 제재대상과 제재내용 추가
-    print("\n제재대상과 제재내용 추출 중...")
+    # ========================================================================
+    # 보완/정제 단계
+    # ========================================================================
+    # fss_scraper_v2.py에서 기본 추출이 완료되었으므로, 여기서는 보완/정제만 수행
+    # - 제재내용 보완 (OCR 공백 제거, 더 정확한 추출 시도)
+    # - OCR 공백 제거 (제재내용, 제목, 내용 필드)
+    # - 사건 추출은 이미 fss_scraper_v2.py에서 완료되었으므로 스킵
+    # ========================================================================
+    print("\n[보완/정제 단계] 제재내용 보완 중...")
     for idx, item in enumerate(data, 1):
-        content = item.get('제재조치내용', '')
-        result = extract_sanction_info(content)
-        if not isinstance(result, tuple) or len(result) != 2:
-            target, sanction = '-', '-'
-        else:
-            target, sanction = result
-
-        if target == '-' and sanction == '-':
-            collapsed_content = collapse_split_syllables(content)
-            inline_pattern = re.compile(r'(?:제재대상|대상)\s*(?:제재내용|내용)\s*(기관|임원|직원|임직원)\s*([^\r\n]+)', re.DOTALL)
-            simple_match = inline_pattern.search(collapsed_content)
-            if simple_match:
-                target = simple_match.group(1)
-                sanction = simple_match.group(2).strip()
-                sanction = re.sub(r'\s+', ' ', sanction)
-            else:
-                collapsed_lines = [line.strip() for line in collapsed_content.splitlines()]
-                for i, line in enumerate(collapsed_lines):
-                    header = line.replace(' ', '')
-                    if ('대상' in header or '제재대상' in header) and ('내용' in header or '제재내용' in header):
-                        if i + 1 < len(collapsed_lines):
-                            candidate = collapsed_lines[i + 1]
-                            candidate_no_space = candidate.replace(' ', '')
-                            for prefix in ('기관', '임원', '직원', '임직원'):
-                                if candidate_no_space.startswith(prefix):
-                                    remainder = candidate[len(prefix):].strip()
-                                    if remainder:
-                                        target = prefix
-                                        sanction = re.sub(r'\s+', ' ', remainder)
-                                    break
-                        if target != '-' or sanction != '-':
-                            break
-
-        item['제재대상'] = target if target and str(target).strip() else '-'
-        item['제재내용'] = sanction if sanction and str(sanction).strip() else '-'
+        # fss_scraper_v2.py 구조: 제재조치내용이 없을 수 있고, 제재내용이 이미 있을 수 있음
+        content = item.get('제재조치내용', '')  # 원본 PDF 내용 (없을 수 있음)
+        existing_sanction = item.get('제재내용', '')  # 이미 추출된 제재내용
         
-        # 사건제목과 사건내용 추출
-        incidents = extract_incidents(content)
-        item['사건목록'] = incidents
+        # 제재내용이 없으면 원본 내용에서 추출 시도
+        if not existing_sanction and content:
+            result = extract_sanction_info(content)
+            if isinstance(result, tuple) and len(result) == 2:
+                _, sanction = result  # 제재대상은 무시
+                # 제재내용만 저장
+                if sanction and sanction != '-':
+                    item['제재내용'] = sanction
+            else:
+                # 간단한 패턴으로 제재내용 추출 시도
+                collapsed_content = collapse_split_syllables(content)
+                inline_pattern = re.compile(r'(?:제재대상|대상)\s*(?:제재내용|내용)\s*(?:기관|임원|직원|임직원)\s*([^\r\n]+)', re.DOTALL)
+                simple_match = inline_pattern.search(collapsed_content)
+                if simple_match:
+                    sanction = simple_match.group(1).strip()
+                    sanction = re.sub(r'\s+', ' ', sanction)
+                    if sanction:
+                        item['제재내용'] = sanction
+        
+        # 제재내용 OCR 공백 제거 보완 (보완/정제 단계)
+        if item.get('제재내용'):
+            item['제재내용'] = collapse_split_syllables(item['제재내용'])
+        
+        # 제목, 내용 필드도 OCR 공백 제거 보완 (보완/정제 단계)
+        if item.get('제목'):
+            item['제목'] = collapse_split_syllables(item['제목'])
+        if item.get('내용'):
+            item['내용'] = collapse_split_syllables(item['내용'])
+        
+        # 사건제목과 사건내용은 이미 fss_scraper_v2.py에서 추출되었으므로 스킵
+        # (제목, 내용 필드가 이미 있음)
         
         if idx % 50 == 0:
             print(f"  {idx}개 항목 처리 완료...")
@@ -1232,33 +1068,19 @@ if __name__ == "__main__":
     print("CSV 파일 재생성 중...")
     csv_filename = 'fss_results.csv'
 
-    # CSV 파일 생성 (사건이 여러 개인 경우 행 확장)
+    # CSV 파일 재생성 (fss_scraper_v2.py 구조에 맞게)
+    # 이미 사건별로 분리되어 있으므로 그대로 사용
     csv_rows = []
-    base_fieldnames = ['번호', '제재대상기관', '제재조치요구일', '관련부서', '조회수', '문서유형', '상세페이지URL', 
-                      '제재조치내용', '제재대상', '제재내용']
+    # fss_scraper_v2.py 필드: 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 상세페이지URL
+    base_fieldnames = ['업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '상세페이지URL']
     
     for item in data:
-        incidents = item.get('사건목록', [])
-        
-        if not incidents:
-            # 사건이 없으면 기본 정보만
-            row = {}
-            for field in base_fieldnames:
-                row[field] = item.get(field, '')
-            row['사건제목'] = ''
-            row['사건내용'] = ''
-            csv_rows.append(row)
-        else:
-            # 사건이 있으면 각 사건마다 행 생성
-            for incident in incidents:
-                row = {}
-                for field in base_fieldnames:
-                    row[field] = item.get(field, '')
-                row['사건제목'] = incident.get('사건제목', '')
-                row['사건내용'] = incident.get('사건내용', '')
-                csv_rows.append(row)
+        row = {}
+        for field in base_fieldnames:
+            row[field] = item.get(field, '')
+        csv_rows.append(row)
     
-    fieldnames = base_fieldnames + ['사건제목', '사건내용']
+    fieldnames = base_fieldnames
     with open(csv_filename, 'w', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
@@ -1281,19 +1103,18 @@ if __name__ == "__main__":
     print("\n처리 결과 샘플 (첫 5개):")
     for i in range(min(5, len(data))):
         item = data[i]
-        target = item.get('제재대상', '')
         sanction = item.get('제재내용', '')
-        print(f"\n[{i+1}] {item['제재대상기관']}")
-        print(f"  제재대상: {target if target else '(추출 실패)'}")
-        if sanction:
+        company = item.get('금융회사명', item.get('제재대상기관', 'N/A'))
+        print(f"\n[{i+1}] {company}")
+        if sanction and sanction != '-':
             sanction_short = sanction[:80] + '...' if len(sanction) > 80 else sanction
             print(f"  제재내용: {sanction_short}")
         else:
             print(f"  제재내용: (추출 실패)")
 
     # 추출 성공률 확인
-    success_count = sum(1 for item in data if item.get('제재대상') and item.get('제재내용'))
-    print(f"\n추출 성공: {success_count}/{len(data)}개 항목")
+    success_count = sum(1 for item in data if item.get('제재내용') and item.get('제재내용') != '-')
+    print(f"\n제재내용 추출 성공: {success_count}/{len(data)}개 항목")
 
     # OCR 후처리 자동 실행
     print("\n" + "=" * 60)
