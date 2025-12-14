@@ -156,8 +156,9 @@ def extract_incidents(content):
     if not content or content.startswith('['):
         return {}
     
-    # OCR 텍스트 전처리: 한글 글자 사이의 불필요한 공백 제거
-    content = collapse_split_syllables(content)
+    # 일반 텍스트 추출용이므로 collapse_split_syllables() 호출 제거
+    # (OCR 텍스트는 extract_metadata_ocr.py에서 처리)
+    # content = collapse_split_syllables(content)  # 제거됨
     
     # 4번 항목 제목 패턴 (다양한 형태 지원)
     section4_patterns = [

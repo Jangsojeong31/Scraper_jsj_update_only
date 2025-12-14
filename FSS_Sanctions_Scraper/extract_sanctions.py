@@ -14,20 +14,21 @@ import json
 import re
 import csv
 import sys
+import platform
 
-# 연속된 한글 음절 사이에 OCR로 삽입된 공백을 제거하기 위한 패턴
-split_syllable_pattern = re.compile(r'((?:[가-힣]\s){2,}[가-힣])')
+# Windows 콘솔 인코딩 설정
+if platform.system() == 'Windows':
+    try:
+        # Windows 콘솔 코드 페이지를 UTF-8로 설정
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)  # UTF-8 코드 페이지
+        kernel32.SetConsoleCP(65001)
+    except:
+        pass
 
-
-def collapse_split_syllables(text: str) -> str:
-    """
-    한글 음절 사이에 삽입된 불필요한 공백을 제거 (OCR 보완/정제)
-    
-    예: "기 관 과 태 료" -> "기관과태료"
-    """
-    if not text:
-        return text
-    return split_syllable_pattern.sub(lambda m: m.group(0).replace(' ', ''), text)
+# post_process_ocr 모듈에서 collapse_split_syllables import
+from post_process_ocr import collapse_split_syllables
 
 
 # UTF-8 인코딩 설정
@@ -36,7 +37,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 # extract_incidents 함수는 fss_scraper_v2.py에서 이미 처리되므로 제거
 # (fss_scraper_v2.py는 KoFIU_Scraper/extract_metadata.py의 extract_incidents를 사용)
 
-def extract_sanction_info(content):
+def extract_sanction_info(content, is_ocr=False):
     """
     제재조치내용에서 제재내용 추출 (보완/정제용)
     
@@ -48,6 +49,10 @@ def extract_sanction_info(content):
     - OCR 오류 보정 (예: "오 혐 설 계 사" -> "보험설계사")
     - 복잡한 표 형식 처리
     
+    Args:
+        content: PDF 내용
+        is_ocr: OCR 추출 여부 (True인 경우에만 OCR 오류 보정)
+    
     주의: 제재대상은 추출하지 않음 (제재내용만 반환)
     """
     if not content or content.startswith('[') or content.startswith('[오류'):
@@ -56,9 +61,12 @@ def extract_sanction_info(content):
     targets = []
     sanctions = []
     
-    # OCR로 추출된 텍스트는 글자 사이에 공백이 있을 수 있음 (예: "기 관")
-    content = collapse_split_syllables(content)
-    # 공백 제거 버전도 확인
+    # OCR 추출된 경우에만 OCR 오류 보정 (띄어쓰기 보존)
+    # OCR 오류: 한글 음절 사이에 삽입된 공백만 제거 (예: "기 관" -> "기관")
+    # 정상 띄어쓰기는 보존 (예: "기관 과" -> "기관 과")
+    if is_ocr:
+        content = collapse_split_syllables(content)
+    # 공백 제거 버전도 확인 (검색용)
     content_no_space = content.replace(' ', '')
 
     # 반복적으로 등장하는 OCR 치환 오류 보정
@@ -1022,7 +1030,7 @@ if __name__ == "__main__":
         content = item.get('제재조치내용', '')  # 원본 PDF 내용 (없을 수 있음)
         existing_sanction = item.get('제재내용', '')  # 이미 추출된 제재내용
         
-        # 제재내용이 없으면 원본 내용에서 추출 시도
+        # 제재내용이 없으면 원본 내용에서 추출 시도 (띄어쓰기 보존)
         if not existing_sanction and content:
             result = extract_sanction_info(content)
             if isinstance(result, tuple) and len(result) == 2:
@@ -1031,25 +1039,37 @@ if __name__ == "__main__":
                 if sanction and sanction != '-':
                     item['제재내용'] = sanction
             else:
-                # 간단한 패턴으로 제재내용 추출 시도
-                collapsed_content = collapse_split_syllables(content)
+                # 간단한 패턴으로 제재내용 추출 시도 (띄어쓰기 보존)
+                # OCR 추출된 경우에만 OCR 오류 보정
+                is_ocr = item.get('OCR추출여부') == '예'
+                search_content = collapse_split_syllables(content) if is_ocr else content
                 inline_pattern = re.compile(r'(?:제재대상|대상)\s*(?:제재내용|내용)\s*(?:기관|임원|직원|임직원)\s*([^\r\n]+)', re.DOTALL)
-                simple_match = inline_pattern.search(collapsed_content)
+                simple_match = inline_pattern.search(search_content)
                 if simple_match:
                     sanction = simple_match.group(1).strip()
-                    sanction = re.sub(r'\s+', ' ', sanction)
+                    # 연속된 공백만 정리 (원본 띄어쓰기는 보존)
+                    sanction = re.sub(r' {3,}', ' ', sanction)  # 3개 이상 연속된 공백만 정리
                     if sanction:
                         item['제재내용'] = sanction
         
-        # 제재내용 OCR 공백 제거 보완 (보완/정제 단계)
-        if item.get('제재내용'):
-            item['제재내용'] = collapse_split_syllables(item['제재내용'])
+        # OCR 후처리는 post_process_ocr.py에서 처리하므로 여기서는 제거
+        # (extract_sanction_info 함수 내에서만 OCR 오류 보정 사용)
         
-        # 제목, 내용 필드도 OCR 공백 제거 보완 (보완/정제 단계)
-        if item.get('제목'):
-            item['제목'] = collapse_split_syllables(item['제목'])
-        if item.get('내용'):
-            item['내용'] = collapse_split_syllables(item['내용'])
+        # 구분, 출처 필드 추가 (없는 경우)
+        if '구분' not in item:
+            item['구분'] = '제재사례'
+        if '출처' not in item:
+            item['출처'] = '금융감독원'
+        
+        # 누락필드 계산
+        missing_fields = []
+        if not item.get('제재내용') or str(item.get('제재내용', '')).strip() in ['', '-']:
+            missing_fields.append('제재내용')
+        if not item.get('제목') or str(item.get('제목', '')).strip() in ['', '-']:
+            missing_fields.append('제목')
+        if not item.get('내용') or str(item.get('내용', '')).strip() in ['', '-']:
+            missing_fields.append('내용')
+        item['누락필드'] = ','.join(missing_fields) if missing_fields else ''
         
         # 사건제목과 사건내용은 이미 fss_scraper_v2.py에서 추출되었으므로 스킵
         # (제목, 내용 필드가 이미 있음)
@@ -1071,8 +1091,9 @@ if __name__ == "__main__":
     # CSV 파일 재생성 (fss_scraper_v2.py 구조에 맞게)
     # 이미 사건별로 분리되어 있으므로 그대로 사용
     csv_rows = []
-    # fss_scraper_v2.py 필드: 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 상세페이지URL
-    base_fieldnames = ['업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '상세페이지URL']
+    # fss_scraper_v2.py 필드: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL
+    # OCR추출여부, 누락필드 필드도 포함
+    base_fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부', '누락필드']
     
     for item in data:
         row = {}

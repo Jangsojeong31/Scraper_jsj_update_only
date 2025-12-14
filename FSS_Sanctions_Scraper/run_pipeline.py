@@ -2,6 +2,8 @@ import argparse
 import json
 import subprocess
 import sys
+import os
+import io
 from pathlib import Path
 from datetime import datetime
 
@@ -31,22 +33,66 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
     if extra_args:
         cmd.extend(extra_args)
     
-    # 실시간 출력을 위해 Popen 사용
-    process = subprocess.Popen(
-        cmd,
-        cwd=ROOT_DIR,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding='cp949',  # Windows 한글 인코딩
-        errors='replace',  # 디코딩 오류 시 대체 문자 사용
-        bufsize=1,  # line-buffered
-    )
+    # 실시간 출력을 위해 Popen 사용 (인코딩 오류 방지)
+    # Windows에서 인코딩 오류를 방지하기 위해 환경 변수 설정
+    env = os.environ.copy()
+    env['PYTHONIOENCODING'] = 'utf-8'
+    env['PYTHONUTF8'] = '1'  # Python 3.7+ UTF-8 모드
     
-    # 실시간으로 출력 읽기
-    for line in process.stdout:
-        line = line.rstrip('\n\r')
-        log(f"  {line}")
+    # subprocess를 실행할 때 인코딩 오류를 방지하기 위해
+    # stdout을 직접 읽지 않고 communicate() 사용하거나
+    # 더 안전한 방법으로 처리
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=ROOT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,  # bytes로 받기
+            bufsize=0,  # unbuffered
+            env=env,
+        )
+        
+        # 실시간으로 출력 읽기 (bytes를 직접 읽어서 안전하게 디코딩)
+        # _readerthread 오류를 방지하기 위해 직접 읽기
+        buffer = b''
+        while True:
+            chunk = process.stdout.read(8192)  # 8KB씩 읽기
+            if not chunk:
+                break
+            
+            buffer += chunk
+            
+            # 줄 단위로 분리하여 처리
+            while b'\n' in buffer:
+                line_bytes, buffer = buffer.split(b'\n', 1)
+                try:
+                    # UTF-8로 디코딩 시도
+                    line = line_bytes.decode('utf-8', errors='replace').rstrip('\r')
+                except Exception:
+                    # 실패 시 cp949로 시도
+                    try:
+                        line = line_bytes.decode('cp949', errors='replace').rstrip('\r')
+                    except Exception:
+                        # 둘 다 실패하면 replace로 처리
+                        line = line_bytes.decode('utf-8', errors='replace').rstrip('\r')
+                
+                if line:  # 빈 줄은 제외
+                    log(f"  {line}")
+        
+        # 남은 버퍼 처리
+        if buffer:
+            try:
+                line = buffer.decode('utf-8', errors='replace').rstrip('\r')
+                if line:
+                    log(f"  {line}")
+            except:
+                pass
+                
+    except Exception as e:
+        # subprocess 실행 오류
+        log(f"  [subprocess 실행 오류: {e}]")
+        raise
     
     process.wait()
     if process.returncode != 0:
@@ -129,7 +175,8 @@ def main() -> None:
         else:
             log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
 
-        run_step('extract_sanctions.py', '2. 제재내용 보완 (OCR 후처리 포함)')
+        # OCR 후처리 실행 (extract_metadata_ocr.py에서 추출된 제재내용 후처리)
+        run_step('post_process_ocr.py', '2. OCR 후처리')
 
         ocr_retry_script = ROOT_DIR / 'ocr_failed_items.py'
         if not args.skip_ocr_retry and ocr_retry_script.exists():
