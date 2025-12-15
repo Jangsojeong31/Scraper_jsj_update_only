@@ -10,38 +10,42 @@
 
 ## 주요 파일
 
-### 1. `fss_scraper.py`
-- 기본 스크래핑 스크립트
+### 1. `fss_scraper_v2.py`
+- 메인 스크래핑 스크립트
 - 모든 페이지를 순회하며 데이터 수집
-- PDF 다운로드 및 텍스트 추출 (OCR 포함)
+- PDF 다운로드 및 텍스트 추출 (V3 하이브리드 OCR 포함)
+- 메타데이터 추출 (금융회사명, 제재조치일, 제재내용, 사건목록)
 - 결과를 JSON 및 CSV로 저장
 
-### 2. `extract_sanctions.py`
-- 제재조치내용에서 제재대상과 제재내용 추출
-- 다양한 문서 패턴 인식 (일반, OCR, 재심 등)
-- OCR 결과에서 한글 음절 사이가 공백으로 분절된 문자열을 자동으로 결합
-- `"오 혐 설 계 사" → "보험설계사"`, `"견 무 정 지" → "업무정지"` 등 반복되는 오인식을 표준화
-- 추출된 데이터로 JSON/CSV 업데이트
+### 2. `ocr_extractor.py`
+- V3 하이브리드 OCR 추출 모듈
+- 표 형식: v2 방식 (500 DPI, 강한 전처리)
+- 문단 형식: v1 방식 (300 DPI, 최소 전처리)
+- 자동 감지로 최적 방식 선택
 
 ### 3. `post_process_ocr.py`
 - OCR 후처리 및 품질 검증 스크립트
-- `extract_sanctions.py`에서 자동으로 호출됨
 - OCR 인공물 제거, 알려진 문제 자동 수정
-- 문서유형(`문서유형` 필드) 업데이트 및 품질 검증 리포트 출력
+- 누락필드 계산 및 품질 검증 리포트 출력
 
-### 4. `ocr_failed_items.py`
-- OCR 실패 항목 재처리 스크립트 (필요시 수동 실행)
-- Tesseract-OCR 한글 언어팩 사용 (`-l kor`)
-- 이미지 기반 PDF 처리
+### 4. `extract_metadata.py`
+- PDF 텍스트에서 메타데이터 추출
+- 금융회사명, 제재조치일, 제재내용(표 데이터), 사건목록 추출
+- OCR/일반 텍스트 모두 동일한 함수 사용
 
-### 5. `run_pipeline.py`
+### 5. `ocr_failed_items.py`
+- OCR 실패 항목 재처리 스크립트 (선택적)
+- 제재조치내용이 짧은 항목 재처리 시도
+
+### 6. `run_pipeline.py`
 - 전체 파이프라인 자동 실행 스크립트
-- 순서대로 `fss_scraper.py` → `extract_sanctions.py` (내부에서 `post_process_ocr.py` 자동 호출) → `ocr_failed_items.py`를 실행
-- 실행 후 `fss_results.json`을 기반으로 제재대상/제재내용 추출 통계를 출력
+- 순서대로 `fss_scraper_v2.py` → `post_process_ocr.py` → `ocr_failed_items.py` (선택적) 실행
+- 실행 후 `fss_results.json`을 기반으로 제재내용 추출 통계를 출력
 - 주요 옵션
-  - `--skip-scrape`: 기존 스크래핑 결과를 유지하고 추출 단계부터 실행
+  - `--skip-scrape`: 기존 스크래핑 결과를 유지하고 후처리 단계부터 실행
   - `--skip-ocr-retry`: `ocr_failed_items.py` 실행 생략
   - `--stats-only`: 현존하는 결과 파일에 대한 통계만 출력 (스크립트 실행 없음)
+  - `--limit`: 수집할 최대 항목 수 제한
 
 ## 신규 항목 (257번 이후) 스크래핑 방법
 
@@ -79,7 +83,7 @@ python run_pipeline.py --log-file logs/pipeline.log
 3. **Tesseract-OCR (한글 언어 지원)**
    - 내부망 PC에 Tesseract 실행파일을 설치합니다. (예: `C:\Program Files\Tesseract-OCR\tesseract.exe`)
    - 한글 언어팩(`kor.traineddata`)을 해당 설치 경로의 `tessdata` 디렉토리에 복사합니다.
-   - 경로가 표준 위치가 아닐 경우, `extract_sanctions.py`에서 Tesseract 경로를 수정하거나, `pytesseract.pytesseract.tesseract_cmd` 를 환경에 맞게 설정해줍니다.
+   - 경로가 표준 위치가 아닐 경우, `ocr_extractor.py`에서 Tesseract 경로를 수정하거나, `pytesseract.pytesseract.tesseract_cmd` 를 환경에 맞게 설정해줍니다.
 
 4. **PDF 처리 관련 라이브러리**
    - `PyPDF2`, `pdfplumber`, `PyMuPDF`은 네트워크가 없어도 PDF 텍스트 추출에 활용됩니다. 오프라인 설치만 해두면 추가적인 인터넷 접근이 필요 없습니다.
@@ -94,22 +98,27 @@ python run_pipeline.py --log-file logs/pipeline.log
 
 7. **배포 / 업데이트 전략**
    - 내부망으로 코드 업데이트가 어려운 경우, Git 리포지토리의 패키징 버전을 주기적으로 외부에서 받아 USB 등으로 반입합니다.
-   - 새로운 패턴 대응 코드를 도입할 때는 해당 모듈(`extract_sanctions.py`)과 테스트 데이터(JSON) 등을 함께 반입하여 검증합니다.
+   - 새로운 패턴 대응 코드를 도입할 때는 해당 모듈(`extract_metadata.py`)과 테스트 데이터(JSON) 등을 함께 반입하여 검증합니다.
 
 8. **옵션 기반 실행**
    - 크론/작업 스케줄러를 사용할 경우, 외부 접근이 차단된 환경에서도 `python run_pipeline.py --log-file logs/pipeline.log` 방식으로 실행 로그를 남길 수 있습니다.
    - 네트워크 부하를 최소화하기 위해 야간이나 업무 외 시간에 실행하는 것을 권장합니다.
 
 **자동 처리 과정:**
-1. `fss_scraper.py`: 전체 페이지 스크래핑, PDF 다운로드 및 텍스트 추출 (OCR 포함)
-2. `extract_sanctions.py`: 제재대상/제재내용 추출 (패턴 인식)
-3. `post_process_ocr.py` (자동 실행): OCR 오류 자동 수정 및 품질 검증
-4. `ocr_failed_items.py` (선택): 이미지 PDF 등 추가 재처리
-5. `run_pipeline.py`: 위 단계를 순서대로 실행하고 추출 성공률 통계를 출력
+1. `fss_scraper_v2.py`: 전체 페이지 스크래핑, PDF 다운로드 및 텍스트 추출 (V3 하이브리드 OCR 포함), 메타데이터 추출
+2. `post_process_ocr.py`: OCR 오류 자동 수정 및 품질 검증
+3. `ocr_failed_items.py` (선택): 이미지 PDF 등 추가 재처리
+4. `run_pipeline.py`: 위 단계를 순서대로 실행하고 추출 성공률 통계를 출력
 
-### 방법 2: URL 수정하여 특정 기간만 스크래핑
+### 방법 2: 명령줄 옵션으로 특정 기간만 스크래핑
 
-`fss_scraper.py` 파일에서 `base_url` 수정:
+`run_pipeline.py` 또는 `fss_scraper_v2.py`에서 `--sdate`, `--edate` 옵션 사용:
+
+```bash
+python run_pipeline.py --sdate 2025-01-01 --edate 2025-12-31 --limit 10
+```
+
+또는 `fss_scraper_v2.py` 파일에서 직접 실행:
 
 ```python
 # 예: 2025년 1월 1일부터 오늘까지
@@ -274,21 +283,20 @@ python ocr_failed_items.py
 - CSV: `encoding='utf-8-sig'` 사용 (BOM 포함)
 
 ### 패턴 인식 실패
-1. `extract_sanctions.py`에 새로운 패턴 추가
+1. `extract_metadata.py`에 새로운 패턴 추가
 2. 정규표현식 수정
 3. 테스트 후 전체 재실행
 
 ## 유지보수 체크리스트
 
 ### 신규 항목 추가 시
-- [ ] `fss_scraper.py` 실행
-- [ ] `extract_sanctions.py` 실행
+- [ ] `run_pipeline.py` 실행 (또는 `fss_scraper_v2.py` 실행)
 - [ ] 결과 CSV 파일 확인
 - [ ] 특이 케이스 수동 검토
 
 ### 패턴 업데이트 시
 - [ ] 새로운 패턴 확인
-- [ ] `extract_sanctions.py`에 패턴 추가
+- [ ] `extract_metadata.py`에 패턴 추가
 - [ ] 테스트 항목으로 검증
 - [ ] 전체 데이터 재추출
 

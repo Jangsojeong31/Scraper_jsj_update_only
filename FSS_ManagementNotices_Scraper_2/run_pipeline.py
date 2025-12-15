@@ -1,12 +1,9 @@
-try:
-    sys.stdout.reconfigure(encoding='utf-8')
-except Exception:
-    pass
 import argparse
 import json
 import subprocess
 import sys
 import os
+import io
 from pathlib import Path
 from datetime import datetime
 
@@ -18,12 +15,7 @@ _log_file_handle = None
 
 def log(message: str = "") -> None:
     if message:
-        try:
-            print(message)
-        except UnicodeEncodeError:
-            encoding = sys.stdout.encoding or 'utf-8'
-            safe_message = message.encode(encoding, errors='replace').decode(encoding, errors='replace')
-            print(safe_message)
+        print(message)
     else:
         print()
     if _log_file_handle:
@@ -41,10 +33,15 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
     if extra_args:
         cmd.extend(extra_args)
     
+    # 실시간 출력을 위해 Popen 사용 (인코딩 오류 방지)
+    # Windows에서 인코딩 오류를 방지하기 위해 환경 변수 설정
     env = os.environ.copy()
     env['PYTHONIOENCODING'] = 'utf-8'
-    env['PYTHONUTF8'] = '1'
+    env['PYTHONUTF8'] = '1'  # Python 3.7+ UTF-8 모드
     
+    # subprocess를 실행할 때 인코딩 오류를 방지하기 위해
+    # stdout을 직접 읽지 않고 communicate() 사용하거나
+    # 더 안전한 방법으로 처리
     try:
         process = subprocess.Popen(
             cmd,
@@ -56,27 +53,34 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
             env=env,
         )
         
+        # 실시간으로 출력 읽기 (bytes를 직접 읽어서 안전하게 디코딩)
+        # _readerthread 오류를 방지하기 위해 직접 읽기
         buffer = b''
         while True:
-            chunk = process.stdout.read(8192)
+            chunk = process.stdout.read(8192)  # 8KB씩 읽기
             if not chunk:
                 break
             
             buffer += chunk
             
+            # 줄 단위로 분리하여 처리
             while b'\n' in buffer:
                 line_bytes, buffer = buffer.split(b'\n', 1)
                 try:
+                    # UTF-8로 디코딩 시도
                     line = line_bytes.decode('utf-8', errors='replace').rstrip('\r')
                 except Exception:
+                    # 실패 시 cp949로 시도
                     try:
                         line = line_bytes.decode('cp949', errors='replace').rstrip('\r')
                     except Exception:
+                        # 둘 다 실패하면 replace로 처리
                         line = line_bytes.decode('utf-8', errors='replace').rstrip('\r')
                 
-                if line:
+                if line:  # 빈 줄은 제외
                     log(f"  {line}")
         
+        # 남은 버퍼 처리
         if buffer:
             try:
                 line = buffer.decode('utf-8', errors='replace').rstrip('\r')
@@ -86,6 +90,7 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
                 pass
                 
     except Exception as e:
+        # subprocess 실행 오류
         log(f"  [subprocess 실행 오류: {e}]")
         raise
     
@@ -110,31 +115,31 @@ def print_stats(json_path: Path) -> None:
     def has_value(value: str) -> bool:
         return bool(value and value.strip() and value.strip() != '-')
 
-    title_ok = sum(1 for item in data if has_value(item.get('제목', '')))
-    content_ok = sum(1 for item in data if has_value(item.get('내용', '')))
+    # fss_scraper_v2.py 구조에 맞게 필드명 확인
+    # 제재내용 필드 확인
     sanction_ok = sum(1 for item in data if has_value(item.get('제재내용', '')))
-    all_ok = sum(1 for item in data if has_value(item.get('제목', '')) and has_value(item.get('내용', '')) and has_value(item.get('제재내용', '')))
 
     def to_pct(count: int) -> str:
         return f"{count} / {total} ({count / total * 100:.1f}%)"
 
-    log("\n[통계] 제목/내용/제재내용 추출 현황")
-    log(f" - 제목 추출 성공: {to_pct(title_ok)}")
-    log(f" - 내용 추출 성공: {to_pct(content_ok)}")
+    log("\n[통계] 제재내용 추출 현황")
     log(f" - 제재내용 추출 성공: {to_pct(sanction_ok)}")
-    log(f" - 모두 추출 성공: {to_pct(all_ok)}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="금감원 경영유의사항 공시 스크래핑 전체 파이프라인")
+    # 기본 검색 종료일: 오늘 날짜
+    today = datetime.now()
+    default_edate = today.strftime('%Y-%m-%d')
+    
+    parser = argparse.ArgumentParser(description="금감원 제재조치 현황 스크래핑 전체 파이프라인")
     parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
     parser.add_argument('--skip-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 생략')
     parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
-    parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (append 모드)')
-    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수')
-    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD)')
-    parser.add_argument('--edate', type=str, default=None, help='검색 종료일 (형식: YYYY-MM-DD)')
-    parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD)')
+    parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
+    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
+    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
+    parser.add_argument('--edate', type=str, default=default_edate, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
+    parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
     args = parser.parse_args()
 
     json_path = ROOT_DIR / 'fss_results.json'
@@ -170,7 +175,8 @@ def main() -> None:
         else:
             log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
 
-        run_step('extract_sanctions_v2.py', '2. 제재내용 보완 (OCR 후처리 포함)')
+        # OCR 후처리 실행 (V3 OCR로 추출된 제재내용 후처리)
+        run_step('post_process_ocr.py', '2. OCR 후처리')
 
         ocr_retry_script = ROOT_DIR / 'ocr_failed_items.py'
         if not args.skip_ocr_retry and ocr_retry_script.exists():
@@ -195,4 +201,6 @@ if __name__ == '__main__':
     except Exception as exc:
         log(f"\n[오류] {exc}")
         sys.exit(1)
+
+
 

@@ -288,9 +288,11 @@ def extract_incidents(content):
             # 다음 "가.", "나." 등이 나오면 중단 (새 사건)
             # OCR 텍스트를 위해 점 앞뒤 공백 허용
             if re.match(r'^[가-하]\s*\.\s*', line):
+                i += 1
                 continue  # 위에서 처리됨
             # "(1)", "(2)" 등이 줄 시작에 나오면 중단 (새 사건)
             if re.match(r'^[\(（]\d+[\)）]\s*', line) or re.match(r'^[\u2474-\u247C]', line):
+                i += 1
                 continue  # 위에서 처리됨
             
             current_content.append(line)

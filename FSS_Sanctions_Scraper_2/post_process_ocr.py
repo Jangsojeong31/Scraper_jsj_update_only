@@ -1,6 +1,7 @@
 """
-OCR 후처리 모듈
-OCR로 추출된 텍스트의 오류를 수정하고 품질을 개선
+OCR 후처리 및 누락필드 계산 모듈
+- OCR 추출된 항목의 제재내용, 제목, 내용 후처리
+- 누락필드 계산 및 파일 저장
 """
 import json
 import re
@@ -30,35 +31,31 @@ def collapse_split_syllables(text: str) -> str:
     
     예: "기 관 과 태 료" -> "기관과태료" (OCR 오류)
     예: "기관 과 태료" -> "기관 과 태료" (정상 띄어쓰기 보존)
-    
-    패턴: 연속된 한글 음절 사이에 공백이 있는 경우만 제거
     """
     if not text:
         return text
     
-    # 연속된 한글 음절 사이의 공백만 제거 (OCR 오류)
     result = split_syllable_pattern.sub(lambda m: m.group(0).replace(' ', ''), text)
-    
     return result
 
 
 def clean_ocr_artifacts(text):
-    """OCR 인공물 제거 (개선된 버전)"""
+    """OCR 인공물 제거 (v3 - v2의 정교한 버전 + v1의 기본 로직)"""
     if not text:
         return text
     
-    # 1. 특수문자 정규화 (먼저 처리)
+    # 1. 특수문자 정규화
     text = text.replace('ㆍ', '·')
     text = text.replace('，', ',')
     text = text.replace('。', '.')
     text = text.replace('、', ',')
     
-    # 2. "_ ｜ -" 패턴 제거 (다양한 변형 포함)
+    # 2. "_ ｜ -" 패턴 제거 (v2의 정교한 패턴)
     text = re.sub(r'_\s*[｜\|ㅣ]\s*-\s*', '', text)
-    text = re.sub(r'_\s*[｜\|ㅣ]\s*', '', text)  # 뒤에 - 없이도 제거
-    text = re.sub(r'_\s*[，,]\s*', '', text)  # "_ ，" 패턴 제거
+    text = re.sub(r'_\s*[｜\|ㅣ]\s*', '', text)
+    text = re.sub(r'_\s*[，,]\s*', '', text)
     
-    # 3. 한글 오인식 보정
+    # 3. 한글 오인식 보정 (v2의 확장된 목록)
     ocr_corrections = {
         '되직자': '퇴직자',
         '줌법': '준법',
@@ -67,14 +64,17 @@ def clean_ocr_artifacts(text):
         '줌법감시인': '준법감시인',
         '과리료': '과태료',
         '제제내용': '제재내용',
+        '오혐설계사': '보험설계사',
+        '로혐설계사': '보험설계사',
+        '견무정지': '업무정지',
     }
     for wrong, correct in ocr_corrections.items():
         text = text.replace(wrong, correct)
     
-    # 4. 숫자-한글 사이 공백 제거 (예: "24 백만원" -> "24백만원")
+    # 4. 숫자-한글 사이 공백 제거
     text = re.sub(r'(?<=\d)\s+(?=[가-힣])', '', text)
     
-    # 5. 한글 글자 사이 공백 제거 (일반적인 단어 패턴)
+    # 5. 한글 글자 사이 공백 제거 (v2의 확장된 패턴)
     text = re.sub(r'등\s+록\s+취\s+소', '등록취소', text)
     text = re.sub(r'업\s+무\s+정\s+지', '업무정지', text)
     text = re.sub(r'과\s+태\s+료', '과태료', text)
@@ -95,32 +95,89 @@ def clean_ocr_artifacts(text):
     text = re.sub(r'위\s+법', '위법', text)
     text = re.sub(r'부\s+당', '부당', text)
     text = re.sub(r'사\s+항', '사항', text)
+    text = re.sub(r'보\s+험\s+설\s+계\s+사', '보험설계사', text)
     
     # 6. 고립된 문자 제거
     text = re.sub(r'\bㅣ\b', '', text)
     text = re.sub(r'\b\|\b(?![가-힣])', '', text)
     text = text.replace('`', '')
     
-    # 7. 숫자 오인식 보정 (연속된 0이 3개 이상인 경우)
+    # 7. 숫자 오인식 보정
     text = re.sub(r'\b0{3,}\b', '', text)
     
-    # 8. 과도한 공백 정리 (3개 이상 → 1개, 단 띄어쓰기는 보존)
+    # 8. 과도한 공백 정리
     text = re.sub(r' {3,}', ' ', text)
     
     # 9. 앞쪽 불필요한 하이픈/점 제거
     text = text.lstrip('- ').lstrip('·').lstrip('- ')
     text = text.lstrip('. ')
     
-    # 10. "ㅇ" 단독 문자 제거 (OCR 오류로 생성된 경우)
+    # 10. "ㅇ" 단독 문자 제거
     text = re.sub(r'\bㅇ\b(?=\s)', '', text)
     text = re.sub(r'(?<=\s)\bㅇ\b', '', text)
 
     return text.strip()
 
 
+def remove_all_whitespace(text: str) -> str:
+    """문자열의 모든 공백 문자 제거"""
+    if text is None:
+        return text
+    return re.sub(r'\s+', '', text)
+
+
+def add_particle_spacing(text: str) -> str:
+    """지정된 조사/어미 뒤에 공백을 강제 추가하여 가독성 확보"""
+    if text is None:
+        return text
+    
+    # 긴 토큰을 먼저 처리하여 중첩 매칭 방지
+    particles = ['하여', '및', '록', '면', '다', '터', '의', '음', '는', '은', '를', '을', '에']
+    for token in particles:
+        # 조사/어미 바로 뒤에 공백이 없으면 공백 추가
+        text = re.sub(rf'({re.escape(token)})(?=\S)', r'\1 ', text)
+    return text
+
+
+def wrap_related_sections(text: str) -> str:
+    """'관련법규', '관련규정' 앞에 줄바꿈을 넣고 <>로 감싸서 구분"""
+    if text is None:
+        return text
+    
+    def _wrap(match: re.Match) -> str:
+        word = match.group(1)
+        prefix = '\n' if match.start() != 0 else ''
+        return f"{prefix}<{word}>"
+    
+    return re.sub(r'(관련법규|관련규정)', _wrap, text)
+
+
+def clean_content_symbols(text: str) -> str:
+    """내용 필드에서 불필요한 기호 및 공백 제거"""
+    if text is None:
+        return text
+    # 지정된 불필요 기호 제거
+    text = re.sub(r'[\[\],0]', '', text)
+    # 연속 기호(문자·숫자·한글이 아닌 문자) → 단일 언더스코어
+    text = re.sub(r'[^0-9A-Za-z가-힣\s]+', '_', text)
+    
+    # 1차로 모든 공백 제거
+    text = remove_all_whitespace(text)
+    
+    # '관련법규'/'관련규정'을 줄바꿈 + <>로 강조
+    text = wrap_related_sections(text)
+    
+    # 조사/어미 뒤에 띄어쓰기 강제
+    text = add_particle_spacing(text)
+    
+    # 과도한 공백 정리
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    return text
+
+
 def process_ocr_text(text, preserve_spacing=False):
     """
-    OCR 텍스트 후처리
+    OCR 텍스트 후처리 (v3)
     
     Args:
         text: OCR로 추출된 텍스트
@@ -143,7 +200,7 @@ def process_ocr_text(text, preserve_spacing=False):
 
 
 def main():
-    """OCR 후처리 메인 함수"""
+    """OCR 후처리 및 누락필드 계산 메인 함수"""
     print("=" * 100)
     print("OCR 후처리 및 품질 개선")
     print("=" * 100)
@@ -159,7 +216,7 @@ def main():
     
     print(f"\n총 {len(data)}개 항목 로드")
     
-    # OCR 추출된 항목만 후처리
+    # OCR 추출된 항목만 후처리 및 누락필드 계산
     processed_count = 0
     for item in data:
         is_ocr = item.get('OCR추출여부') == '예'
@@ -170,12 +227,24 @@ def main():
                 item['제재내용'] = process_ocr_text(item['제재내용'], preserve_spacing=True)
             
             if item.get('제목'):
-                item['제목'] = process_ocr_text(item['제목'], preserve_spacing=True)
+                title = process_ocr_text(item['제목'], preserve_spacing=True)
+                item['제목'] = remove_all_whitespace(title)
             
             if item.get('내용'):
-                item['내용'] = process_ocr_text(item['내용'], preserve_spacing=True)
+                content = process_ocr_text(item['내용'], preserve_spacing=True)
+                item['내용'] = clean_content_symbols(content)
             
             processed_count += 1
+        
+        # 누락필드 계산 (모든 항목에 대해)
+        missing_fields = []
+        if not item.get('제재내용') or str(item.get('제재내용', '')).strip() in ['', '-']:
+            missing_fields.append('제재내용')
+        if not item.get('제목') or str(item.get('제목', '')).strip() in ['', '-']:
+            missing_fields.append('제목')
+        if not item.get('내용') or str(item.get('내용', '')).strip() in ['', '-']:
+            missing_fields.append('내용')
+        item['누락필드'] = ','.join(missing_fields) if missing_fields else ''
     
     print(f"\nOCR 추출 항목 {processed_count}개 후처리 완료")
     
@@ -189,7 +258,7 @@ def main():
         
         # CSV 재생성
         csv_filename = 'fss_results.csv'
-        base_fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', 
+        base_fieldnames = ['번호', '구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', 
                           '제재조치일', '파일다운로드URL', 'OCR추출여부', '누락필드']
         
         csv_rows = []
@@ -213,4 +282,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

@@ -175,7 +175,7 @@ def main() -> None:
         else:
             log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
 
-        # OCR 후처리 실행 (extract_metadata_ocr.py에서 추출된 제재내용 후처리)
+        # OCR 후처리 실행 (V3 OCR로 추출된 제재내용 후처리)
         run_step('post_process_ocr.py', '2. OCR 후처리')
 
         ocr_retry_script = ROOT_DIR / 'ocr_failed_items.py'

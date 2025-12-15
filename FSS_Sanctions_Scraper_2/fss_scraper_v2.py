@@ -1,8 +1,11 @@
 """
-금융감독원(FSS) 경영유의사항 공시 스크래퍼 v2
+금융감독원(FSS) 제재조치 현황 스크래퍼 v2
 - common/file_extractor.py의 FileExtractor를 사용하여 PDF 추출
-- KoFIU_Scraper/extract_metadata.py의 함수들을 재사용 (패턴 변경: 3. 조치내용, 4. 조치대상사실)
-- OCR 기능 포함 (텍스트 추출 실패 시 폴백)
+- extract_metadata.py의 함수들을 사용하여 메타데이터 추출
+- OCR 기능: V3 하이브리드 (표/문단 자동 감지) 사용
+  * 표 형식: v2 방식 (500 DPI, 강한 전처리)
+  * 문단 형식: v1 방식 (300 DPI, 최소 전처리)
+- OCR 결과는 V3 post_process로 후처리
 """
 import requests
 from bs4 import BeautifulSoup
@@ -12,7 +15,6 @@ import time
 import re
 import argparse
 import csv
-import io
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from pathlib import Path
@@ -33,177 +35,28 @@ if platform.system() == 'Windows':
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
 
-# OCR 추출 모듈 import
+# OCR 추출 모듈 import (V3 하이브리드)
 from ocr_extractor import OCRExtractor
 
-# KoFIU_Scraper의 extract_metadata 모듈에서 함수 import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'KoFIU_Scraper'))
-from extract_metadata import (
-    extract_metadata_from_content as extract_metadata_from_content_normal,
-    extract_sanction_details as extract_sanction_details_base,
-    extract_incidents as extract_incidents_base
-)
+# OCR 후처리 모듈 import
+from post_process_ocr import process_ocr_text
 
-# OCR 전용 extract_metadata 모듈 import
-try:
-    from extract_metadata_ocr import (
-        extract_metadata_from_content as extract_metadata_from_content_ocr,
-        extract_sanction_details as extract_sanction_details_ocr_base,
-        extract_incidents as extract_incidents_ocr_base
-    )
-    OCR_MODULE_AVAILABLE = True
-except ImportError:
-    OCR_MODULE_AVAILABLE = False
-    # OCR 모듈이 없으면 일반 함수를 사용
-    extract_metadata_from_content_ocr = extract_metadata_from_content_normal
-    extract_sanction_details_ocr_base = extract_sanction_details_base
-    extract_incidents_ocr_base = extract_incidents_base
+# 같은 폴더 내 extract_metadata 모듈에서 함수 import
+from extract_metadata import (
+    extract_metadata_from_content,
+    extract_sanction_details,
+    extract_incidents
+)
 
 sys.stdout.reconfigure(encoding='utf-8')
 
 
-# ManagementNotices 전용 패턴으로 래핑
-def extract_sanction_details_management(content):
-    """
-    경영유의사항용 제재내용 추출 (3. 조치내용 패턴 우선)
-    """
-    if not content or content.startswith('['):
-        return ""
-    
-    # 3. 조치내용 패턴을 우선으로 검색
-    sanction_patterns = [
-        # "3. 조치내용" 형식 (우선)
-        r'3\.\s*조\s*치\s*내\s*용',
-        r'3\.\s*조치내용',
-        r'3\.\s*조치\s*내용',
-        r'3\s*\.\s*조\s*치\s*내\s*용',
-        # "3. 제재조치내용" 형식
-        r'3\.\s*제\s*재\s*조\s*치\s*내\s*용',
-        r'3\.\s*제재조치내용',
-        r'3\.\s*제재조치\s*내용',
-        # "3. 제재내용" 형식
-        r'3\.\s*제\s*재\s*내\s*용',
-        r'3\.\s*제재내용',
-        r'3\.\s*제재\s*내용',
-        # "3. 처분내용" 형식
-        r'3\.\s*처\s*분\s*내\s*용',
-        r'3\.\s*처분내용',
-        r'3\.\s*처분\s*내용',
-    ]
-    
-    start_pos = None
-    for pattern in sanction_patterns:
-        match = re.search(pattern, content)
-        if match:
-            start_pos = match.end()
-            break
-    
-    if start_pos is None:
-        return ""
-    
-    # 다음 항목(4. 로 시작) 또는 문서 끝까지의 내용 추출
-    remaining_content = content[start_pos:]
-    
-    # 다음 번호 항목(4., 5. 등) 찾기
-    next_section_match = re.search(r'\n\s*[4-9]\.\s*[가-힣]', remaining_content)
-    if next_section_match:
-        table_content = remaining_content[:next_section_match.start()]
-    else:
-        table_content = remaining_content
-    
-    # 표 데이터 파싱: 줄바꿈으로 분리
-    lines = table_content.strip().split('\n')
-    
-    # 빈 줄 및 공백만 있는 줄 제거
-    lines = [line.strip() for line in lines if line.strip()]
-    
-    if len(lines) <= 1:
-        # 제목행만 있거나 데이터가 없는 경우
-        return ""
-    
-    # 첫 번째 줄(제목행) 제외하고 나머지 반환
-    data_lines = lines[1:]
-    
-    # 데이터 행들을 줄바꿈으로 연결
-    result = '\n'.join(data_lines)
-    
-    # "*조치사유", "*제재사유" 등 표 이후 텍스트 제거
-    reason_patterns = [
-        r'\*?\s*조\s*치\s*사\s*유',
-        r'\*?\s*제\s*재\s*사\s*유',
-        r'\*?\s*조\s*치\s*대\s*상\s*사\s*실',
-        r'\*?\s*제\s*재\s*대\s*상\s*사\s*실',
-    ]
-    for pattern in reason_patterns:
-        reason_match = re.search(pattern, result)
-        if reason_match:
-            result = result[:reason_match.start()].strip()
-            break
-    
-    # 페이지 번호 제거
-    from extract_metadata import remove_page_numbers
-    result = remove_page_numbers(result)
-    
-    return result.strip()
-
-
-def extract_incidents_management(content):
-    """
-    경영유의사항용 사건 추출 (4. 조치대상사실 패턴 우선)
-    extract_incidents_base를 재사용하되, 패턴 우선순위 조정
-    """
-    if not content or content.startswith('['):
-        return {}
-    
-    # OCR 텍스트 전처리: OCR 오류만 수정 (정상 띄어쓰기는 보존)
-    # extract_metadata의 collapse_split_syllables는 OCR 오류만 수정하므로 사용
-    # 하지만 여기서는 원본을 그대로 사용하여 띄어쓰기 보존
-    # content = collapse_split_syllables(content)  # 띄어쓰기 보존을 위해 주석 처리
-    
-    # 4. 조치대상사실 패턴을 우선으로 검색하여 섹션 시작 위치 찾기
-    section4_patterns = [
-        # "4. 조치대상사실" 형식 (우선)
-        r'4\.\s*조\s*치\s*대\s*상\s*사\s*실',
-        r'4\.\s*조치대상사실',
-        r'4\.\s*조치대상\s*사실',
-        # "4. 제재대상사실" 형식 (fallback)
-        r'4\.\s*제\s*재\s*대\s*상\s*사\s*실',
-        r'4\.\s*제재대상사실',
-        r'4\.\s*제재대상\s*사실',
-    ]
-    
-    section_start = -1
-    for pattern in section4_patterns:
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            section_start = match.end()
-            break
-    
-    if section_start == -1:
-        # 패턴을 찾지 못하면 기본 함수 사용
-        return extract_incidents_base(content)
-    
-    # 4번 항목 이후의 내용만 추출
-    section_text = content[section_start:]
-    
-    # 다음 번호 항목(5., 6. 등) 또는 문서 끝까지
-    next_section_match = re.search(r'\n\s*[5-9]\.\s*[가-힣]', section_text)
-    if next_section_match:
-        section_text = section_text[:next_section_match.start()]
-    
-    # 섹션 시작 부분에 "4. 조치대상사실"을 추가하여 기본 함수가 정상 작동하도록
-    processed_content = "4. 조치대상사실\n" + section_text
-    
-    # 기본 함수 호출
-    return extract_incidents_base(processed_content)
-
-
-class FSSManagementNoticesScraperV2:
-    """금융감독원 경영유의사항 공시 스크래퍼 (FileExtractor 사용)"""
+class FSSScraperV2:
+    """금융감독원 제재조치 현황 스크래퍼 (FileExtractor 사용)"""
     
     def __init__(self):
         self.base_url = "https://www.fss.or.kr"
-        self.list_url_template = "https://www.fss.or.kr/fss/job/openInfoImpr/list.do?menuNo=200483&pageIndex={page}&sdate={sdate}&edate={edate}&searchCnd=4&searchWrd="
+        self.list_url_template = "https://www.fss.or.kr/fss/job/openInfo/list.do?menuNo=200476&pageIndex={page}&sdate={sdate}&edate={edate}&searchCnd=4&searchWrd="
         
         # requests 세션 설정
         self.session = requests.Session()
@@ -226,107 +79,9 @@ class FSSManagementNoticesScraperV2:
         # 업종 분류 매핑 로드
         self.industry_map = self._load_industry_classification()
         
-        # OCR 관련 초기화
+        # OCR 추출기 초기화
+        self.ocr_extractor = OCRExtractor()
         self.min_text_length = 200  # 최소 텍스트 길이 (미만이면 OCR 시도)
-        self.ocr_initialized = False
-        self.ocr_available = False
-    
-    def _initialize_ocr(self):
-        """OCR 초기화 (Tesseract 경로 설정)"""
-        if self.ocr_initialized:
-            return
-        self.ocr_initialized = True
-        
-        if not PYMUPDF_AVAILABLE or not PYTESSERACT_AVAILABLE:
-            print("  ※ OCR 모듈(PyMuPDF, pytesseract, Pillow) 중 일부가 설치되어 있지 않아 OCR을 사용할 수 없습니다.")
-            self.ocr_available = False
-            return
-        
-        # Windows에서 Tesseract 경로 찾기
-        tesseract_paths = [
-            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-            r'C:\Users\USER\AppData\Local\Tesseract-OCR\tesseract.exe',
-            r'C:\Users\USER\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
-        ]
-        
-        for path in tesseract_paths:
-            if os.path.exists(path):
-                pytesseract.pytesseract.tesseract_cmd = path
-                self.ocr_available = True
-                print(f"  OCR 사용 준비 완료 (Tesseract 경로: {path})")
-                return
-        
-        print("  ※ Tesseract 실행 파일을 찾을 수 없어 OCR을 사용할 수 없습니다.")
-        self.ocr_available = False
-    
-    def _ocr_pdf(self, file_path):
-        """OCR을 사용하여 PDF에서 텍스트 추출 (이미지 기반 PDF용)"""
-        if not self.ocr_available:
-            return None
-        
-        try:
-            print(f"  OCR 추출 시도 중...")
-            doc = fitz.open(str(file_path))
-            texts = []
-            
-            for page_num, page in enumerate(doc):
-                # 페이지를 이미지로 변환 (400 DPI - 해상도 증가로 정확도 향상)
-                mat = fitz.Matrix(400 / 72, 400 / 72)
-                pix = page.get_pixmap(matrix=mat)
-                img_data = pix.tobytes("png")
-                image = Image.open(io.BytesIO(img_data)).convert('L')
-                
-                # 이미지 전처리: 대비 향상 (보수적 접근)
-                from PIL import ImageEnhance
-                enhancer = ImageEnhance.Contrast(image)
-                image = enhancer.enhance(1.2)  # 대비 20% 증가
-                
-                # 여러 OCR 설정 시도 (더 다양한 PSM 모드 추가)
-                configs = [
-                    ('kor+eng', '--oem 3 --psm 6'),   # 단일 블록
-                    ('kor+eng', '--oem 3 --psm 4'),   # 단일 컬럼
-                    ('kor+eng', '--oem 3 --psm 11'),  # 희미한 텍스트
-                    ('kor', '--oem 3 --psm 6'),
-                    ('kor', '--oem 3 --psm 4'),
-                    ('kor', '--oem 3 --psm 11'),
-                ]
-                
-                best_text = ''
-                best_score = 0
-                
-                for lang, cfg in configs:
-                    try:
-                        candidate = pytesseract.image_to_string(image, lang=lang, config=cfg)
-                        if candidate:
-                            # 결과 품질 평가: 한글 문자 비율과 길이를 고려
-                            korean_chars = sum(1 for c in candidate if '\uAC00' <= c <= '\uD7A3')
-                            total_chars = len(candidate.replace(' ', '').replace('\n', ''))
-                            korean_ratio = korean_chars / total_chars if total_chars > 0 else 0
-                            
-                            # 점수: 길이 + 한글 비율 가중치
-                            score = len(candidate) + (korean_ratio * 1000)
-                            
-                            if score > best_score:
-                                best_text = candidate
-                                best_score = score
-                    except Exception:
-                        continue
-                
-                if best_text:
-                    texts.append(best_text)
-                    print(f"    페이지 {page_num + 1}: {len(best_text)}자 추출")
-            
-            doc.close()
-            
-            full_text = '\n'.join(t.strip() for t in texts if t).strip()
-            if full_text:
-                print(f"  ✓ OCR로 {len(full_text)}자 추출 완료")
-            return full_text if full_text else None
-            
-        except Exception as e:
-            print(f"  ✗ OCR 처리 중 오류: {e}")
-            return None
     
     def _load_industry_classification(self):
         """금융회사별 업종분류 CSV 파일 로드 (KoFIU_Scraper의 파일 사용)"""
@@ -340,13 +95,15 @@ class FSSManagementNoticesScraperV2:
             with open(csv_path, 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    company = row.get('금융회사명', '').strip()
+                    company_name = row.get('금융회사명', '').strip()
                     industry = row.get('업종', '').strip()
-                    if company and industry:
-                        industry_map[company] = industry
-            print(f"  업종 분류 매핑 로드 완료: {len(industry_map)}개")
+                    if company_name and industry:
+                        industry_map[company_name] = industry
+            print(f"  ✓ 업종분류 데이터 로드 완료: {len(industry_map)}개 회사")
+        except FileNotFoundError:
+            print(f"  ※ 업종분류 파일을 찾을 수 없습니다: {csv_path}")
         except Exception as e:
-            print(f"  업종 분류 CSV 로드 실패: {e}")
+            print(f"  ※ 업종분류 파일 로드 중 오류: {e}")
         
         return industry_map
     
@@ -383,50 +140,57 @@ class FSSManagementNoticesScraperV2:
         
         return '기타'
     
+    def close(self):
+        """리소스 정리"""
+        # 임시 파일 정리
+        try:
+            for file in self.temp_dir.iterdir():
+                file.unlink()
+            self.temp_dir.rmdir()
+            print("\n임시 파일 정리 완료")
+        except Exception:
+            pass
+
     def get_page(self, url, retry=3):
-        """페이지 가져오기 (재시도 로직 포함)"""
-        for attempt in range(retry):
+        """HTTP GET 요청 (재시도 로직 포함)"""
+        for i in range(retry):
             try:
                 response = self.session.get(url, timeout=30)
                 response.raise_for_status()
+                response.encoding = 'utf-8'
                 return response
             except Exception as e:
-                if attempt < retry - 1:
-                    wait_time = (attempt + 1) * 2
-                    print(f"  요청 실패 (재시도 {attempt + 1}/{retry}): {e}")
-                    time.sleep(wait_time)
+                print(f"페이지 로드 실패 (시도 {i+1}/{retry}): {e}")
+                if i < retry - 1:
+                    time.sleep(2)
                 else:
-                    print(f"  요청 최종 실패: {e}")
                     raise
-    
+        return None
+
     def is_pdf_url(self, url: str) -> bool:
-        """URL이 직접 PDF 파일인지 확인"""
+        """URL이 PDF 파일인지 확인"""
         if not url:
             return False
         parsed = urlparse(url)
         path = parsed.path.lower()
-        return path.endswith('.pdf') or 'file=' in parsed.query.lower()
-    
+        query = parsed.query.lower()
+        return path.endswith('.pdf') or '.pdf' in query
+
     def derive_filename(self, url: str, link_text: str = "") -> str:
-        """URL 또는 링크 텍스트에서 파일명 추출"""
+        """URL과 링크 텍스트에서 파일명 추출"""
         candidates = []
-        
-        if link_text and link_text.strip():
-            name = link_text.strip()
-            if name.lower().endswith('.pdf'):
-                candidates.append(name)
-        
+        if link_text and len(link_text.strip()) > 3:
+            candidates.append(link_text.strip())
+
         parsed = urlparse(url)
-        query_params = parse_qs(parsed.query)
-        
-        if 'file' in query_params:
-            file_param = query_params['file'][0]
-            candidates.append(unquote(file_param))
-        
+        query = parse_qs(parsed.query)
+        if 'file' in query and query['file']:
+            candidates.append(query['file'][0])
+
         path_name = parsed.path.split('/')[-1]
         if path_name:
             candidates.append(path_name)
-        
+
         for candidate in candidates:
             name = unquote(candidate).strip()
             if not name:
@@ -435,9 +199,9 @@ class FSSManagementNoticesScraperV2:
             if not name.lower().endswith('.pdf'):
                 name += '.pdf'
             return name
-        
+
         return f"attachment_{int(time.time()*1000)}.pdf"
-    
+
     def extract_attachment_content(self, detail_url, link_text=''):
         """
         첨부파일 내용 추출 (FileExtractor 사용)
@@ -466,14 +230,15 @@ class FSSManagementNoticesScraperV2:
                     doc_type = 'PDF-텍스트'
                     ocr_attempted = False
                     
-                    # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
+                    # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도 (V3 하이브리드)
                     if not content or len(content.strip()) < self.min_text_length:
                         if self.ocr_extractor.is_available():
                             ocr_attempted = True
-                            ocr_text = self.ocr_extractor.extract_text(file_path, self.min_text_length)
+                            # V3 하이브리드 OCR 사용 (auto 모드: 표/문단 자동 감지)
+                            ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
                             if ocr_text:
-                                # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
-                                content = ocr_text
+                                # OCR 결과 후처리 (V3 post_process 사용)
+                                content = process_ocr_text(ocr_text, preserve_spacing=True)
                                 doc_type = 'PDF-OCR'
                             else:
                                 print(f"  ✗ OCR 추출 실패 (결과 없음)")
@@ -497,14 +262,14 @@ class FSSManagementNoticesScraperV2:
             # 일반 페이지에서 첨부파일 링크 찾기
             response = self.get_page(detail_url)
             soup = BeautifulSoup(response.text, 'lxml')
-            
+
             all_links = soup.find_all('a', href=True)
             file_url = ''  # 파일 다운로드 URL 초기화
             
             for link in all_links:
                 href = link.get('href', '')
                 link_text_inner = link.get_text(strip=True)
-                
+
                 # PDF 파일 링크 찾기 (다양한 패턴)
                 if '/fss.hpdownload' in href or 'download' in href.lower() or '.pdf' in href.lower():
                     if href.startswith('/'):
@@ -513,14 +278,14 @@ class FSSManagementNoticesScraperV2:
                         file_url = href
                     else:
                         file_url = urljoin(detail_url, href)
-                    
+
                     filename = link_text_inner.strip()
                     if not filename or len(filename) < 3:
                         if 'file=' in href:
                             filename = unquote(href.split('file=')[-1].split('&')[0])
                         else:
                             filename = href.split('/')[-1].split('?')[0]
-                    
+
                     if not filename.lower().endswith('.pdf'):
                         # URL 파라미터에서 파일명 추출
                         if 'file=' in href:
@@ -528,9 +293,9 @@ class FSSManagementNoticesScraperV2:
                     
                     if not filename.lower().endswith('.pdf'):
                         continue
-                    
+
                     print(f"  첨부파일 발견: {filename}")
-                    
+
                     # FileExtractor로 파일 다운로드
                     file_path, actual_filename = self.file_extractor.download_file(
                         url=file_url,
@@ -544,17 +309,16 @@ class FSSManagementNoticesScraperV2:
                             doc_type = 'PDF-텍스트'
                             ocr_attempted = False
                             
-                            # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
+                            # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도 (V3 하이브리드)
                             if not content or len(content.strip()) < self.min_text_length:
-                                self._initialize_ocr()
-                                if self.ocr_available:
+                                if self.ocr_extractor.is_available():
                                     ocr_attempted = True
-                                    ocr_text = self._ocr_pdf(file_path)
+                                    # V3 하이브리드 OCR 사용 (auto 모드: 표/문단 자동 감지)
+                                    ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
                                     if ocr_text:
-                                        # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
-                                        content = ocr_text
+                                        # OCR 결과 후처리 (V3 post_process 사용)
+                                        content = process_ocr_text(ocr_text, preserve_spacing=True)
                                         doc_type = 'PDF-OCR'
-                                        print(f"  ✓ OCR로 추출 완료 ({len(ocr_text)}자)")
                                     else:
                                         print(f"  ✗ OCR 추출 실패 (결과 없음)")
                                 else:
@@ -579,15 +343,15 @@ class FSSManagementNoticesScraperV2:
                                 pass
                             return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_url
                     break
-            
+
             return "[첨부파일을 찾을 수 없습니다]", '첨부없음', ''
-            
+
         except Exception as e:
             print(f"  첨부파일 추출 중 오류: {e}")
             import traceback
             traceback.print_exc()
             return f"[오류: {str(e)}]", '오류', ''
-    
+
     def scrape_list_page(self, page_index, sdate='', edate=''):
         """목록 페이지 스크래핑"""
         url = self.list_url_template.format(page=page_index, sdate=sdate, edate=edate)
@@ -607,16 +371,17 @@ class FSSManagementNoticesScraperV2:
         
         for row in rows:
             cells = row.find_all(['td', 'th'])
-            if len(cells) < 5:  # ManagementNotices는 조회수가 없으므로 5개 셀
+            if len(cells) < 6:  # 6개 셀: 번호, 기관, 일자, 내용, 부서, 조회수
                 continue
             
             try:
-                # 번호, 제재대상기관, 제재조치요구일, 제재조치요구내용(링크), 관련부서
+                # 번호, 제재대상기관, 제재조치요구일, 제재조치요구내용(링크), 관련부서, 조회수
                 number = cells[0].get_text(strip=True)
                 institution = cells[1].get_text(strip=True)
                 date = cells[2].get_text(strip=True)
                 content_cell = cells[3]
                 department = cells[4].get_text(strip=True)
+                view_count = cells[5].get_text(strip=True) if len(cells) > 5 else ""
                 
                 # 링크 찾기
                 link = content_cell.find('a', href=True)
@@ -630,8 +395,7 @@ class FSSManagementNoticesScraperV2:
                     '번호': number,
                     '제재대상기관': institution,
                     '제재조치요구일': date,
-                    '관련부서': department,
-                    '조회수': '-',  # ManagementNotices는 조회수 없음
+                    '조회수': view_count,
                     '상세페이지URL': detail_url,
                     '_link_text': link_text
                 })
@@ -642,7 +406,7 @@ class FSSManagementNoticesScraperV2:
         
         print(f"  페이지 {page_index}: {len(items)}개 항목 발견")
         return items
-    
+
     def parse_date(self, date_str):
         """
         날짜 문자열을 datetime 객체로 변환
@@ -683,7 +447,7 @@ class FSSManagementNoticesScraperV2:
         
         # 변환 실패 시 원본 반환 (경고는 나중에 처리)
         return date_str
-    
+
     def scrape_all(self, limit=None, after_date=None, sdate='', edate=''):
         """
         전체 페이지 스크래핑
@@ -699,7 +463,7 @@ class FSSManagementNoticesScraperV2:
         edate_normalized = self.normalize_date_format(edate) if edate else ''
         
         print("=" * 60)
-        print("금융감독원 경영유의사항 공시 스크래핑 시작 (v2 - FileExtractor 사용)")
+        print("금융감독원 제재조치 현황 스크래핑 시작 (v2 - FileExtractor 사용)")
         if limit:
             print(f"  수집 제한: {limit}개")
         if after_date:
@@ -712,13 +476,13 @@ class FSSManagementNoticesScraperV2:
         
         # after_date 문자열을 datetime으로 변환
         after_datetime = self.parse_date(after_date) if after_date else None
-        
+
         all_items = []
         seen_urls = set()
         page = 1
         empty_pages = 0
         stop_by_date = False  # 날짜 기준 종료 플래그
-        
+
         while True:
             # limit에 도달하면 목록 수집 중단
             if limit and len(all_items) >= limit:
@@ -738,7 +502,7 @@ class FSSManagementNoticesScraperV2:
                     break
             else:
                 empty_pages = 0
-            
+
             new_items = []
             for item in items:
                 # limit 체크
@@ -763,7 +527,7 @@ class FSSManagementNoticesScraperV2:
                 if detail_url:
                     seen_urls.add(detail_url)
                 new_items.append(item)
-            
+
             if new_items:
                 all_items.extend(new_items)
             
@@ -777,9 +541,9 @@ class FSSManagementNoticesScraperV2:
             if page > 100:
                 print(f"\n최대 페이지 수(100)에 도달하여 수집을 종료합니다.")
                 break
-        
+
         print(f"\n총 {len(all_items)}개 항목 수집 완료")
-        
+
         print("\n상세 정보 및 첨부파일 추출 시작...")
         
         for idx, item in enumerate(all_items, 1):
@@ -802,20 +566,12 @@ class FSSManagementNoticesScraperV2:
                 item['OCR추출여부'] = '예' if is_ocr else '아니오'
                 
                 # PDF 내용에서 금융회사명, 제재조치일, 제재내용 추출
+                # V3: extract_metadata.py만 사용 (OCR/일반 텍스트 모두 동일한 함수 사용)
                 if attachment_content and not attachment_content.startswith('['):
-                    # OCR로 추출한 경우 OCR 전용 함수 사용
-                    
-                    if is_ocr and OCR_MODULE_AVAILABLE:
-                        extract_metadata_fn = extract_metadata_from_content_ocr
-                        extract_sanction_fn = extract_sanction_details_management  # ManagementNotices 전용
-                        extract_incidents_fn = extract_incidents_management  # ManagementNotices 전용
+                    if is_ocr:
                         print(f"  OCR 텍스트로 메타데이터 추출 중...")
-                    else:
-                        extract_metadata_fn = extract_metadata_from_content_normal
-                        extract_sanction_fn = extract_sanction_details_management  # ManagementNotices 전용
-                        extract_incidents_fn = extract_incidents_management  # ManagementNotices 전용
                     
-                    institution, sanction_date = extract_metadata_fn(attachment_content)
+                    institution, sanction_date = extract_metadata_from_content(attachment_content)
                     
                     # 금융회사명: PDF에서 추출 실패 시 목록에서 가져온 값 사용
                     if institution:
@@ -833,18 +589,36 @@ class FSSManagementNoticesScraperV2:
                         item['제재조치일'] = sanction_date
                         print(f"  제재조치일 추출: {sanction_date}")
                     
-                    # 제재내용 (표 데이터) 추출 - ManagementNotices 전용 함수 사용
-                    sanction_details = extract_sanction_fn(attachment_content)
-                    if sanction_details:
-                        item['제재내용'] = sanction_details
-                        print(f"  제재내용 추출: {len(sanction_details)}자")
+                    # 제재내용 (표 데이터) 추출
+                    try:
+                        sanction_details = extract_sanction_details(attachment_content)
+                        if sanction_details:
+                            item['제재내용'] = sanction_details
+                            print(f"  제재내용 추출: {len(sanction_details)}자")
+                        else:
+                            print(f"  제재내용 추출: 없음")
+                    except Exception as e:
+                        print(f"  ⚠ 제재내용 추출 중 오류 발생: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        item['제재내용'] = ''
                     
-                    # 사건 제목/내용 추출 (4번 항목) - ManagementNotices 전용 함수 사용
-                    incidents = extract_incidents_fn(attachment_content)
-                    if incidents:
-                        item.update(incidents)
-                        incident_count = len([k for k in incidents.keys() if k.startswith('제목')])
-                        print(f"  사건 추출: {incident_count}건")
+                    # 사건 제목/내용 추출 (4번 항목)
+                    try:
+                        print(f"  사건 제목/내용 추출 중...")
+                        incidents = extract_incidents(attachment_content)
+                        if incidents:
+                            item.update(incidents)
+                            incident_count = len([k for k in incidents.keys() if k.startswith('제목')])
+                            print(f"  사건 추출: {incident_count}건")
+                        else:
+                            print(f"  사건 추출: 없음")
+                    except Exception as e:
+                        print(f"  ⚠ 사건 추출 중 오류 발생: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # 오류가 발생해도 계속 진행
+                        incidents = {}
                 else:
                     # PDF 추출 실패 시 목록에서 가져온 정보 사용
                     if institution_from_list:
@@ -870,37 +644,20 @@ class FSSManagementNoticesScraperV2:
             # 업종 필드가 없는 경우 기타로 설정
             if '업종' not in item:
                 item['업종'] = '기타'
-            
+
             self.results.append(item)
             time.sleep(1)
-        
+
         # 리소스 정리
         self.close()
-        
+
         return self.results
-    
-    def close(self):
-        """리소스 정리"""
-        try:
-            if self.temp_dir.exists():
-                for file in self.temp_dir.iterdir():
-                    try:
-                        file.unlink()
-                    except:
-                        pass
-                try:
-                    self.temp_dir.rmdir()
-                except:
-                    pass
-        except:
-            pass
-    
+
     def _clean_content(self, text):
         """
-        텍스트에서 불필요한 줄바꿈만 제거 (띄어쓰기는 보존)
+        텍스트에서 불필요한 줄바꿈 제거
         - 특수 마커(ㅇ, □, -, (1) 등) 앞의 줄바꿈은 유지
-        - 그 외 줄바꿈은 공백으로 대체 (단, 원본 띄어쓰기는 보존)
-        - 연속된 줄바꿈만 처리하고 일반 공백은 그대로 유지
+        - 그 외 줄바꿈은 공백으로 대체
         """
         if not text:
             return text
@@ -926,23 +683,21 @@ class FSSManagementNoticesScraperV2:
                 placeholders[placeholder] = replacement
             result = re.sub(pattern, placeholder, result)
         
-        # 나머지 줄바꿈을 공백으로 대체 (단, 연속된 줄바꿈만 처리)
-        # 단일 줄바꿈은 공백으로, 연속된 줄바꿈은 하나의 공백으로
+        # 나머지 줄바꿈을 공백으로 대체
         result = re.sub(r'\n+', ' ', result)
         
         # 임시 토큰을 원래 마커로 복원
         for placeholder, replacement in placeholders.items():
             result = result.replace(placeholder, replacement)
         
-        # 연속된 공백은 정리하되, 원본에 있던 공백은 보존
-        # 단, 3개 이상 연속된 공백만 하나로 정리 (2개 공백은 보존)
-        result = re.sub(r' {3,}', ' ', result)
+        # 연속 공백 정리
+        result = re.sub(r' +', ' ', result)
         
         # 앞뒤 공백 제거
         result = result.strip()
         
         return result
-    
+
     def _split_incidents(self):
         """
         각 제재 건에서 사건들을 분리하여 개별 행으로 변환
@@ -953,13 +708,16 @@ class FSSManagementNoticesScraperV2:
         for item in self.results:
             # 기본 필드 추출 (줄바꿈 정리 적용)
             base_data = {
-                '구분': '경영유의',  # ManagementNotices 전용
+                '구분': '제재사례',
                 '출처': '금융감독원',
+                '번호': item.get('번호', ''),  # 번호 필드 추가
                 '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
                 '업종': item.get('업종', '기타'),
                 '제재조치일': item.get('제재조치일', item.get('제재조치요구일', '')),
                 '제재내용': item.get('제재내용', ''),  # 띄어쓰기 보존
+                '제재조치내용': item.get('제재조치내용', ''),  # 전체 내용 필드 추가
                 '파일다운로드URL': item.get('파일다운로드URL', ''),
+                '상세페이지URL': item.get('상세페이지URL', ''),  # 상세페이지URL 추가
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
             
@@ -989,7 +747,7 @@ class FSSManagementNoticesScraperV2:
                     })
         
         return split_results
-    
+
     def save_results(self, filename='fss_results.json'):
         """결과 저장 (JSON, CSV) - 루트 디렉토리에 저장"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1006,19 +764,19 @@ class FSSManagementNoticesScraperV2:
             json.dump(split_results, f, ensure_ascii=False, indent=2)
         print(f"\n결과가 {json_filepath}에 저장되었습니다.")
         print(f"  (원본: {len(self.results)}개 제재 건 -> 분리 후: {len(split_results)}개 사건)")
-        
+
         try:
             csv_filename = base_filename.replace('.json', '.csv')
             csv_filepath = os.path.join(script_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
-                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
-                
+                # 필드 순서: 번호, 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
+                fieldnames = ['번호', '구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
+
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                     writer.writeheader()
-                    
+
                     for item in split_results:
                         row = {}
                         for field in fieldnames:
@@ -1027,7 +785,7 @@ class FSSManagementNoticesScraperV2:
                                 value = ''
                             row[field] = str(value)
                         writer.writerow(row)
-                
+
                 print(f"CSV 파일도 {csv_filepath}에 저장되었습니다.")
         except Exception as e:
             print(f"CSV 저장 중 오류 (무시): {e}")
@@ -1039,27 +797,34 @@ if __name__ == "__main__":
     # 기본 검색 기간 설정 (오늘 날짜 기준)
     today = datetime.now()
     default_edate = today.strftime('%Y-%m-%d')
+    # 기본 시작일: 1년 전
+    default_sdate = (datetime(today.year - 1, today.month, today.day)).strftime('%Y-%m-%d')
     
-    parser = argparse.ArgumentParser(description="금융감독원 경영유의사항 공시 스크래퍼 v2")
-    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
-    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
-    parser.add_argument('--edate', type=str, default=default_edate, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
-    parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
-    parser.add_argument('--output', type=str, default='fss_results.json', help='출력 파일명 (기본: fss_results.json)')
+    parser = argparse.ArgumentParser(description='금융감독원(FSS) 제재조치 현황 스크래퍼')
+    parser.add_argument('--limit', type=int, default=None,
+                        help='수집할 최대 항목 수 (기본값: 전체 수집)')
+    parser.add_argument('--after', type=str, default='2024.03.30',
+                        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: 2024.03.30)')
+    parser.add_argument('--sdate', type=str, default=default_sdate,
+                        help=f'검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_sdate})')
+    parser.add_argument('--edate', type=str, default=default_edate,
+                        help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
+    parser.add_argument('--output', type=str, default='fss_results.json',
+                        help='출력 파일명 (기본값: fss_results.json)')
     
     args = parser.parse_args()
     
-    scraper = FSSManagementNoticesScraperV2()
+    scraper = FSSScraperV2()
     results = scraper.scrape_all(
-        limit=args.limit,
+        limit=args.limit, 
         after_date=args.after,
         sdate=args.sdate,
         edate=args.edate
     )
     scraper.save_results(filename=args.output)
-    
+
     print("\n" + "=" * 60)
     print("스크래핑 완료!")
-    print(f"총 {len(results)}개 데이터 수집")
+    print(f"총 {len(results)}개 제재 건 수집 (사건별로 분리되어 저장됨)")
     print("=" * 60)
 

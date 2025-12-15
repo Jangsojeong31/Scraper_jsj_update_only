@@ -140,7 +140,7 @@ def extract_sanction_details(content):
 def extract_incidents(content):
     """
     PDF 내용에서 4번 항목의 사건 제목/내용 추출
-    (extract_sanctions.py의 줄 단위 처리 방식 참고)
+    (줄 단위 처리 방식 사용)
     
     지원하는 형식:
     1. 가. 제목1 / 내용1, 나. 제목2 / 내용2 형태
@@ -157,7 +157,7 @@ def extract_incidents(content):
         return {}
     
     # 일반 텍스트 추출용이므로 collapse_split_syllables() 호출 제거
-    # (OCR 텍스트는 extract_metadata_ocr.py에서 처리)
+    # (OCR 텍스트는 V3 post_process_ocr.py에서 후처리됨)
     # content = collapse_split_syllables(content)  # 제거됨
     
     # 4번 항목 제목 패턴 (다양한 형태 지원)
@@ -211,7 +211,7 @@ def extract_incidents(content):
     else:
         section_text = remaining_content
     
-    # 줄 단위로 처리 (extract_sanctions.py 방식)
+    # 줄 단위로 처리
     lines = section_text.split('\n')
     
     incidents = {}
