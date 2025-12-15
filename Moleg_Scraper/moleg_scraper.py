@@ -682,7 +682,7 @@ class MolegScraper(BaseScraper):
     
     def scrape_all(self, max_pages: Optional[int] = None, max_items: Optional[int] = None,
                    start_date: Optional[date] = None, end_date: Optional[date] = None,
-                   since_last_scrape: bool = False) -> List[Dict]:
+                   skip_date_filter: bool = False) -> List[Dict]:
         """
         모든 입법예고 항목 스크래핑 (list.csv의 법령명으로 검색)
         
@@ -691,15 +691,15 @@ class MolegScraper(BaseScraper):
             max_items: 전체 최대 항목 수 (None이면 전체)
             start_date: 시작일자 (이 날짜 이후만 스크래핑)
             end_date: 종료일자 (이 날짜 이전만 스크래핑)
-            since_last_scrape: True이면 이전 스크래핑 이후 항목만 가져오기
+            skip_date_filter: True이면 마지막 날짜 필터를 무시하고 전체 스크래핑
             
         Returns:
             스크래핑된 항목 리스트
         """
         all_items = []
         
-        # 이전 스크래핑 이후만 가져오기 옵션
-        if since_last_scrape:
+        # 기본적으로 이전 스크래핑 이후만 가져오기 (skip_date_filter가 False인 경우)
+        if not skip_date_filter:
             last_date = self.get_last_scraped_date()
             if last_date:
                 if start_date is None or last_date > start_date:
@@ -707,6 +707,8 @@ class MolegScraper(BaseScraper):
                 print(f"이전 스크래핑 마지막 날짜: {last_date.strftime('%Y-%m-%d')} 이후 항목만 스크래핑합니다.")
             else:
                 print("이전 스크래핑 결과가 없어 전체 항목을 스크래핑합니다.")
+        else:
+            print("날짜 필터를 무시하고 전체 항목을 스크래핑합니다.")
         
         # 날짜 필터 정보 출력
         if start_date or end_date:
@@ -834,8 +836,8 @@ def main():
     parser.add_argument('--max-pages', type=int, help='각 법령당 최대 페이지 수')
     parser.add_argument('--start-date', type=str, help='시작일자 (YYYY-MM-DD 형식)')
     parser.add_argument('--end-date', type=str, help='종료일자 (YYYY-MM-DD 형식)')
-    parser.add_argument('--since-last', action='store_true', 
-                       help='이전 스크래핑 이후 항목만 가져오기')
+    parser.add_argument('--all', action='store_true', 
+                       help='마지막 날짜 필터를 무시하고 전체 항목 스크래핑')
     
     args = parser.parse_args()
     
@@ -859,29 +861,26 @@ def main():
             print(f"⚠ 종료일자 형식 오류: {args.end_date} (YYYY-MM-DD 형식 필요)")
     
     # 스크래핑 실행
-    if args.since_last:
-        print("이전 스크래핑 이후 항목만 스크래핑합니다.")
-        results = scraper.scrape_all(
-            max_items=args.max_items,
-            max_pages=args.max_pages,
-            start_date=start_date,
-            end_date=end_date,
-            since_last_scrape=True
-        )
-    elif args.max_items:
+    # 기본적으로 마지막 날짜 이후만 스크래핑 (--all 플래그가 있으면 전체 스크래핑)
+    skip_date_filter = args.all
+    
+    if args.max_items:
         print(f"테스트 모드: 처음 {args.max_items}개 항목만 스크래핑")
         results = scraper.scrape_all(
             max_items=args.max_items,
             max_pages=args.max_pages,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            skip_date_filter=skip_date_filter
         )
     else:
-        print("전체 항목 스크래핑")
+        if not skip_date_filter:
+            print("마지막 스크래핑 날짜 이후 항목만 스크래핑합니다.")
         results = scraper.scrape_all(
             max_pages=args.max_pages,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            skip_date_filter=skip_date_filter
         )
     
     print(f"\n=== 스크래핑 완료: {len(results)}개 항목 ===")

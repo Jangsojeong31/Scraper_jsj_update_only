@@ -39,13 +39,14 @@ from common.file_extractor import FileExtractor
 from data_scraper import extract_data_from_text, extract_dates_from_filename
 
 # ---------------- Selenium 다운로드 유틸 ----------------
-def init_selenium(download_dir: str, headless: bool = False) -> webdriver.Chrome:
+def init_selenium(download_dir: str, headless: bool = False, scraper=None) -> webdriver.Chrome:
     """
     Selenium 드라이버 초기화
     
     Args:
         download_dir: 다운로드 디렉토리 경로
         headless: 헤드리스 모드 사용 여부 (다운로드 시 False 권장)
+        scraper: BaseScraper 인스턴스 (폐쇄망 환경 대응을 위해 _create_webdriver 사용)
     """
     download_dir_abs = os.path.abspath(download_dir)
     os.makedirs(download_dir_abs, exist_ok=True)
@@ -70,7 +71,12 @@ def init_selenium(download_dir: str, headless: bool = False) -> webdriver.Chrome
         "profile.default_content_setting_values.automatic_downloads": 1
     }
     chrome_options.add_experimental_option("prefs", prefs)
-    driver = webdriver.Chrome(options=chrome_options)
+    
+    # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
+    if scraper and hasattr(scraper, '_create_webdriver'):
+        driver = scraper._create_webdriver(chrome_options)
+    else:
+        driver = webdriver.Chrome(options=chrome_options)
     return driver
 
 
@@ -507,7 +513,7 @@ class CrefiaScraper(BaseScraper):
         """
         driver: Optional[webdriver.Chrome] = None
         try:
-            driver = init_selenium(self.download_dir, headless=headless)
+            driver = init_selenium(self.download_dir, headless=headless, scraper=self)
             print("Selenium 드라이버 생성 완료")
         except Exception as exc:
             print(f"⚠ Selenium 드라이버 생성 실패: {exc}")

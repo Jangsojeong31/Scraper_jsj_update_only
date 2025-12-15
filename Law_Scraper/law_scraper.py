@@ -254,53 +254,6 @@ class LawGoKrScraper(BaseScraper):
         
         print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
     
-    def _find_previous_file(self, file_name: str) -> Optional[Path]:
-        """previous 디렉토리에서 같은 파일명의 파일 찾기
-        Args:
-            file_name: 찾을 파일명
-        Returns:
-            이전 파일 경로 또는 None
-        """
-        previous_file = self.previous_dir / file_name
-        if previous_file.exists():
-            return previous_file
-        return None
-    
-    def _compare_with_previous_file(self, new_file_path: str, file_name: str) -> None:
-        """다운로드한 파일을 이전 파일과 비교
-        Args:
-            new_file_path: 새로 다운로드한 파일 경로
-            file_name: 파일명
-        """
-        try:
-            previous_file = self._find_previous_file(file_name)
-            
-            if not previous_file:
-                print(f"  ✓ 새 파일 (이전 파일 없음)")
-                return
-            
-            print(f"  → 이전 파일과 비교 중... (이전 파일: {previous_file})")
-            comparison_result = self.file_comparator.compare_and_report(
-                new_file_path,
-                str(previous_file),
-                save_diff=True
-            )
-            
-            if comparison_result['changed']:
-                print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
-                if 'diff_file' in comparison_result:
-                    print(f"    Diff 파일: {comparison_result['diff_file']}")
-                    html_file = Path(comparison_result['diff_file']).with_suffix('.html')
-                    if html_file.exists():
-                        print(f"    HTML Diff 파일: {html_file}")
-            else:
-                print(f"  ✓ 파일 동일 (변경 없음)")
-                
-        except Exception as e:
-            print(f"  ⚠ 파일 비교 중 오류: {e}")
-            import traceback
-            traceback.print_exc()
-    
     def fetch_page(self, url: str, use_selenium: bool = False, driver: Optional[webdriver.Chrome] = None) -> Optional[BeautifulSoup]:
         """
         웹 페이지를 가져와서 BeautifulSoup 객체로 반환 (법령 검색 페이지 특화)
@@ -331,50 +284,6 @@ class LawGoKrScraper(BaseScraper):
                     return None
         else:
             return super().fetch_page(url, use_selenium=False, driver=None)
-    
-    def extract_links(self, soup: BeautifulSoup, base_url: str = None) -> List[str]:
-        """
-        페이지에서 모든 링크 추출
-        
-        Args:
-            soup: BeautifulSoup 객체
-            base_url: 기본 URL (상대 경로를 절대 경로로 변환하기 위해)
-            
-        Returns:
-            링크 URL 리스트
-        """
-        if soup is None:
-            return []
-        
-        links = []
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            if base_url and not href.startswith('http'):
-                from urllib.parse import urljoin
-                href = urljoin(base_url, href)
-            links.append(href)
-        
-        return links
-    
-    def extract_text(self, soup: BeautifulSoup, selector: str = None) -> str:
-        """
-        페이지에서 텍스트 추출
-        
-        Args:
-            soup: BeautifulSoup 객체
-            selector: CSS 선택자 (선택적)
-            
-        Returns:
-            추출된 텍스트
-        """
-        if soup is None:
-            return ""
-        
-        if selector:
-            elements = soup.select(selector)
-            return ' '.join([elem.get_text(strip=True) for elem in elements])
-        else:
-            return soup.get_text(strip=True)
     
     def extract_law_info(self, soup: BeautifulSoup) -> Dict:
         """
@@ -2129,6 +2038,7 @@ def main():
     print("=== 국가법령정보센터 검색 결과 스크래핑 시작 ===")
     
     # Selenium 드라이버 생성 (재사용)
+    # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
@@ -2149,7 +2059,9 @@ def main():
         "profile.default_content_setting_values.automatic_downloads": 1
     }
     chrome_options.add_experimental_option("prefs", prefs)
-    driver = webdriver.Chrome(options=chrome_options)
+    
+    # BaseScraper의 _create_webdriver 사용 (드라이버 경로 자동 탐지 및 SeleniumManager 우회)
+    driver = crawler._create_webdriver(chrome_options)
     
     all_results = []
     total_count = 0
