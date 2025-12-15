@@ -490,22 +490,53 @@ def main():
     
     # 데이터 파싱
     print("\n=== 데이터 파싱 시작 ===")
-    # keyword 옵션이 있으면 해당 키워드로 필터링, 없으면 빈 문자열 (비어있는 항목만)
-    keyword_lower = None
-    if args.keyword is not None:
-        # 약자 매핑 확인 (대소문자 무시)
-        keyword_lower = args.keyword.lower()
-        if keyword_lower in KEYWORD_MAPPING:
-            filter_keyword = KEYWORD_MAPPING[keyword_lower]
-            print(f"  키워드 매핑: '{args.keyword}' → '{filter_keyword}'")
-        else:
-            # 매핑에 없으면 입력한 키워드를 그대로 사용
-            filter_keyword = args.keyword
+    
+    # 키워드가 없으면 모든 키워드에 대해 list.csv 생성
+    if args.keyword is None:
+        for key, mapped_keyword in KEYWORD_MAPPING.items():
+            print(f"\n--- '{key}' 키워드 자동 처리 ---")
+            records = parser_obj.parse_excel(
+                sheet_name=args.sheet,
+                header_row=args.header,
+                filter_association_keyword=mapped_keyword,
+                filter_column=args.column
+            )
+            
+            if not records:
+                print(f"  ⚠ '{key}' 결과가 없어 건너뜀")
+                continue
+            
+            if key == 'law':
+                directories = ['Law_Scraper', 'Law_LegNotice_Scraper', 'Moleg_Scraper']
+                for directory_name in directories:
+                    list_path = project_root / directory_name / "input" / "list.csv"
+                    parser_obj.save_to_law_list_csv(records, str(list_path))
+            elif key in DIRECTORY_MAPPING:
+                directory_name = DIRECTORY_MAPPING[key]
+                default_list_path = project_root / directory_name / "input" / "list.csv"
+                parser_obj.save_to_law_list_csv(records, str(default_list_path))
+            else:
+                default_list_path = project_root / "list.csv"
+                parser_obj.save_to_law_list_csv(records, str(default_list_path))
+        
+        print("\n=== 모든 키워드 처리 완료 ===")
+        return
+    
+    # keyword 옵션이 있으면 해당 키워드로 필터링
+    keyword_lower = args.keyword.lower()
+    if keyword_lower in KEYWORD_MAPPING:
+        filter_keyword = KEYWORD_MAPPING[keyword_lower]
+        print(f"  키워드 매핑: '{args.keyword}' → '{filter_keyword}'")
     else:
-        filter_keyword = ''
-    records = parser_obj.parse_excel(sheet_name=args.sheet, header_row=args.header, 
-                                      filter_association_keyword=filter_keyword,
-                                      filter_column=args.column)
+        # 매핑에 없으면 입력한 키워드를 그대로 사용
+        filter_keyword = args.keyword
+    
+    records = parser_obj.parse_excel(
+        sheet_name=args.sheet,
+        header_row=args.header,
+        filter_association_keyword=filter_keyword,
+        filter_column=args.column
+    )
     
     if records:
         # 저장

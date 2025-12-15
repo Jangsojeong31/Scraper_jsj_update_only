@@ -1404,7 +1404,8 @@ class FsbScraper(BaseScraper):
                 }
             }
             chrome_options.add_experimental_option("prefs", prefs)
-            driver = webdriver.Chrome(options=chrome_options)
+            # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
+            driver = self._create_webdriver(chrome_options)
             
             # Chrome DevTools Protocol로 다운로드 동작 설정 (드라이버 생성 직후)
             try:
