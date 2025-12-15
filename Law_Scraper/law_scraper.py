@@ -1462,6 +1462,27 @@ class LawGoKrScraper(BaseScraper):
         # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
         import re
         content = content.replace("\r\n", "\n").replace("\r", "\n")
+        
+        # 메뉴 항목 제거 (판례, 연혁, 위임행정규칙, 규제, 생활법령, 한눈보기 등)
+        # 이런 메뉴 항목들은 본문 앞부분에 나타나므로 제거
+        menu_patterns = [
+            r'^판례\s*\n',
+            r'^연혁\s*\n',
+            r'^위임행정규칙\s*\n',
+            r'^규제\s*\n',
+            r'^생활법령\s*\n',
+            r'^한눈보기\s*\n',
+        ]
+        
+        # 메뉴 항목들이 연속으로 나오는 패턴 제거
+        # 예: "판례\n연혁\n위임행정규칙\n규제\n생활법령\n한눈보기\n"
+        menu_block_pattern = r'^(판례|연혁|위임행정규칙|규제|생활법령|한눈보기)(\s*\n(판례|연혁|위임행정규칙|규제|생활법령|한눈보기))*\s*\n'
+        content = re.sub(menu_block_pattern, '', content, flags=re.MULTILINE)
+        
+        # 개별 메뉴 항목 제거 (남아있는 경우)
+        for pattern in menu_patterns:
+            content = re.sub(pattern, '', content, flags=re.MULTILINE)
+        
         # 연속된 개행을 최대 2개로 제한 (너무 많은 빈 줄 방지)
         content = re.sub(r'\n{3,}', '\n\n', content)
         return content.strip()
