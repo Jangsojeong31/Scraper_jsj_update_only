@@ -12,32 +12,28 @@ import time
 import re
 import argparse
 import csv
-import io
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from pathlib import Path
 import sys
+import platform
 
-# OCR 라이브러리 import
-try:
-    import fitz  # PyMuPDF
-    PYMUPDF_AVAILABLE = True
-except ImportError:
-    fitz = None
-    PYMUPDF_AVAILABLE = False
-
-try:
-    import pytesseract
-    from PIL import Image
-    PYTESSERACT_AVAILABLE = True
-except ImportError:
-    pytesseract = None
-    Image = None
-    PYTESSERACT_AVAILABLE = False
+# Windows 콘솔 인코딩 설정
+if platform.system() == 'Windows':
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)  # UTF-8 코드 페이지
+        kernel32.SetConsoleCP(65001)
+    except:
+        pass
 
 # common 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
+
+# OCR 추출 모듈 import
+from ocr_extractor import OCRExtractor
 
 # KoFIU_Scraper의 extract_metadata 모듈에서 함수 import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'KoFIU_Scraper'))
@@ -93,88 +89,9 @@ class FSSScraperV2:
         # 업종 분류 매핑 로드
         self.industry_map = self._load_industry_classification()
         
-        # OCR 관련 초기화
+        # OCR 추출기 초기화
+        self.ocr_extractor = OCRExtractor()
         self.min_text_length = 200  # 최소 텍스트 길이 (미만이면 OCR 시도)
-        self.ocr_initialized = False
-        self.ocr_available = False
-    
-    def _initialize_ocr(self):
-        """OCR 초기화 (Tesseract 경로 설정)"""
-        if self.ocr_initialized:
-            return
-        self.ocr_initialized = True
-        
-        if not PYMUPDF_AVAILABLE or not PYTESSERACT_AVAILABLE:
-            print("  ※ OCR 모듈(PyMuPDF, pytesseract, Pillow) 중 일부가 설치되어 있지 않아 OCR을 사용할 수 없습니다.")
-            self.ocr_available = False
-            return
-        
-        # Windows에서 Tesseract 경로 찾기
-        tesseract_paths = [
-            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-            r'C:\Users\USER\AppData\Local\Tesseract-OCR\tesseract.exe',
-            r'C:\Users\USER\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
-        ]
-        
-        for path in tesseract_paths:
-            if os.path.exists(path):
-                pytesseract.pytesseract.tesseract_cmd = path
-                self.ocr_available = True
-                print(f"  OCR 사용 준비 완료 (Tesseract 경로: {path})")
-                return
-        
-        print("  ※ Tesseract 실행 파일을 찾을 수 없어 OCR을 사용할 수 없습니다.")
-        self.ocr_available = False
-    
-    def _ocr_pdf(self, file_path):
-        """OCR을 사용하여 PDF에서 텍스트 추출 (이미지 기반 PDF용)"""
-        if not self.ocr_available:
-            return None
-        
-        try:
-            print(f"  OCR 추출 시도 중...")
-            doc = fitz.open(str(file_path))
-            texts = []
-            
-            for page_num, page in enumerate(doc):
-                # 페이지를 이미지로 변환 (300 DPI)
-                mat = fitz.Matrix(300 / 72, 300 / 72)
-                pix = page.get_pixmap(matrix=mat)
-                img_data = pix.tobytes("png")
-                image = Image.open(io.BytesIO(img_data)).convert('L')
-                
-                # 여러 OCR 설정 시도
-                configs = [
-                    ('kor+eng', '--oem 3 --psm 6'),
-                    ('kor+eng', '--oem 3 --psm 4'),
-                    ('kor', '--oem 3 --psm 6'),
-                    ('kor', '--oem 3 --psm 4'),
-                ]
-                
-                best_text = ''
-                for lang, cfg in configs:
-                    try:
-                        candidate = pytesseract.image_to_string(image, lang=lang, config=cfg)
-                        if candidate and len(candidate) > len(best_text):
-                            best_text = candidate
-                    except Exception:
-                        continue
-                
-                if best_text:
-                    texts.append(best_text)
-                    print(f"    페이지 {page_num + 1}: {len(best_text)}자 추출")
-            
-            doc.close()
-            
-            full_text = '\n'.join(t.strip() for t in texts if t).strip()
-            if full_text:
-                print(f"  ✓ OCR로 {len(full_text)}자 추출 완료")
-            return full_text if full_text else None
-            
-        except Exception as e:
-            print(f"  ✗ OCR 처리 중 오류: {e}")
-            return None
     
     def _load_industry_classification(self):
         """금융회사별 업종분류 CSV 파일 로드 (KoFIU_Scraper의 파일 사용)"""
@@ -300,13 +217,15 @@ class FSSScraperV2:
         첨부파일 내용 추출 (FileExtractor 사용)
         
         Returns:
-            tuple: (추출된 내용, 문서유형)
+            tuple: (추출된 내용, 문서유형, 파일다운로드URL)
         """
         try:
             # PDF URL인 경우 직접 다운로드
             if self.is_pdf_url(detail_url):
                 filename = self.derive_filename(detail_url, link_text)
                 print(f"  PDF 다운로드 시도: {filename}")
+                
+                file_url = detail_url  # PDF URL이 직접 파일 다운로드 URL
                 
                 # FileExtractor로 파일 다운로드
                 file_path, actual_filename = self.file_extractor.download_file(
@@ -319,15 +238,21 @@ class FSSScraperV2:
                     # FileExtractor로 PDF 내용 추출
                     content = self.file_extractor.extract_pdf_content(file_path)
                     doc_type = 'PDF-텍스트'
+                    ocr_attempted = False
                     
                     # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                     if not content or len(content.strip()) < self.min_text_length:
-                        self._initialize_ocr()
-                        if self.ocr_available:
-                            ocr_text = self._ocr_pdf(file_path)
-                            if ocr_text and len(ocr_text) > len(content or ''):
+                        if self.ocr_extractor.is_available():
+                            ocr_attempted = True
+                            ocr_text = self.ocr_extractor.extract_text(file_path, self.min_text_length)
+                            if ocr_text:
+                                # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
                                 content = ocr_text
                                 doc_type = 'PDF-OCR'
+                            else:
+                                print(f"  ✗ OCR 추출 실패 (결과 없음)")
+                        else:
+                            print(f"  ✗ OCR 사용 불가")
                     
                     # 임시 파일 삭제
                     try:
@@ -337,17 +262,19 @@ class FSSScraperV2:
                     
                     if content and content.strip():
                         print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                        return content, doc_type
+                        return content, doc_type, file_url
                     else:
-                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요'
+                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', file_url
                 else:
-                    return "[파일 다운로드 실패]", '오류'
+                    return "[파일 다운로드 실패]", '오류', file_url
             
             # 일반 페이지에서 첨부파일 링크 찾기
             response = self.get_page(detail_url)
             soup = BeautifulSoup(response.text, 'lxml')
 
             all_links = soup.find_all('a', href=True)
+            file_url = ''  # 파일 다운로드 URL 초기화
+            
             for link in all_links:
                 href = link.get('href', '')
                 link_text_inner = link.get_text(strip=True)
@@ -389,15 +316,21 @@ class FSSScraperV2:
                         if file_path.lower().endswith('.pdf'):
                             content = self.file_extractor.extract_pdf_content(file_path)
                             doc_type = 'PDF-텍스트'
+                            ocr_attempted = False
                             
                             # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                             if not content or len(content.strip()) < self.min_text_length:
-                                self._initialize_ocr()
-                                if self.ocr_available:
-                                    ocr_text = self._ocr_pdf(file_path)
-                                    if ocr_text and len(ocr_text) > len(content or ''):
+                                if self.ocr_extractor.is_available():
+                                    ocr_attempted = True
+                                    ocr_text = self.ocr_extractor.extract_text(file_path, self.min_text_length)
+                                    if ocr_text:
+                                        # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
                                         content = ocr_text
                                         doc_type = 'PDF-OCR'
+                                    else:
+                                        print(f"  ✗ OCR 추출 실패 (결과 없음)")
+                                else:
+                                    print(f"  ✗ OCR 사용 불가")
                             
                             # 임시 파일 삭제
                             try:
@@ -407,25 +340,25 @@ class FSSScraperV2:
                             
                             if content and content.strip():
                                 print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                                return content, doc_type
+                                return content, doc_type, file_url
                             else:
-                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요'
+                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url
                         else:
                             # 임시 파일 삭제
                             try:
                                 os.remove(file_path)
                             except:
                                 pass
-                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일'
+                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_url
                     break
 
-            return "[첨부파일을 찾을 수 없습니다]", '첨부없음'
+            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', ''
 
         except Exception as e:
             print(f"  첨부파일 추출 중 오류: {e}")
             import traceback
             traceback.print_exc()
-            return f"[오류: {str(e)}]", '오류'
+            return f"[오류: {str(e)}]", '오류', ''
 
     def scrape_list_page(self, page_index, sdate='', edate=''):
         """목록 페이지 스크래핑"""
@@ -628,17 +561,21 @@ class FSSScraperV2:
             print(f"\n[{idx}/{len(all_items)}] {institution_from_list or link_text or 'N/A'} 처리 중...")
             
             if item.get('상세페이지URL'):
-                attachment_content, doc_type = self.extract_attachment_content(
+                attachment_content, doc_type, file_download_url = self.extract_attachment_content(
                     item['상세페이지URL'], 
                     link_text
                 )
                 item['제재조치내용'] = attachment_content
                 item['문서유형'] = doc_type
+                item['파일다운로드URL'] = file_download_url
+                
+                # OCR 추출 여부 설정
+                is_ocr = doc_type == 'PDF-OCR'
+                item['OCR추출여부'] = '예' if is_ocr else '아니오'
                 
                 # PDF 내용에서 금융회사명, 제재조치일, 제재내용 추출
                 if attachment_content and not attachment_content.startswith('['):
                     # OCR로 추출한 경우 OCR 전용 함수 사용
-                    is_ocr = doc_type == 'PDF-OCR'
                     
                     if is_ocr and OCR_MODULE_AVAILABLE:
                         extract_metadata_fn = extract_metadata_from_content_ocr
@@ -648,6 +585,7 @@ class FSSScraperV2:
                     else:
                         extract_metadata_fn = extract_metadata_from_content_normal
                         extract_sanction_fn = extract_sanction_details_normal
+                        # extract_metadata.py에서 collapse_split_syllables() 호출을 제거했으므로 직접 사용 가능
                         extract_incidents_fn = extract_incidents_normal
                     
                     institution, sanction_date = extract_metadata_fn(attachment_content)
@@ -690,11 +628,17 @@ class FSSScraperV2:
             else:
                 item['제재조치내용'] = "[상세 페이지 URL이 없습니다]"
                 item['문서유형'] = 'URL없음'
+                item['OCR추출여부'] = '아니오'
+                item['파일다운로드URL'] = ''
                 if institution_from_list:
                     item['금융회사명'] = institution_from_list
                     item['업종'] = self.get_industry(institution_from_list)
                 else:
                     item['업종'] = '기타'
+            
+            # OCR추출여부 필드가 없는 경우 기본값 설정
+            if 'OCR추출여부' not in item:
+                item['OCR추출여부'] = '아니오'
             
             # 업종 필드가 없는 경우 기타로 설정
             if '업종' not in item:
@@ -763,11 +707,14 @@ class FSSScraperV2:
         for item in self.results:
             # 기본 필드 추출 (줄바꿈 정리 적용)
             base_data = {
+                '구분': '제재사례',
+                '출처': '금융감독원',
                 '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
                 '업종': item.get('업종', '기타'),
                 '제재조치일': item.get('제재조치일', item.get('제재조치요구일', '')),
-                '제재내용': self._clean_content(item.get('제재내용', '')),
-                '상세페이지URL': item.get('상세페이지URL', '')
+                '제재내용': item.get('제재내용', ''),  # 띄어쓰기 보존
+                '파일다운로드URL': item.get('파일다운로드URL', ''),
+                'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
             
             # 사건 수 확인
@@ -786,8 +733,8 @@ class FSSScraperV2:
                     title = item.get(f'제목{i}', '')
                     raw_content = item.get(f'내용{i}', '')
                     
-                    # 내용 정리 (<관련법규>/<관련규정> 섹션 제거 및 줄바꿈 정리)
-                    content = self._clean_content(raw_content)
+                    # 내용은 원본 그대로 보존 (띄어쓰기 보존)
+                    content = raw_content
                     
                     split_results.append({
                         **base_data,
@@ -819,8 +766,8 @@ class FSSScraperV2:
             csv_filepath = os.path.join(script_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 상세페이지URL
-                fieldnames = ['업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '상세페이지URL']
+                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
+                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
 
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')

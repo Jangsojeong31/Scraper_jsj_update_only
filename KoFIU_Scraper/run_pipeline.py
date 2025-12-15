@@ -39,7 +39,10 @@ def run_step(script_name: str, description: str) -> None:
         for line in result.stdout.splitlines():
             log(f"  {line}")
     if result.returncode != 0:
-        raise RuntimeError(f"{script_name} 실행이 실패했습니다 (exit code: {result.returncode}).")
+        raise RuntimeError(
+            f"{script_name} 실행이 실패했습니다 "
+            f"(exit code: {result.returncode})."
+        )
 
 
 def print_stats(json_path: Path) -> None:
@@ -58,24 +61,55 @@ def print_stats(json_path: Path) -> None:
     def has_value(value: str) -> bool:
         return bool(value and value.strip() and value.strip() != '-')
 
-    incidents_count = sum(len(item.get('사건목록', [])) for item in data)
-    items_with_incidents = sum(1 for item in data if item.get('사건목록', []))
+    # v2는 이미 사건별로 분리되어 저장되므로, 제목 필드가 있는 항목을 카운트
+    items_with_incidents = sum(
+        1 for item in data if item.get('제목', '').strip()
+    )
 
     def to_pct(count: int) -> str:
         return f"{count} / {total} ({count / total * 100:.1f}%)"
 
     log("\n[통계] 사건제목/사건내용 추출 현황")
-    log(f" - 총 항목 수: {total}")
-    log(f" - 사건이 있는 항목: {items_with_incidents} ({items_with_incidents / total * 100:.1f}%)")
-    log(f" - 총 사건 수: {incidents_count}")
-    log(f" - 평균 사건 수: {incidents_count / total if total > 0 else 0:.2f}")
+    log(f" - 총 사건 수: {total} "
+        f"(이미 사건별로 분리되어 저장됨)")
+    pct = items_with_incidents / total * 100 if total > 0 else 0
+    log(f" - 제목이 있는 사건: {items_with_incidents} ({pct:.1f}%)")
+
+    # 업종별 통계
+    industry_counts = {}
+    for item in data:
+        industry = item.get('업종', '기타')
+        industry_counts[industry] = industry_counts.get(industry, 0) + 1
+
+    if industry_counts:
+        log("\n[통계] 업종별 분포")
+        sorted_industries = sorted(
+            industry_counts.items(), key=lambda x: x[1], reverse=True
+        )
+        for industry, count in sorted_industries:
+            pct = count / total * 100 if total > 0 else 0
+            log(f" - {industry}: {count}건 ({pct:.1f}%)")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="금융정보분석원 제재공시 스크래핑 전체 파이프라인")
-    parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
-    parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
-    parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
+    parser = argparse.ArgumentParser(
+        description="금융정보분석원 제재공시 스크래핑 전체 파이프라인"
+    )
+    parser.add_argument(
+        '--skip-scrape',
+        action='store_true',
+        help='기존 스크래핑 결과를 유지하고 분석 단계만 실행'
+    )
+    parser.add_argument(
+        '--stats-only',
+        action='store_true',
+        help='통계만 출력 (스크래핑/추출 미실행)'
+    )
+    parser.add_argument(
+        '--log-file',
+        type=str,
+        help='실행 로그를 저장할 파일 경로 (기록은 append 모드)'
+    )
     args = parser.parse_args()
 
     json_path = ROOT_DIR / 'kofiu_results.json'
@@ -98,11 +132,13 @@ def main() -> None:
             return
 
         if not args.skip_scrape:
-            run_step('kofiu_scraper.py', '1. 목록 및 PDF 스크래핑')
+            run_step(
+                'kofiu_scraper_v2.py',
+                '1. 목록 및 PDF 스크래핑 (사건 추출 포함)'
+            )
         else:
-            log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
-
-        run_step('extract_incidents.py', '2. 사건제목/사건내용 추출')
+            log("\n[건너뜀] 스크래핑 단계는 "
+                "--skip-scrape 옵션으로 생략했습니다.")
 
         print_stats(json_path)
     finally:
@@ -119,4 +155,3 @@ if __name__ == '__main__':
     except Exception as exc:
         log(f"\n[오류] {exc}")
         sys.exit(1)
-
