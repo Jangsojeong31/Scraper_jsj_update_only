@@ -282,7 +282,8 @@ class KfbCommitteeScraper(BaseScraper):
                 "safebrowsing.enabled": True,
             }
             chrome_options.add_experimental_option("prefs", prefs)
-            driver = webdriver.Chrome(options=chrome_options)
+            # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
+            driver = self._create_webdriver(chrome_options)
             print("Selenium 드라이버 생성 완료")
         except Exception as exc:
             print(f"⚠ Selenium 드라이버 생성 실패: {exc}, requests로 계속 진행합니다.")

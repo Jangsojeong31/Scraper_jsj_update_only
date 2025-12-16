@@ -39,13 +39,14 @@ from common.file_extractor import FileExtractor
 from data_scraper import extract_data_from_text, extract_dates_from_filename
 
 # ---------------- Selenium 다운로드 유틸 ----------------
-def init_selenium(download_dir: str, headless: bool = False) -> webdriver.Chrome:
+def init_selenium(download_dir: str, headless: bool = False, scraper=None) -> webdriver.Chrome:
     """
     Selenium 드라이버 초기화
     
     Args:
         download_dir: 다운로드 디렉토리 경로
         headless: 헤드리스 모드 사용 여부 (다운로드 시 False 권장)
+        scraper: BaseScraper 인스턴스 (폐쇄망 환경 대응을 위해 _create_webdriver 사용)
     """
     download_dir_abs = os.path.abspath(download_dir)
     os.makedirs(download_dir_abs, exist_ok=True)
@@ -70,7 +71,12 @@ def init_selenium(download_dir: str, headless: bool = False) -> webdriver.Chrome
         "profile.default_content_setting_values.automatic_downloads": 1
     }
     chrome_options.add_experimental_option("prefs", prefs)
-    driver = webdriver.Chrome(options=chrome_options)
+    
+    # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
+    if scraper and hasattr(scraper, '_create_webdriver'):
+        driver = scraper._create_webdriver(chrome_options)
+    else:
+        driver = webdriver.Chrome(options=chrome_options)
     return driver
 
 
@@ -507,7 +513,7 @@ class CrefiaScraper(BaseScraper):
         """
         driver: Optional[webdriver.Chrome] = None
         try:
-            driver = init_selenium(self.download_dir, headless=headless)
+            driver = init_selenium(self.download_dir, headless=headless, scraper=self)
             print("Selenium 드라이버 생성 완료")
         except Exception as exc:
             print(f"⚠ Selenium 드라이버 생성 실패: {exc}")
@@ -537,6 +543,9 @@ def save_crefia_results(records: List[Dict]):
         print("저장할 데이터가 없습니다.")
         return
     
+    # 날짜 정규화를 위한 임시 BaseScraper 인스턴스 생성
+    temp_scraper = CrefiaScraper()
+    
     law_results = []
     for item in records:
         law_item = {
@@ -544,8 +553,8 @@ def save_crefia_results(records: List[Dict]):
             "규정명": item.get("regulation_name", ""),
             "기관명": item.get("organization", "여신금융협회"),
             "본문": item.get("content", ""),
-            "제정일": item.get("enactment_date", ""),
-            "최근 개정일": item.get("revision_date", ""),
+            "제정일": temp_scraper.normalize_date_format(item.get("enactment_date", "")),
+            "최근 개정일": temp_scraper.normalize_date_format(item.get("revision_date", "")),
             "소관부서": item.get("department", ""),
             "파일 다운로드 링크": item.get("file_download_link", ""),
             "파일 이름": item.get("file_name", ""),

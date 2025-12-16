@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import os
+import io
 from pathlib import Path
 from datetime import datetime
 
@@ -38,6 +39,9 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
     env['PYTHONIOENCODING'] = 'utf-8'
     env['PYTHONUTF8'] = '1'  # Python 3.7+ UTF-8 모드
     
+    # subprocess를 실행할 때 인코딩 오류를 방지하기 위해
+    # stdout을 직접 읽지 않고 communicate() 사용하거나
+    # 더 안전한 방법으로 처리
     try:
         process = subprocess.Popen(
             cmd,
@@ -50,6 +54,7 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
         )
         
         # 실시간으로 출력 읽기 (bytes를 직접 읽어서 안전하게 디코딩)
+        # _readerthread 오류를 방지하기 위해 직접 읽기
         buffer = b''
         while True:
             chunk = process.stdout.read(8192)  # 8KB씩 읽기
@@ -110,58 +115,35 @@ def print_stats(json_path: Path) -> None:
     def has_value(value: str) -> bool:
         return bool(value and value.strip() and value.strip() != '-')
 
-    # v2는 이미 사건별로 분리되어 저장되므로, 제목 필드가 있는 항목을 카운트
-    items_with_incidents = sum(
-        1 for item in data if item.get('제목', '').strip()
-    )
+    # fss_scraper_v2.py 구조에 맞게 필드명 확인
+    # 제재내용 필드 확인
+    sanction_ok = sum(1 for item in data if has_value(item.get('제재내용', '')))
 
     def to_pct(count: int) -> str:
         return f"{count} / {total} ({count / total * 100:.1f}%)"
 
-    log("\n[통계] 사건제목/사건내용 추출 현황")
-    log(f" - 총 사건 수: {total} "
-        f"(이미 사건별로 분리되어 저장됨)")
-    pct = items_with_incidents / total * 100 if total > 0 else 0
-    log(f" - 제목이 있는 사건: {items_with_incidents} ({pct:.1f}%)")
-
-    # 업종별 통계
-    industry_counts = {}
-    for item in data:
-        industry = item.get('업종', '기타')
-        industry_counts[industry] = industry_counts.get(industry, 0) + 1
-
-    if industry_counts:
-        log("\n[통계] 업종별 분포")
-        sorted_industries = sorted(
-            industry_counts.items(), key=lambda x: x[1], reverse=True
-        )
-        for industry, count in sorted_industries:
-            pct = count / total * 100 if total > 0 else 0
-            log(f" - {industry}: {count}건 ({pct:.1f}%)")
+    log("\n[통계] 제재내용 추출 현황")
+    log(f" - 제재내용 추출 성공: {to_pct(sanction_ok)}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="금융정보분석원 제재공시 스크래핑 전체 파이프라인"
-    )
-    parser.add_argument(
-        '--skip-scrape',
-        action='store_true',
-        help='기존 스크래핑 결과를 유지하고 분석 단계만 실행'
-    )
-    parser.add_argument(
-        '--stats-only',
-        action='store_true',
-        help='통계만 출력 (스크래핑/추출 미실행)'
-    )
-    parser.add_argument(
-        '--log-file',
-        type=str,
-        help='실행 로그를 저장할 파일 경로 (기록은 append 모드)'
-    )
+    # 기본 검색 종료일: 오늘 날짜
+    today = datetime.now()
+    default_edate = today.strftime('%Y-%m-%d')
+    
+    parser = argparse.ArgumentParser(description="금감원 제재조치 현황 스크래핑 전체 파이프라인")
+    parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
+    parser.add_argument('--run-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 (기본값: 실행 안 함)')
+    parser.add_argument('--skip-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 생략 (deprecated: 기본값이 실행 안 함)')
+    parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
+    parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
+    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
+    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
+    parser.add_argument('--edate', type=str, default=default_edate, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
+    parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
     args = parser.parse_args()
 
-    json_path = ROOT_DIR / 'kofiu_results.json'
+    json_path = ROOT_DIR / 'fss_results.json'
 
     log_file_handle = None
 
@@ -181,13 +163,35 @@ def main() -> None:
             return
 
         if not args.skip_scrape:
-            run_step(
-                'kofiu_scraper_v2.py',
-                '1. 목록 및 PDF 스크래핑 (사건 추출 포함)'
-            )
+            scraper_args = []
+            if args.limit:
+                scraper_args.extend(['--limit', str(args.limit)])
+            if args.sdate:
+                scraper_args.extend(['--sdate', args.sdate])
+            if args.edate:
+                scraper_args.extend(['--edate', args.edate])
+            if args.after:
+                scraper_args.extend(['--after', args.after])
+            run_step('fss_scraper_v2.py', '1. 목록 및 PDF 스크래핑', scraper_args if scraper_args else None)
         else:
-            log("\n[건너뜀] 스크래핑 단계는 "
-                "--skip-scrape 옵션으로 생략했습니다.")
+            log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
+
+        # OCR 후처리 실행 (V3 OCR로 추출된 제재내용 후처리)
+        run_step('post_process_ocr.py', '2. OCR 후처리')
+
+        # OCR 실패 항목 재처리 (기본값: 실행 안 함, --run-ocr-retry 옵션으로 실행)
+        ocr_retry_script = ROOT_DIR / 'ocr_failed_items.py'
+        if args.run_ocr_retry:
+            if ocr_retry_script.exists():
+                run_step('ocr_failed_items.py', '3. OCR 실패 항목 재처리')
+            else:
+                log("\n[정보] ocr_failed_items.py 파일이 없어 재처리 단계를 건너뜁니다.")
+        elif args.skip_ocr_retry:
+            # --skip-ocr-retry 옵션은 하위 호환성을 위해 유지
+            log("\n[건너뜀] --skip-ocr-retry 옵션으로 OCR 재처리 단계를 생략했습니다.")
+        else:
+            # 기본값: 실행 안 함
+            log("\n[건너뜀] OCR 재처리 단계는 기본적으로 실행하지 않습니다. (실행하려면 --run-ocr-retry 옵션 사용)")
 
         print_stats(json_path)
     finally:
@@ -204,3 +208,6 @@ if __name__ == '__main__':
     except Exception as exc:
         log(f"\n[오류] {exc}")
         sys.exit(1)
+
+
+

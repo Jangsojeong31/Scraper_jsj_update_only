@@ -239,6 +239,95 @@ class BaseScraper:
 
         print(f"\nCSV로 저장되었습니다: {filepath}")
     
+    def normalize_date_format(self, date_str: str) -> str:
+        """
+        날짜 문자열을 YYYY-MM-DD 형식으로 정규화
+        
+        지원 형식:
+        - YYYY-MM-DD
+        - YYYY.MM.DD
+        - YYYY/MM/DD
+        - YYYYMMDD
+        - YYYY. M. D. (공백 포함)
+        - YYYY년 MM월 DD일
+        
+        Args:
+            date_str: 정규화할 날짜 문자열
+            
+        Returns:
+            YYYY-MM-DD 형식의 날짜 문자열 (변환 실패 시 원본 반환)
+        """
+        if not date_str:
+            return ''
+        
+        import re
+        from datetime import datetime
+        
+        date_str = str(date_str).strip()
+        if not date_str:
+            return ''
+        
+        # 이미 YYYY-MM-DD 형식인 경우
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            return date_str
+        
+        # YYYYMMDD 형식 (예: 20250205)
+        if re.match(r'^\d{8}$', date_str):
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        
+        # 다양한 날짜 형식 시도
+        date_formats = [
+            '%Y-%m-%d',
+            '%Y.%m.%d',
+            '%Y/%m/%d',
+            '%Y. %m. %d.',
+            '%Y년 %m월 %d일',
+            '%Y-%m-%d %H:%M:%S',  # 날짜시간 형식도 처리
+        ]
+        
+        for fmt in date_formats:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+        
+        # 정규표현식으로 직접 추출 시도
+        # YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 패턴
+        match = re.search(r'(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})', date_str)
+        if match:
+            year = match.group(1)
+            month = str(int(match.group(2))).zfill(2)
+            day = str(int(match.group(3))).zfill(2)
+            return f"{year}-{month}-{day}"
+        
+        # 변환 실패 시 원본 반환
+        return date_str
+    
+    def normalize_date_fields(self, data: Dict) -> Dict:
+        """
+        딕셔너리의 날짜 필드들을 YYYY-MM-DD 형식으로 정규화
+        
+        Args:
+            data: 정규화할 딕셔너리
+            
+        Returns:
+            날짜 필드가 정규화된 딕셔너리
+        """
+        # 날짜 필드명 목록 (한글/영문 모두 포함)
+        date_fields = [
+            '제정일', '최근 개정일', '시행일', '공포일', '등록일', '작성일',
+            'enactment_date', 'revision_date', 'execution_date', 'publication_date',
+            'registration_date', 'created_date', 'date', 'period'
+        ]
+        
+        normalized = data.copy()
+        for field in date_fields:
+            if field in normalized:
+                normalized[field] = self.normalize_date_format(normalized[field])
+        
+        return normalized
+    
     def save_debug_html(self, soup: BeautifulSoup, filename: str = None, enabled: bool = True):
         """
         디버깅용 HTML 파일 저장 (크롤러당 하나의 샘플만 저장)

@@ -1404,7 +1404,8 @@ class FsbScraper(BaseScraper):
                 }
             }
             chrome_options.add_experimental_option("prefs", prefs)
-            driver = webdriver.Chrome(options=chrome_options)
+            # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
+            driver = self._create_webdriver(chrome_options)
             
             # Chrome DevTools Protocol로 다운로드 동작 설정 (드라이버 생성 직후)
             try:
@@ -1925,6 +1926,9 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
         
         records = ordered_records
     
+    # 날짜 정규화를 위한 scraper 인스턴스
+    scraper = crawler if crawler else FsbScraper()
+    
     # 데이터 정리
     law_results = []
     for item in records:
@@ -1948,8 +1952,8 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
             '규정명': regulation_name,
             '기관명': item.get('organization', '저축은행중앙회'),
             '본문': item.get('content', ''),
-            '제정일': item.get('enactment_date', ''),
-            '최근 개정일': item.get('revision_date', ''),
+            '제정일': scraper.normalize_date_format(item.get('enactment_date', '')),
+            '최근 개정일': scraper.normalize_date_format(item.get('revision_date', '')),
             '소관부서': item.get('department', ''),
             '파일 이름': file_name
         }

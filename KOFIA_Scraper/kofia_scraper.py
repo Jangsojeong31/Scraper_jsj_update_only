@@ -462,6 +462,33 @@ class KofiaScraper(BaseScraper):
         
         print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
     
+    def _calculate_safe_filename(self, file_name: str, file_type: str, regulation_name: str = "") -> str:
+        """실제 저장될 파일명을 계산하는 헬퍼 메서드
+        Args:
+            file_name: 원본 파일명
+            file_type: 파일 타입 (hwp/pdf)
+            regulation_name: 규정명
+        Returns:
+            실제 저장될 파일명
+        """
+        # 파일 확장자
+        ext = f".{file_type}" if file_type else ".pdf"
+        
+        # 안전한 파일명 생성 (규정명 + 확장자만 사용, 중복 허용)
+        if regulation_name:
+            safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
+            safe_reg_name = safe_reg_name.replace(' ', '_')
+            safe_filename = f"{safe_reg_name}{ext}"
+        else:
+            base_name = re.sub(r'[^\w\s.-]', '', file_name).replace(' ', '_')
+            if not base_name.endswith(ext):
+                base_name = base_name.rsplit('.', 1)[0] if '.' in base_name else base_name
+                safe_filename = f"{base_name}{ext}"
+            else:
+                safe_filename = base_name
+        
+        return safe_filename
+    
     def _download_file_by_clicking_button(
         self, driver: webdriver.Chrome, button_selector: str, file_name: str, 
         file_type: str, regulation_name: str = ""
@@ -479,21 +506,8 @@ class KofiaScraper(BaseScraper):
         try:
             import shutil
             
-            # 파일 확장자
-            ext = f".{file_type}" if file_type else ".pdf"
-            
-            # 안전한 파일명 생성 (규정명 + 확장자만 사용, 중복 허용)
-            if regulation_name:
-                safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
-                safe_reg_name = safe_reg_name.replace(' ', '_')
-                safe_filename = f"{safe_reg_name}{ext}"
-            else:
-                base_name = re.sub(r'[^\w\s.-]', '', file_name).replace(' ', '_')
-                if not base_name.endswith(ext):
-                    base_name = base_name.rsplit('.', 1)[0] if '.' in base_name else base_name
-                    safe_filename = f"{base_name}{ext}"
-                else:
-                    safe_filename = base_name
+            # 실제 저장될 파일명 계산
+            safe_filename = self._calculate_safe_filename(file_name, file_type, regulation_name)
             
             # 새 파일 다운로드 경로 (current 디렉토리)
             new_file_path = self.current_dir / safe_filename
@@ -590,6 +604,7 @@ class KofiaScraper(BaseScraper):
             
             return {
                 'file_path': str(new_file_path),
+                'file_name': safe_filename,  # 실제 저장된 파일명
                 'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
                 'comparison': comparison_result,
             }
@@ -1127,7 +1142,8 @@ class KofiaScraper(BaseScraper):
                 "profile.default_content_setting_values.automatic_downloads": 1
             }
             chrome_options.add_experimental_option("prefs", prefs)
-            driver = webdriver.Chrome(options=chrome_options)
+            # 폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용 (SeleniumManager 우회)
+            driver = self._create_webdriver(chrome_options)
             print("Selenium 드라이버 생성 완료")
         except Exception as exc:
             print(f"⚠ Selenium 드라이버 생성 실패: {exc}")
@@ -1211,28 +1227,53 @@ class KofiaScraper(BaseScraper):
                     
                     item.update(content_info)
                     
-                    # 파일 다운로드 및 비교
-                    if download_files and content_info.get("file_names"):
+                    # 실제 저장될 파일명 계산 및 업데이트 (다운로드 여부와 관계없이)
+                    if content_info.get("file_names"):
                         regulation_name = item.get("target_name") or item.get("regulation_name") or item.get("title", "")
                         file_names = content_info.get("file_names", [])
                         file_types = content_info.get("file_types", [])
                         file_buttons = content_info.get("file_buttons", [])
                         
-                        # 여러 첨부파일 다운로드
-                        for file_idx, (file_name, file_type, button_selector) in enumerate(zip(file_names, file_types, file_buttons)):
-                            if button_selector:
-                                print(f"  → 첨부파일 다운로드 중 [{file_idx + 1}/{len(file_names)}]: {file_name}")
-                                comparison_result = self._download_file_by_clicking_button(
-                                    driver,
-                                    button_selector,
-                                    file_name,
-                                    file_type,
-                                    regulation_name=regulation_name
-                                )
-                                if comparison_result:
-                                    print(f"  ✓ 파일 다운로드 완료: {file_name}")
+                        # 실제 저장된 파일명을 저장할 리스트
+                        actual_file_names = []
+                        
+                        # 파일 다운로드 및 비교
+                        if download_files:
+                            # 여러 첨부파일 다운로드
+                            for file_idx, (file_name, file_type, button_selector) in enumerate(zip(file_names, file_types, file_buttons)):
+                                if button_selector:
+                                    print(f"  → 첨부파일 다운로드 중 [{file_idx + 1}/{len(file_names)}]: {file_name}")
+                                    comparison_result = self._download_file_by_clicking_button(
+                                        driver,
+                                        button_selector,
+                                        file_name,
+                                        file_type,
+                                        regulation_name=regulation_name
+                                    )
+                                    if comparison_result:
+                                        # 실제 저장된 파일명으로 업데이트
+                                        actual_file_name = comparison_result.get('file_name', file_name)
+                                        actual_file_names.append(actual_file_name)
+                                        print(f"  ✓ 파일 다운로드 완료: {actual_file_name}")
+                                    else:
+                                        # 다운로드 실패 시 계산된 파일명 사용
+                                        actual_file_name = self._calculate_safe_filename(file_name, file_type, regulation_name)
+                                        actual_file_names.append(actual_file_name)
+                                        print(f"  ⚠ 파일 다운로드 실패: {file_name}")
                                 else:
-                                    print(f"  ⚠ 파일 다운로드 실패: {file_name}")
+                                    # 버튼 선택자가 없으면 계산된 파일명 사용
+                                    actual_file_name = self._calculate_safe_filename(file_name, file_type, regulation_name)
+                                    actual_file_names.append(actual_file_name)
+                        else:
+                            # 다운로드하지 않는 경우에도 실제 저장될 파일명 계산
+                            for file_name, file_type in zip(file_names, file_types):
+                                actual_file_name = self._calculate_safe_filename(file_name, file_type, regulation_name)
+                                actual_file_names.append(actual_file_name)
+                        
+                        # 실제 저장된 파일명으로 업데이트
+                        if actual_file_names:
+                            item["file_names"] = actual_file_names
+                            content_info["file_names"] = actual_file_names
 
                     # 본문 내용이 있는지 확인 (20자 이상이면 본문이 있다고 판단)
                     has_content = content_info.get("content") and len(content_info.get("content", "").strip()) > 20
@@ -1381,12 +1422,15 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         # 여러 첨부파일을 세미콜론으로 구분하여 저장
         file_names_str = "; ".join(file_names) if file_names else ""
         
+        # 날짜 정규화
+        scraper = crawler if crawler else KofiaScraper()
+        
         law_item = {
             "규정명": item.get("regulation_name", item.get("title", "")),
             "기관명": item.get("organization", "금융투자협회"),
             "본문": item.get("content", ""),
-            "제정일": item.get("enactment_date", ""),
-            "최근 개정일": item.get("revision_date", ""),
+            "제정일": scraper.normalize_date_format(item.get("enactment_date", "")),
+            "최근 개정일": scraper.normalize_date_format(item.get("revision_date", "")),
             "소관부서": item.get("department", ""),
             "첨부파일이름": file_names_str,
         }
