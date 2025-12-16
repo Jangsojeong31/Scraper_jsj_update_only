@@ -543,6 +543,9 @@ def save_crefia_results(records: List[Dict]):
         print("저장할 데이터가 없습니다.")
         return
     
+    # 날짜 정규화를 위한 임시 BaseScraper 인스턴스 생성
+    temp_scraper = CrefiaScraper()
+    
     law_results = []
     for item in records:
         law_item = {
@@ -550,8 +553,8 @@ def save_crefia_results(records: List[Dict]):
             "규정명": item.get("regulation_name", ""),
             "기관명": item.get("organization", "여신금융협회"),
             "본문": item.get("content", ""),
-            "제정일": item.get("enactment_date", ""),
-            "최근 개정일": item.get("revision_date", ""),
+            "제정일": temp_scraper.normalize_date_format(item.get("enactment_date", "")),
+            "최근 개정일": temp_scraper.normalize_date_format(item.get("revision_date", "")),
             "소관부서": item.get("department", ""),
             "파일 다운로드 링크": item.get("file_download_link", ""),
             "파일 이름": item.get("file_name", ""),

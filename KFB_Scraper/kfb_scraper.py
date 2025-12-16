@@ -1576,6 +1576,9 @@ if __name__ == "__main__":
         import os
         os.makedirs('output', exist_ok=True)
         
+        # 날짜 정규화를 위한 scraper 인스턴스
+        scraper = KfbScraper()
+        
         # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
         law_results = []
         for item in results:
@@ -1584,8 +1587,8 @@ if __name__ == "__main__":
                 '규정명': item.get('regulation_name', item.get('title', '')),
                 '기관명': '은행연합회',  # 항상 은행연합회
                 '본문': item.get('content', ''),
-                '제정일': item.get('enactment_date', ''),
-                '최근 개정일': item.get('revision_date', ''),
+                '제정일': scraper.normalize_date_format(item.get('enactment_date', '')),
+                '최근 개정일': scraper.normalize_date_format(item.get('revision_date', '')),
                 '소관부서': item.get('department', ''),
                 '파일 다운로드 링크': item.get('file_download_link', item.get('download_link', '')),
                 '파일 이름': item.get('file_name', '')

@@ -611,6 +611,14 @@ def main():
     
     print(f"\n=== 스크래핑 완료: {len(results)}개 항목 ===")
     
+    # 날짜 필드 정규화
+    for item in results:
+        # 날짜 필드 정규화
+        if '시행일' in item:
+            item['시행일'] = scraper.normalize_date_format(item.get('시행일', ''))
+        if '공포일' in item:
+            item['공포일'] = scraper.normalize_date_format(item.get('공포일', ''))
+    
     # 결과 저장
     output_data = {
         'url': scraper.SEARCH_URL_TEMPLATE.format(''),

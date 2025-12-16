@@ -733,12 +733,21 @@ class KrxScraper(BaseScraper):
     
     def _save_outputs(self, records: List[Dict], meta: Dict) -> None:
         """JSON / CSV 결과 저장 (KFB_Scraper와 동일한 컬럼 구조)"""
+        # 날짜 필드 정규화
+        normalized_records = []
+        for item in records:
+            normalized_item = item.copy()
+            # 날짜 필드 정규화
+            normalized_item['제정일'] = self.normalize_date_format(normalized_item.get('제정일', ''))
+            normalized_item['최근 개정일'] = self.normalize_date_format(normalized_item.get('최근 개정일', ''))
+            normalized_records.append(normalized_item)
+        
         # JSON 저장
         json_payload = {
             "crawled_at": meta.get("crawled_at", ""),
             "url": meta.get("url", ""),
-            "total_count": len(records),
-            "results": records,
+            "total_count": len(normalized_records),
+            "results": normalized_records,
         }
         json_path = self.output_dir / "json" / self.JSON_FILENAME
         with open(json_path, "w", encoding="utf-8") as jf:
@@ -748,7 +757,7 @@ class KrxScraper(BaseScraper):
         
         # CSV 저장 (KFB와 동일한 헤더 순서)
         csv_path = self.output_dir / "csv" / self.CSV_FILENAME
-        if not records:
+        if not normalized_records:
             print("저장할 레코드가 없어 CSV 생성을 건너뜁니다.")
             return
         
@@ -757,7 +766,7 @@ class KrxScraper(BaseScraper):
         with open(csv_path, "w", encoding="utf-8-sig", newline="") as cf:
             writer = csv.DictWriter(cf, fieldnames=headers)
             writer.writeheader()
-            for item in records:
+            for item in normalized_records:
                 # 본문 내용 처리 (개행 유지, 1000자 제한)
                 content = item.get('본문', '') or ''
                 # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환

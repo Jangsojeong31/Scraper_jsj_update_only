@@ -1365,6 +1365,9 @@ def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
     os.makedirs(json_dir, exist_ok=True)
     os.makedirs(csv_dir, exist_ok=True)
     
+    # 날짜 정규화를 위한 scraper 인스턴스
+    scraper = crawler if crawler else BokScraper()
+    
     # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
     law_results = []
     for idx, item in enumerate(records, 1):
@@ -1384,8 +1387,8 @@ def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
             "규정명": item.get("regulation_name", item.get("title", "")),
             "기관명": item.get("organization", "한국은행"),
             "본문": content,
-            "제정일": item.get("enactment_date", ""),
-            "최근 개정일": item.get("revision_date", ""),
+            "제정일": scraper.normalize_date_format(item.get("enactment_date", "")),
+            "최근 개정일": scraper.normalize_date_format(item.get("revision_date", "")),
             "소관부서": item.get("department", ""),
             "파일 다운로드 링크": download_links_str,
             "파일 이름": file_names_str,
