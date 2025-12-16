@@ -194,6 +194,11 @@ def extract_incidents(content):
         # "4. 사유" 형식
         r'4\.\s*사\s*유',
         r'4\.\s*사유',
+        # 숫자 없이 "제재대상사실"만 있는 형식
+        r'^제\s*재\s*대\s*상\s*사\s*실\s*[:：]?',
+        r'^제재대상사실\s*[:：]?',
+        r'\n제\s*재\s*대\s*상\s*사\s*실\s*[:：]?',
+        r'\n제재대상사실\s*[:：]?',
     ]
     
     start_pos = None
@@ -468,6 +473,8 @@ def extract_metadata_from_content(content):
             institution = institution.split('\n')[0].strip()
             institution = re.sub(r'^[:\-\.\s]+', '', institution)
             institution = re.sub(r'[\-\.\s]+$', '', institution)
+            # 마지막 '*', '@' 제거
+            institution = institution.rstrip('*@')
             if institution:
                 break
     

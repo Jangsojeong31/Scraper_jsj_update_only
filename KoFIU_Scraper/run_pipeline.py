@@ -141,6 +141,10 @@ def print_stats(json_path: Path) -> None:
 
 
 def main() -> None:
+    # 기본 검색 종료일: 오늘 날짜
+    today = datetime.now()
+    default_edate = today.strftime('%Y-%m-%d')
+    
     parser = argparse.ArgumentParser(
         description="금융정보분석원 제재공시 스크래핑 전체 파이프라인"
     )
@@ -158,6 +162,24 @@ def main() -> None:
         '--log-file',
         type=str,
         help='실행 로그를 저장할 파일 경로 (기록은 append 모드)'
+    )
+    parser.add_argument(
+        '--sdate',
+        type=str,
+        default=None,
+        help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)'
+    )
+    parser.add_argument(
+        '--edate',
+        type=str,
+        default=default_edate,
+        help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})'
+    )
+    parser.add_argument(
+        '--after',
+        type=str,
+        default=None,
+        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)'
     )
     args = parser.parse_args()
 
@@ -181,9 +203,17 @@ def main() -> None:
             return
 
         if not args.skip_scrape:
+            scraper_args = []
+            if args.sdate:
+                scraper_args.extend(['--sdate', args.sdate])
+            if args.edate:
+                scraper_args.extend(['--edate', args.edate])
+            if args.after:
+                scraper_args.extend(['--after', args.after])
             run_step(
                 'kofiu_scraper_v2.py',
-                '1. 목록 및 PDF 스크래핑 (사건 추출 포함)'
+                '1. 목록 및 PDF 스크래핑 (사건 추출 포함)',
+                scraper_args if scraper_args else None
             )
         else:
             log("\n[건너뜀] 스크래핑 단계는 "
