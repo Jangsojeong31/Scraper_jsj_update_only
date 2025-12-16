@@ -1926,6 +1926,9 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
         
         records = ordered_records
     
+    # 날짜 정규화를 위한 scraper 인스턴스
+    scraper = crawler if crawler else FsbScraper()
+    
     # 데이터 정리
     law_results = []
     for item in records:
@@ -1949,8 +1952,8 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
             '규정명': regulation_name,
             '기관명': item.get('organization', '저축은행중앙회'),
             '본문': item.get('content', ''),
-            '제정일': item.get('enactment_date', ''),
-            '최근 개정일': item.get('revision_date', ''),
+            '제정일': scraper.normalize_date_format(item.get('enactment_date', '')),
+            '최근 개정일': scraper.normalize_date_format(item.get('revision_date', '')),
             '소관부서': item.get('department', ''),
             '파일 이름': file_name
         }

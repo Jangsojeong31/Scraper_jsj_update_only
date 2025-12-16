@@ -1487,6 +1487,461 @@ class LawGoKrScraper(BaseScraper):
         content = re.sub(r'\n{3,}', '\n\n', content)
         return content.strip()
     
+    def extract_content_from_new_window(self, driver) -> Dict[str, str]:
+        """
+        상세 페이지에서 #lsRvsDocInfo 버튼을 클릭하여 열리는 새 창에서 내용 추출
+        
+        Args:
+            driver: Selenium WebDriver 인스턴스
+            
+        Returns:
+            {'revision_reason': str, 'enforcement_date': str, 'promulgation_date': str} 딕셔너리
+        """
+        if driver is None:
+            return {'revision_reason': '', 'enforcement_date': '', 'promulgation_date': ''}
+        
+        original_window = None
+        new_window_content = ""
+        enforcement_date = ""
+        promulgation_date = ""
+        
+        try:
+            # 현재 창 핸들 저장
+            original_window = driver.current_window_handle
+            all_windows_before = set(driver.window_handles)
+            
+            # #lsRvsDocInfo 버튼 찾기 및 클릭
+            button_clicked = False
+            button_element = None
+            
+            # 방법 1: CSS 셀렉터로 찾기
+            try:
+                button_element = driver.find_element(By.CSS_SELECTOR, "#lsRvsDocInfo")
+                if button_element:
+                    print(f"  → #lsRvsDocInfo 버튼 발견 (CSS 셀렉터)")
+                    button_clicked = True
+            except:
+                pass
+            
+            # 방법 2: XPath로 찾기
+            if not button_element:
+                try:
+                    button_element = driver.find_element(By.XPATH, "/html/body/form[2]/div[1]/div[2]/div[1]/div[1]/a[2]")
+                    if button_element:
+                        print(f"  → 버튼 발견 (XPath)")
+                        button_clicked = True
+                except:
+                    pass
+            
+            # 방법 3: 다른 XPath 패턴 시도
+            if not button_element:
+                xpath_patterns = [
+                    "//a[@id='lsRvsDocInfo']",
+                    "//a[contains(@id, 'lsRvsDocInfo')]",
+                ]
+                for xpath in xpath_patterns:
+                    try:
+                        button_element = driver.find_element(By.XPATH, xpath)
+                        if button_element:
+                            print(f"  → 버튼 발견 (XPath: {xpath})")
+                            button_clicked = True
+                            break
+                    except:
+                        continue
+            
+            if not button_element:
+                print(f"  ⚠ #lsRvsDocInfo 버튼을 찾을 수 없습니다")
+                return ""
+            
+            # 버튼 클릭
+            if button_clicked:
+                try:
+                    print(f"  → 새 창 열기 버튼 클릭 중...")
+                    driver.execute_script("arguments[0].scrollIntoView(true);", button_element)
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", button_element)
+                    time.sleep(2)  # 새 창이 열릴 때까지 대기
+                    print(f"  ✓ 버튼 클릭 완료")
+                except Exception as e:
+                    print(f"  ⚠ 버튼 클릭 실패: {e}")
+                    return ""
+            
+            # 새 창이 열렸는지 확인
+            all_windows_after = set(driver.window_handles)
+            new_windows = all_windows_after - all_windows_before
+            
+            if not new_windows:
+                print(f"  ⚠ 새 창이 열리지 않았습니다")
+                return ""
+            
+            # 새 창으로 전환
+            new_window_handle = new_windows.pop()
+            driver.switch_to.window(new_window_handle)
+            print(f"  ✓ 새 창으로 전환 완료")
+            
+            # 새 창 로드 대기 (#rvsDonRsnArea 요소가 나타날 때까지)
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.any_of(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsDonRsnArea")),
+                        EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]"))
+                    )
+                )
+                time.sleep(1)  # 추가 안정화 대기
+                print(f"  ✓ 새 창 로드 완료")
+            except:
+                time.sleep(2)  # fallback 대기
+                print(f"  ⚠ 새 창 로드 대기 시간 초과 (계속 진행)")
+            
+            # 부제목에서 시행일과 공포일 추출 (#rvsConTop > div)
+            try:
+                subtitle_element = None
+                
+                # CSS 셀렉터로 찾기
+                try:
+                    subtitle_element = driver.find_element(By.CSS_SELECTOR, "#rvsConTop > div")
+                    if subtitle_element:
+                        print(f"  ✓ 부제목 영역 발견 (CSS 셀렉터)")
+                except:
+                    pass
+                
+                # XPath로 찾기
+                if not subtitle_element:
+                    try:
+                        subtitle_element = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[1]/div")
+                        if subtitle_element:
+                            print(f"  ✓ 부제목 영역 발견 (XPath)")
+                    except:
+                        pass
+                
+                if subtitle_element:
+                    subtitle_text = subtitle_element.text.strip()
+                    print(f"  → 부제목 텍스트: {subtitle_text[:100]}...")
+                    
+                    # 날짜 패턴 추출: [시행 YYYY. M. D.] [법률 제XXX호, YYYY. M. D., ...]
+                    import re
+                    # 시행일 패턴: [시행 YYYY. M. D.]
+                    enforcement_match = re.search(r'\[시행\s+(\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2})\s*\.?\s*\]', subtitle_text)
+                    if enforcement_match:
+                        enforcement_date = enforcement_match.group(1).strip()
+                        # 공백 정리
+                        enforcement_date = re.sub(r'\s+', ' ', enforcement_date)
+                        print(f"  ✓ 시행일 추출: {enforcement_date}")
+                    
+                    # 공포일 패턴: [법률 제XXX호, YYYY. M. D., ...] 또는 [대통령령 제XXX호, YYYY. M. D., ...]
+                    promulgation_match = re.search(r'\[(?:법률|대통령령|시행령|규칙)\s+제\d+호[^,]*,\s*(\d{4}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2})\s*\.?\s*[,\]]', subtitle_text)
+                    if promulgation_match:
+                        promulgation_date = promulgation_match.group(1).strip()
+                        # 공백 정리
+                        promulgation_date = re.sub(r'\s+', ' ', promulgation_date)
+                        print(f"  ✓ 공포일 추출: {promulgation_date}")
+                else:
+                    print(f"  ⚠ 부제목 영역을 찾을 수 없습니다")
+            except Exception as e:
+                print(f"  ⚠ 부제목에서 날짜 추출 중 오류: {e}")
+            
+            # 새 창의 내용 추출 (#rvsDonRsnArea 영역만 추출)
+            try:
+                # 방법 1: Selenium으로 직접 요소 찾기 (우선)
+                content_element = None
+                
+                # CSS 셀렉터로 찾기
+                try:
+                    content_element = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsDonRsnArea"))
+                    )
+                    print(f"  ✓ #rvsDonRsnArea 영역 발견 (CSS 셀렉터)")
+                except:
+                    pass
+                
+                # XPath로 찾기
+                if not content_element:
+                    try:
+                        content_element = WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]"))
+                        )
+                        print(f"  ✓ 개정이유 영역 발견 (XPath)")
+                    except:
+                        pass
+                
+                # 다른 XPath 패턴 시도
+                if not content_element:
+                    xpath_patterns = [
+                        "//div[@id='rvsDonRsnArea']",
+                        "//div[contains(@id, 'rvsDonRsnArea')]",
+                        "/html/body/form[2]//div[@id='rvsDonRsnArea']",
+                    ]
+                    for xpath in xpath_patterns:
+                        try:
+                            content_element = driver.find_element(By.XPATH, xpath)
+                            if content_element:
+                                print(f"  ✓ 개정이유 영역 발견 (XPath: {xpath})")
+                                break
+                        except:
+                            continue
+                
+                if content_element:
+                    # Selenium 요소에서 텍스트 추출
+                    new_window_content = content_element.text.strip()
+                    
+                    # 연속된 개행 정리
+                    import re
+                    new_window_content = re.sub(r'\n{3,}', '\n\n', new_window_content)
+                    new_window_content = new_window_content.strip()
+                    
+                    # 텍스트가 비어있으면 버튼 클릭 시도
+                    if not new_window_content:
+                        print(f"  → #rvsDonRsnArea가 비어있어 버튼 클릭 시도 중...")
+                        load_button = None
+                        
+                        # 방법 1: CSS 셀렉터로 찾기
+                        try:
+                            load_button = driver.find_element(By.CSS_SELECTOR, "#rvsConBody > p:nth-child(4) > span > a")
+                            if load_button:
+                                print(f"  ✓ 개정이유 로드 버튼 발견 (CSS 셀렉터)")
+                        except:
+                            pass
+                        
+                        # 방법 2: XPath로 찾기
+                        if not load_button:
+                            try:
+                                load_button = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/p[2]/span/a")
+                                if load_button:
+                                    print(f"  ✓ 개정이유 로드 버튼 발견 (XPath)")
+                            except:
+                                pass
+                        
+                        # 방법 3: 다른 패턴 시도
+                        if not load_button:
+                            try:
+                                # #rvsConBody 내의 a 태그 찾기
+                                rvs_con_body = driver.find_element(By.CSS_SELECTOR, "#rvsConBody")
+                                if rvs_con_body:
+                                    buttons = rvs_con_body.find_elements(By.CSS_SELECTOR, "p span a, p a")
+                                    if buttons:
+                                        load_button = buttons[0]
+                                        print(f"  ✓ 개정이유 로드 버튼 발견 (대체 방법)")
+                            except:
+                                pass
+                        
+                        if load_button:
+                            try:
+                                # 버튼 클릭
+                                print(f"  → 개정이유 로드 버튼 클릭 중...")
+                                driver.execute_script("arguments[0].scrollIntoView(true);", load_button)
+                                time.sleep(0.3)
+                                driver.execute_script("arguments[0].click();", load_button)
+                                time.sleep(2)  # 내용 로드 대기
+                                print(f"  ✓ 버튼 클릭 완료")
+                                
+                                # 다시 #rvsDonRsnArea에서 텍스트 추출
+                                try:
+                                    content_element = driver.find_element(By.CSS_SELECTOR, "#rvsDonRsnArea")
+                                    new_window_content = content_element.text.strip()
+                                    
+                                    # 연속된 개행 정리
+                                    new_window_content = re.sub(r'\n{3,}', '\n\n', new_window_content)
+                                    new_window_content = new_window_content.strip()
+                                    
+                                    if new_window_content:
+                                        print(f"  ✓ 버튼 클릭 후 개정이유 추출 완료 ({len(new_window_content)}자)")
+                                    else:
+                                        print(f"  ⚠ 버튼 클릭 후에도 개정이유를 추출하지 못했습니다")
+                                except Exception as e:
+                                    print(f"  ⚠ 버튼 클릭 후 내용 추출 실패: {e}")
+                            except Exception as e:
+                                print(f"  ⚠ 버튼 클릭 실패: {e}")
+                        else:
+                            print(f"  ⚠ 개정이유 로드 버튼을 찾을 수 없습니다")
+                    else:
+                        print(f"  ✓ 새 창에서 개정이유 추출 완료 ({len(new_window_content)}자)")
+                else:
+                    # 방법 2: BeautifulSoup으로 시도
+                    print(f"  → Selenium 요소를 찾지 못해 BeautifulSoup으로 시도 중...")
+                    new_window_soup = BeautifulSoup(driver.page_source, 'lxml')
+                    
+                    # #rvsDonRsnArea 찾기
+                    content_div = new_window_soup.find('div', id='rvsDonRsnArea')
+                    if not content_div:
+                        # XPath 경로 따라가기: form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]
+                        forms = new_window_soup.find_all('form')
+                        if len(forms) >= 2:
+                            form2 = forms[1]  # 두 번째 form
+                            # 경로를 따라가기
+                            try:
+                                current = form2
+                                divs = current.find_all('div', recursive=False)
+                                if len(divs) >= 2:
+                                    current = divs[1]  # div[2]
+                                    divs = current.find_all('div', recursive=False)
+                                    if len(divs) >= 2:
+                                        current = divs[1]  # div[2]
+                                        divs = current.find_all('div', recursive=False)
+                                        if len(divs) >= 6:
+                                            current = divs[5]  # div[6]
+                                            # div/div/div[2]/div/div[1]
+                                            target = current.select_one('div > div > div:nth-child(2) > div > div:nth-child(1)')
+                                            if target:
+                                                content_div = target
+                            except:
+                                pass
+                    
+                    if content_div:
+                        # 스크립트, 스타일 등 제외
+                        for element in content_div.find_all(['script', 'style']):
+                            element.decompose()
+                        # 전체 텍스트 추출 (개행 유지)
+                        new_window_content = content_div.get_text(separator='\n', strip=True)
+                        
+                        # 연속된 개행 정리
+                        import re
+                        new_window_content = re.sub(r'\n{3,}', '\n\n', new_window_content)
+                        new_window_content = new_window_content.strip()
+                        
+                        if new_window_content:
+                            print(f"  ✓ 새 창에서 개정이유 추출 완료 (BeautifulSoup, {len(new_window_content)}자)")
+                        else:
+                            # 텍스트가 비어있으면 버튼 클릭 시도
+                            print(f"  → BeautifulSoup으로 추출한 내용이 비어있어 버튼 클릭 시도 중...")
+                            load_button = None
+                            
+                            # 방법 1: CSS 셀렉터로 찾기
+                            try:
+                                load_button = driver.find_element(By.CSS_SELECTOR, "#rvsConBody > p:nth-child(4) > span > a")
+                                if load_button:
+                                    print(f"  ✓ 개정이유 로드 버튼 발견 (CSS 셀렉터)")
+                            except:
+                                pass
+                            
+                            # 방법 2: XPath로 찾기
+                            if not load_button:
+                                try:
+                                    load_button = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/p[2]/span/a")
+                                    if load_button:
+                                        print(f"  ✓ 개정이유 로드 버튼 발견 (XPath)")
+                                except:
+                                    pass
+                            
+                            # 방법 3: 다른 패턴 시도
+                            if not load_button:
+                                try:
+                                    rvs_con_body = driver.find_element(By.CSS_SELECTOR, "#rvsConBody")
+                                    if rvs_con_body:
+                                        buttons = rvs_con_body.find_elements(By.CSS_SELECTOR, "p span a, p a")
+                                        if buttons:
+                                            load_button = buttons[0]
+                                            print(f"  ✓ 개정이유 로드 버튼 발견 (대체 방법)")
+                                except:
+                                    pass
+                            
+                            if load_button:
+                                try:
+                                    # 버튼 클릭
+                                    print(f"  → 개정이유 로드 버튼 클릭 중...")
+                                    driver.execute_script("arguments[0].scrollIntoView(true);", load_button)
+                                    time.sleep(0.3)
+                                    driver.execute_script("arguments[0].click();", load_button)
+                                    time.sleep(2)  # 내용 로드 대기
+                                    print(f"  ✓ 버튼 클릭 완료")
+                                    
+                                    # 다시 #rvsDonRsnArea에서 텍스트 추출
+                                    try:
+                                        content_element = driver.find_element(By.CSS_SELECTOR, "#rvsDonRsnArea")
+                                        new_window_content = content_element.text.strip()
+                                        
+                                        # 연속된 개행 정리
+                                        new_window_content = re.sub(r'\n{3,}', '\n\n', new_window_content)
+                                        new_window_content = new_window_content.strip()
+                                        
+                                        if new_window_content:
+                                            print(f"  ✓ 버튼 클릭 후 개정이유 추출 완료 ({len(new_window_content)}자)")
+                                        else:
+                                            print(f"  ⚠ 버튼 클릭 후에도 개정이유를 추출하지 못했습니다")
+                                    except Exception as e:
+                                        print(f"  ⚠ 버튼 클릭 후 내용 추출 실패: {e}")
+                                except Exception as e:
+                                    print(f"  ⚠ 버튼 클릭 실패: {e}")
+                            else:
+                                print(f"  ⚠ 개정이유 로드 버튼을 찾을 수 없습니다")
+                    else:
+                        print(f"  ⚠ 새 창에서 #rvsDonRsnArea 영역을 찾을 수 없습니다")
+                    
+            except Exception as e:
+                print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # 행정규칙(감독규정) 레이아웃 fallback: rvsConScroll 영역에서 【제정·개정이유】 아래 텍스트 추출
+            if not new_window_content:
+                try:
+                    print("  → rvsConScroll 영역에서 개정이유 추출 시도 중...")
+                    adm_reason_element = None
+                    
+                    # CSS 셀렉터 우선
+                    try:
+                        adm_reason_element = driver.find_element(By.CSS_SELECTOR, "#rvsConScroll > div")
+                        if adm_reason_element:
+                            print("  ✓ rvsConScroll 영역 발견 (CSS 셀렉터)")
+                    except:
+                        pass
+                    
+                    # XPath 대체
+                    if not adm_reason_element:
+                        try:
+                            adm_reason_element = driver.find_element(By.XPATH, "/html/body/div[3]/div[2]/div[2]/div/div[2]/div[2]/div")
+                            if adm_reason_element:
+                                print("  ✓ rvsConScroll 영역 발견 (XPath)")
+                        except:
+                            pass
+                    
+                    if adm_reason_element:
+                        adm_text = adm_reason_element.text.strip()
+                        if adm_text:
+                            import re
+                            # 제목 라인(【제정·개정이유】 등) 제거
+                            adm_text = re.sub(r'^\s*【?\s*제정·개정이유\s*】?\s*\n?', '', adm_text, flags=re.MULTILINE)
+                            # 불필요한 연속 개행 정리
+                            adm_text = re.sub(r'\n{3,}', '\n\n', adm_text).strip()
+                            if adm_text:
+                                new_window_content = adm_text
+                                print(f"  ✓ rvsConScroll에서 개정이유 추출 완료 ({len(new_window_content)}자)")
+                            else:
+                                print("  ⚠ rvsConScroll에서 추출했지만 내용이 비어있음")
+                        else:
+                            print("  ⚠ rvsConScroll 텍스트가 비어있음")
+                    else:
+                        print("  ⚠ rvsConScroll 영역을 찾지 못했습니다")
+                except Exception as e:
+                    print(f"  ⚠ rvsConScroll 영역 추출 중 오류: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 새 창 닫기
+            try:
+                driver.close()
+                print(f"  ✓ 새 창 닫기 완료")
+            except Exception as e:
+                print(f"  ⚠ 새 창 닫기 실패: {e}")
+            
+        except Exception as e:
+            print(f"  ⚠ 새 창 처리 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # 원래 창으로 복귀
+            if original_window:
+                try:
+                    driver.switch_to.window(original_window)
+                    print(f"  ✓ 원래 창으로 복귀 완료")
+                except Exception as e:
+                    print(f"  ⚠ 원래 창으로 복귀 실패: {e}")
+        
+        return {
+            'revision_reason': new_window_content,
+            'enforcement_date': enforcement_date,
+            'promulgation_date': promulgation_date
+        }
+    
     def extract_department_from_detail(self, soup: BeautifulSoup, driver=None, is_adm_rul: bool = False) -> str:
         """
         법령 상세 페이지에서 소관부서 추출
@@ -1912,8 +2367,8 @@ class LawGoKrScraper(BaseScraper):
             print(f"저장할 데이터가 없습니다.")
             return
 
-        # 헤더 정의 (번호, 파일 다운로드 링크 제거, 구분 추가)
-        headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 이름"]
+        # 헤더 정의 (번호, 파일 다운로드 링크 제거, 구분 추가, 개정이유 추가)
+        headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "시행일", "공포일", "파일 이름"]
 
         with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=headers)
@@ -2370,6 +2825,38 @@ def main():
                             else:
                                 print(f"  ⚠ 본문 추출 실패 또는 빈 내용")
                             
+                            # 새 창에서 내용 추출 (#lsRvsDocInfo 버튼 클릭) - '개정이유', '시행일', '공포일' 필드로 저장
+                            # 상세 페이지가 Selenium으로 열려있을 때만 실행
+                            if driver and driver.current_url:
+                                try:
+                                    print(f"  → 새 창에서 내용 추출 시도 중...")
+                                    new_window_data = crawler.extract_content_from_new_window(driver)
+                                    if new_window_data:
+                                        # 새 창에서 추출한 내용 저장
+                                        target_item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                        # 새 창에서 추출한 시행일과 공포일이 있으면 우선 사용
+                                        if new_window_data.get('enforcement_date'):
+                                            target_item['enforcement_date_from_revision'] = new_window_data.get('enforcement_date', '')
+                                        if new_window_data.get('promulgation_date'):
+                                            target_item['promulgation_date_from_revision'] = new_window_data.get('promulgation_date', '')
+                                        
+                                        revision_reason_len = len(target_item.get('revision_reason', ''))
+                                        print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
+                                    else:
+                                        target_item['revision_reason'] = ''
+                                        target_item['enforcement_date_from_revision'] = ''
+                                        target_item['promulgation_date_from_revision'] = ''
+                                        print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다")
+                                except Exception as e:
+                                    target_item['revision_reason'] = ''
+                                    target_item['enforcement_date_from_revision'] = ''
+                                    target_item['promulgation_date_from_revision'] = ''
+                                    print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                            else:
+                                target_item['revision_reason'] = ''
+                                target_item['enforcement_date_from_revision'] = ''
+                                target_item['promulgation_date_from_revision'] = ''
+                            
                             # 부칙 영역에서 제정일과 최근 개정일 추출
                             # 방법 1: 검색 결과 목록에서 부칙 버튼 클릭하여 추출 (테스트)
                             date_info = {'enactment_date': '', 'revision_date': ''}
@@ -2597,6 +3084,36 @@ def main():
                     else:
                         print(f"  ⚠ 내용 추출 실패 또는 빈 내용")
                     
+                    # 새 창에서 내용 추출 (#lsRvsDocInfo 버튼 클릭) - '개정이유', '시행일', '공포일' 필드로 저장
+                    if driver and driver.current_url:
+                        try:
+                            print(f"  → 새 창에서 내용 추출 시도 중...")
+                            new_window_data = crawler.extract_content_from_new_window(driver)
+                            if new_window_data:
+                                item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                # 새 창에서 추출한 시행일과 공포일이 있으면 우선 사용
+                                if new_window_data.get('enforcement_date'):
+                                    item['enforcement_date_from_revision'] = new_window_data.get('enforcement_date', '')
+                                if new_window_data.get('promulgation_date'):
+                                    item['promulgation_date_from_revision'] = new_window_data.get('promulgation_date', '')
+                                
+                                revision_reason_len = len(item.get('revision_reason', ''))
+                                print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
+                            else:
+                                item['revision_reason'] = ''
+                                item['enforcement_date_from_revision'] = ''
+                                item['promulgation_date_from_revision'] = ''
+                                print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다")
+                        except Exception as e:
+                            item['revision_reason'] = ''
+                            item['enforcement_date_from_revision'] = ''
+                            item['promulgation_date_from_revision'] = ''
+                            print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                    else:
+                        item['revision_reason'] = ''
+                        item['enforcement_date_from_revision'] = ''
+                        item['promulgation_date_from_revision'] = ''
+                    
                     # 부칙 영역에서 제정일과 최근 개정일 추출
                     print(f"  → 부칙 영역에서 날짜 추출 중...")
                     date_info = crawler.extract_enactment_and_revision_dates(detail_soup)
@@ -2617,9 +3134,15 @@ def main():
                     item['law_content'] = ""
                     item['enactment_date'] = ''
                     item['revision_date'] = ''
+                    item['revision_reason'] = ''
+                    item['enforcement_date_from_revision'] = ''
+                    item['promulgation_date_from_revision'] = ''
             else:
                 print(f"[{idx}/{len(all_results)}] 링크가 없어 건너뜀")
                 item['law_content'] = ""
+                item['revision_reason'] = ''
+                item['enforcement_date_from_revision'] = ''
+                item['promulgation_date_from_revision'] = ''
         
         print(f"\n=== 법령 상세 내용 추출 완료 ===")
 
@@ -2665,14 +3188,22 @@ def main():
             full_content = item.get('content', item.get('law_content', ''))
             truncated_content = truncate_content(full_content)
             
+            # 시행일과 공포일: 새 창에서 추출한 값이 있으면 우선 사용, 없으면 기존 값 사용
+            enforcement_date = item.get('enforcement_date_from_revision', '') or item.get('enforcement_date', '')
+            promulgation_date = item.get('promulgation_date_from_revision', '') or item.get('promulgation_date', '')
+            
+            # 날짜 필드 정규화
             law_item = {
                 '구분': item.get('division', ''),  # CSV의 구분 값
                 '규정명': regulation_name,  # 원본 법령명 (괄호 포함) 사용
                 '기관명': item.get('organization', '법제처'),
                 '본문': truncated_content,
-                '제정일': item.get('enactment_date', ''),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
-                '최근 개정일': item.get('revision_date', ''),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
+                '제정일': crawler.normalize_date_format(item.get('enactment_date', '')),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
+                '최근 개정일': crawler.normalize_date_format(item.get('revision_date', '')),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
                 '소관부서': item.get('department', item.get('ministry', '')),
+                '개정이유': item.get('revision_reason', ''),  # 새 창에서 추출한 개정이유
+                '시행일': crawler.normalize_date_format(enforcement_date),  # 새 창에서 추출한 시행일 (우선), 없으면 기존 값
+                '공포일': crawler.normalize_date_format(promulgation_date),  # 새 창에서 추출한 공포일 (우선), 없으면 기존 값
                 '파일 이름': item.get('file_name', '')
             }
             law_results.append(law_item)
@@ -2734,6 +3265,9 @@ def main():
                         '제정일': '',
                         '최근 개정일': '',
                         '소관부서': '',
+                        '개정이유': '',
+                        '시행일': '',
+                        '공포일': '',
                         '파일 이름': '',
                     }
                 )

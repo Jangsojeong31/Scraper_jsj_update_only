@@ -899,6 +899,53 @@ def main():
         if dates:
             last_scraped_date = max(dates).strftime('%Y-%m-%d')
     
+    # Law_LegNotice_Scraper 형식의 한글 컬럼 추가
+    def parse_period_to_execution_info(period_str: str) -> tuple:
+        """
+        예고기간 문자열을 시행정보, 시행일, 공포일로 변환
+        
+        Args:
+            period_str: 예고기간 문자열 (예: "2010-03-09~2010-03-29")
+            
+        Returns:
+            (시행정보, 시행일, 공포일) 튜플
+        """
+        if not period_str:
+            return ('', '', '')
+        
+        import re
+        # 날짜 패턴 찾기 (YYYY-MM-DD 형식)
+        date_pattern = r'(\d{4})[-.](\d{1,2})[-.](\d{1,2})'
+        dates = re.findall(date_pattern, period_str)
+        
+        # 시행정보와 시행일은 비워둠
+        시행정보 = ''
+        시행일 = ''
+        
+        if len(dates) >= 1:
+            # 시작일(앞의 날짜)을 공포일로 설정
+            start_date = dates[0]
+            # 형식: "YYYY.MM.DD"
+            공포일 = f"{start_date[0]}.{start_date[1].zfill(2)}.{start_date[2].zfill(2)}"
+        else:
+            공포일 = ''
+        
+        return (시행정보, 시행일, 공포일)
+    
+    # 각 결과 항목에 한글 컬럼 추가
+    for item in results:
+        # 법령명: 원본법령명 우선, 없으면 검색법령명
+        if '법령명' not in item:
+            item['법령명'] = item.get('원본법령명', item.get('검색법령명', ''))
+        
+        # 시행정보, 시행일, 공포일 추가
+        period = item.get('period', '')
+        시행정보, 시행일, 공포일 = parse_period_to_execution_info(period)
+        item['시행정보'] = 시행정보
+        item['시행일'] = 시행일
+        # 공포일도 정규화 (YYYY-MM-DD 형식으로)
+        item['공포일'] = scraper.normalize_date_format(공포일)
+    
     output_data = {
         'url': scraper.LIST_URL,
         'crawled_at': time.strftime('%Y-%m-%d %H:%M:%S'),
