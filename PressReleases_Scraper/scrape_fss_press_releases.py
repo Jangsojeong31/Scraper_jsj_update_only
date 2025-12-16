@@ -589,6 +589,7 @@ def scrape_single_page(session, page_url, page_num, total_pages, start_idx=1, cu
     results = []
     has_recent_data = False  # 페이지 내에 조건에 맞는 데이터가 있는지 여부
     missing_dates_count = 0  # 보도일이 없는 항목 개수
+    consecutive_old_count = 0  # 연속된 기준일 이전 데이터 개수
     
     if cutoff_date is None:
         cutoff_date = datetime(2025, 1, 1)
@@ -823,10 +824,21 @@ def scrape_single_page(session, page_url, page_num, total_pages, start_idx=1, cu
                 print(f"      ℹ️ 보도자료가 아니어서 등록일을 보도일로 사용: {date}")
             
             # 보도일 기준으로만 판단 (등록일은 참고용으로만 사용)
-            # 보도일이 있고 기준일 이전이면 스크랩 중단
+            # 보도일이 있고 기준일 이전이면 카운트 증가 (연속으로 여러 개 만나면 중단)
             if date and not is_after_date(date, cutoff_date):
-                print(f"      ⏹️ 보도일({date})이 기준일({cutoff_date.strftime('%Y-%m-%d')}) 이전입니다. 스크랩을 중단합니다.")
-                return results, True, False, missing_dates_count  # (results, should_stop, has_recent_data, missing_dates_count)
+                consecutive_old_count += 1
+                print(f"      ⏹️ 보도일({date})이 기준일({cutoff_date.strftime('%Y-%m-%d')}) 이전입니다. (연속 {consecutive_old_count}개)")
+                # 연속으로 5개 이상의 기준일 이전 데이터를 만나면 중단
+                # (웹사이트가 최신 데이터를 앞에 배치하므로, 연속으로 오래된 데이터를 만나면 더 이상 최신 데이터가 없을 가능성이 높음)
+                if consecutive_old_count >= 5:
+                    print(f"      ⏹️ 연속으로 {consecutive_old_count}개의 기준일 이전 데이터를 만났습니다. 스크랩을 중단합니다.")
+                    return results, True, False, missing_dates_count  # (results, should_stop, has_recent_data, missing_dates_count)
+                # 기준일 이전 데이터는 저장하지 않음
+                time.sleep(0.5)
+                continue
+            else:
+                # 기준일 이후 데이터를 만나면 카운터 리셋
+                consecutive_old_count = 0
             
             # 보도일 기준으로 포함 여부 결정
             should_include = False
@@ -900,6 +912,7 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
     try:
         # 기존 데이터 로드 및 기준일 설정
         all_results = []
+        recent_results = []  # 신규 보도자료만 저장
         item_counter = 1
         start_page = 1
         
@@ -920,10 +933,12 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
                                 latest_date = date_obj
                 
                 if latest_date:
-                    # 가장 최신 보도일 이후의 데이터만 수집
+                    # 가장 최신 보도일 포함하여 그 이후의 데이터 수집
+                    # 같은 날짜의 데이터도 포함하기 위해 cutoff_date는 latest_date로 설정
+                    # (is_after_date 함수가 >= 를 사용하므로 같은 날짜도 포함됨)
                     cutoff_date = latest_date
                     print(f"📅 기존 데이터에서 가장 최신 보도일: {latest_date.strftime('%Y-%m-%d')}")
-                    print(f"📅 이 날짜 이후의 신규 보도자료만 수집합니다.")
+                    print(f"📅 이 날짜 포함 이후의 신규 보도자료만 수집합니다.")
                 else:
                     # 보도일이 없으면 기본 기준일 사용
                     cutoff_date = default_cutoff_date
@@ -1009,7 +1024,10 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
                         item_counter += 1
                         new_results.append(result)
                 
+                # 신규 데이터를 기존 데이터에 추가 (다음 실행 시 기준 데이터로 사용됨)
                 all_results.extend(new_results)
+                # 신규 데이터만 별도로 추적 (recent_result 파일용)
+                recent_results.extend(new_results)
                 total_missing_dates += missing_dates
                 
                 if len(new_results) < len(page_results):
@@ -1072,11 +1090,16 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
         print(f"\n📊 스크랩 완료")
         print(f"  - 처리 페이지: {page_num}페이지")
         print(f"  - 총 수집 데이터: {len(all_results)}개")
+        print(f"  - 신규 데이터: {len(recent_results)}개")
         print(f"  - 보도일 추출 성공: {total_with_dates}개 ({success_rate:.1f}%)")
         print(f"  - 보도일 누락: {total_missing_dates}개 ({100-success_rate:.1f}%)")
         print(f"  - 소요 시간: {format_time(total_time)}")
         if len(all_results) > 0:
             print(f"  - 평균 처리 시간: {total_time/len(all_results):.1f}초/건")
+        
+        # 신규 데이터 반환을 위해 저장
+        if 'recent_results' not in locals():
+            recent_results = []
 
     except Exception as e:
         print(f"❌ 처리 오류: {e}")
@@ -1087,8 +1110,10 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
                        csv_file="results.csv", 
                        excel_file="results.xlsx", 
                        json_file="results.json")
+        if 'recent_results' not in locals():
+            recent_results = []
 
-    return results
+    return results, recent_results
 
 
 # -----------------------------------------------------------
@@ -1204,17 +1229,33 @@ def main():
     print("=" * 70)
     sys.stdout.flush()
 
-    results = scrape_press_releases(base_url, total_pages=total_pages, resume=True)
+    results, recent_results = scrape_press_releases(base_url, total_pages=total_pages, resume=True)
 
     print("=" * 70)
     print(f"총 {len(results)}개 보도자료 처리 완료")
+    if recent_results:
+        print(f"신규 보도자료: {len(recent_results)}개")
 
     success = sum(1 for r in results if r.get('보도일'))
     if results:
         print(f"보도일 추출 성공률: {success}/{len(results)} ({success/len(results)*100:.1f}%)")
 
-    # 최종 저장
+    # 최종 저장 (전체 데이터: 기존 + 신규) - 다음 실행 시 기준 데이터로 사용됨
+    print("\n" + "=" * 70)
+    print(f"💾 전체 데이터 저장 중... (기존 + 신규 = 총 {len(results)}개)")
     save_results(results)
+    print(f"✅ 전체 데이터 저장 완료: results.csv, results.json, results.xlsx")
+    
+    # 신규 데이터만 별도 저장
+    if recent_results:
+        print("\n" + "=" * 70)
+        print(f"📝 신규 보도자료 {len(recent_results)}개를 별도 파일로 저장합니다...")
+        save_results(recent_results,
+                    csv_file="recent_result.csv",
+                    excel_file="recent_result.xlsx",
+                    json_file="recent_result.json")
+        print(f"✅ 신규 데이터 저장 완료: recent_result.csv, recent_result.json, recent_result.xlsx")
+        print("=" * 70)
     
     # 문제가 있는 항목 리스트업
     print("\n" + "=" * 70)

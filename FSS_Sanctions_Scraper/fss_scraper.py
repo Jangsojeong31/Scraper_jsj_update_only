@@ -317,10 +317,12 @@ class FSSCraper:
         print(f"  페이지 {page_index}: {len(items)}개 항목 발견")
         return items
     
-    def scrape_all(self):
+    def scrape_all(self, limit=None):
         """전체 스크래핑 실행"""
         print("=" * 60)
         print("금융감독원 제재조치 현황 스크래핑 시작")
+        if limit:
+            print(f"제한: 최대 {limit}개 항목만 수집")
         print("=" * 60)
         
         # 26페이지 모두 스크래핑
@@ -328,13 +330,17 @@ class FSSCraper:
         for page in range(1, 27):
             items = self.scrape_list_page(page)
             all_items.extend(items)
+            if limit and len(all_items) >= limit:
+                all_items = all_items[:limit]
+                break
             time.sleep(1)  # 서버 부하 방지
         
         print(f"\n총 {len(all_items)}개 항목 수집 완료")
         
         # 각 항목의 상세 정보 및 첨부파일 추출
         print("\n상세 정보 및 첨부파일 추출 시작...")
-        for idx, item in enumerate(all_items, 1):
+        items_to_process = all_items[:limit] if limit else all_items
+        for idx, item in enumerate(items_to_process, 1):
             print(f"\n[{idx}/{len(all_items)}] {item['제재대상기관']} 처리 중...")
             
             if item['상세페이지URL']:
@@ -400,8 +406,16 @@ class FSSCraper:
             traceback.print_exc()
 
 if __name__ == "__main__":
+    import sys
+    limit = None
+    if len(sys.argv) > 1:
+        try:
+            limit = int(sys.argv[1])
+        except ValueError:
+            pass
+    
     scraper = FSSCraper()
-    results = scraper.scrape_all()
+    results = scraper.scrape_all(limit=limit)
     scraper.save_results()
     
     print("\n" + "=" * 60)
