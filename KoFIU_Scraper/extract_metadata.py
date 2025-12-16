@@ -80,6 +80,11 @@ def extract_sanction_details(content):
         # "3. 제재조치 세부내용" 형식
         r'3\.\s*제재조치\s*세부\s*내용',
         r'3\.\s*제재\s*조치\s*세부\s*내용',
+        # 숫자 없이 "제재조치내용"만 있는 형식
+        r'^제\s*재\s*조\s*치\s*내\s*용\s*[:：]?',
+        r'^제재조치내용\s*[:：]?',
+        r'\n제\s*재\s*조\s*치\s*내\s*용\s*[:：]?',
+        r'\n제재조치내용\s*[:：]?',
     ]
     
     start_pos = None
@@ -438,7 +443,7 @@ def extract_metadata_from_content(content):
     if not content or content.startswith('['):
         return institution, sanction_date
     
-    # 금융회사명 추출 패턴 (숫자 포함만)
+    # 금융회사명 추출 패턴
     institution_patterns = [
         # "1. 금융기관명" 형식
         r'1\.\s*금\s*융\s*기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
@@ -449,6 +454,11 @@ def extract_metadata_from_content(content):
         r'1\.\s*금융회사등\s*명\s*[:：]\s*([^\n\r]+)',
         # "1. 기관명 :" 형식
         r'1\.\s*기\s*관\s*명\s*[:：]\s*([^\n\r]+)',
+        # 숫자 없이 "기관명"만 있는 형식
+        r'^기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
+        r'^기관명\s*[:：]?\s*([^\n\r]+)',
+        r'\n기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
+        r'\n기관명\s*[:：]?\s*([^\n\r]+)',
     ]
     
     for pattern in institution_patterns:
@@ -461,7 +471,7 @@ def extract_metadata_from_content(content):
             if institution:
                 break
     
-    # 제재조치일 추출 패턴 (숫자 포함만)
+    # 제재조치일 추출 패턴
     # 주의: 더 구체적인 패턴(일자)을 먼저 검사해야 함
     date_patterns = [
         # "2. 제재조치 일자 :" 형식 (다양한 공백 패턴) - 먼저 검사
@@ -474,6 +484,11 @@ def extract_metadata_from_content(content):
         r'2\s*\.\s*제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
         # "2. 조치일 :" 형식
         r'2\.\s*조\s*치\s*일\s*[:：]\s*([^\n\r]+)',
+        # 숫자 없이 "제재조치일"만 있는 형식
+        r'^제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
+        r'^제재조치일\s*[:：]?\s*([^\n\r]+)',
+        r'\n제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
+        r'\n제재조치일\s*[:：]?\s*([^\n\r]+)',
     ]
     
     for pattern in date_patterns:

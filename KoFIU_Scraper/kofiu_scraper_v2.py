@@ -38,21 +38,8 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
 from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents
-
-# OCR 전용 extract_metadata 모듈 import
-try:
-    from extract_metadata_ocr import (
-        extract_metadata_from_content as extract_metadata_from_content_ocr,
-        extract_sanction_details as extract_sanction_details_ocr,
-        extract_incidents as extract_incidents_ocr
-    )
-    OCR_MODULE_AVAILABLE = True
-except ImportError:
-    OCR_MODULE_AVAILABLE = False
-    # OCR 모듈이 없으면 일반 함수를 사용
-    extract_metadata_from_content_ocr = extract_metadata_from_content
-    extract_sanction_details_ocr = extract_sanction_details
-    extract_incidents_ocr = extract_incidents
+from ocr_extractor import OCRExtractor
+from post_process_ocr import process_ocr_text
 
 try:
     from selenium import webdriver
@@ -99,8 +86,7 @@ class KoFIUScraperV2:
         
         # OCR 관련 초기화
         self.min_text_length = 200  # 최소 텍스트 길이 (미만이면 OCR 시도)
-        self.ocr_initialized = False
-        self.ocr_available = False
+        self.ocr_extractor = OCRExtractor()  # 하이브리드 OCR 사용
         
         if SELENIUM_AVAILABLE:
             self._init_selenium()
@@ -127,103 +113,6 @@ class KoFIUScraperV2:
             print(f"  ※ 업종분류 파일 로드 중 오류: {e}")
         
         return industry_map
-    
-    def _initialize_ocr(self):
-        """OCR 초기화 (Tesseract 경로 설정)"""
-        if self.ocr_initialized:
-            return
-        self.ocr_initialized = True
-        
-        if not PYMUPDF_AVAILABLE or not PYTESSERACT_AVAILABLE:
-            print("  ※ OCR 모듈(PyMuPDF, pytesseract, Pillow) 중 일부가 설치되어 있지 않아 OCR을 사용할 수 없습니다.")
-            self.ocr_available = False
-            return
-        
-        # Windows에서 Tesseract 경로 찾기
-        tesseract_paths = [
-            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-            r'C:\Users\USER\AppData\Local\Tesseract-OCR\tesseract.exe',
-            r'C:\Users\USER\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
-        ]
-        
-        for path in tesseract_paths:
-            if os.path.exists(path):
-                pytesseract.pytesseract.tesseract_cmd = path
-                self.ocr_available = True
-                print(f"  OCR 사용 준비 완료 (Tesseract 경로: {path})")
-                return
-        
-        print("  ※ Tesseract 실행 파일을 찾을 수 없어 OCR을 사용할 수 없습니다.")
-        self.ocr_available = False
-    
-    def _ocr_pdf(self, file_path):
-        """OCR을 사용하여 PDF에서 텍스트 추출 (이미지 기반 PDF용)"""
-        if not self.ocr_available:
-            return None
-        
-        try:
-            print(f"  OCR 추출 시도 중...")
-            doc = fitz.open(str(file_path))
-            texts = []
-            
-            for page_num, page in enumerate(doc):
-                # 페이지를 이미지로 변환 (400 DPI - 해상도 증가로 정확도 향상)
-                mat = fitz.Matrix(400 / 72, 400 / 72)
-                pix = page.get_pixmap(matrix=mat)
-                img_data = pix.tobytes("png")
-                image = Image.open(io.BytesIO(img_data)).convert('L')
-                
-                # 이미지 전처리: 대비 향상 (보수적 접근)
-                from PIL import ImageEnhance
-                enhancer = ImageEnhance.Contrast(image)
-                image = enhancer.enhance(1.2)  # 대비 20% 증가
-                
-                # 여러 OCR 설정 시도 (더 다양한 PSM 모드 추가)
-                configs = [
-                    ('kor+eng', '--oem 3 --psm 6'),   # 단일 블록
-                    ('kor+eng', '--oem 3 --psm 4'),   # 단일 컬럼
-                    ('kor+eng', '--oem 3 --psm 11'),  # 희미한 텍스트
-                    ('kor', '--oem 3 --psm 6'),
-                    ('kor', '--oem 3 --psm 4'),
-                    ('kor', '--oem 3 --psm 11'),
-                ]
-                
-                best_text = ''
-                best_score = 0
-                
-                for lang, cfg in configs:
-                    try:
-                        candidate = pytesseract.image_to_string(image, lang=lang, config=cfg)
-                        if candidate:
-                            # 결과 품질 평가: 한글 문자 비율과 길이를 고려
-                            korean_chars = sum(1 for c in candidate if '\uAC00' <= c <= '\uD7A3')
-                            total_chars = len(candidate.replace(' ', '').replace('\n', ''))
-                            korean_ratio = korean_chars / total_chars if total_chars > 0 else 0
-                            
-                            # 점수: 길이 + 한글 비율 가중치
-                            score = len(candidate) + (korean_ratio * 1000)
-                            
-                            if score > best_score:
-                                best_text = candidate
-                                best_score = score
-                    except Exception:
-                        continue
-                
-                if best_text:
-                    texts.append(best_text)
-                    print(f"    페이지 {page_num + 1}: {len(best_text)}자 추출")
-            
-            doc.close()
-            
-            full_text = '\n'.join(t.strip() for t in texts if t).strip()
-            if full_text:
-                print(f"  ✓ OCR로 {len(full_text)}자 추출 완료")
-            return full_text if full_text else None
-            
-        except Exception as e:
-            print(f"  ✗ OCR 처리 중 오류: {e}")
-            return None
     
     def get_industry(self, institution_name):
         """
@@ -379,15 +268,14 @@ class KoFIUScraperV2:
                     
                     # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                     if not content or len(content.strip()) < self.min_text_length:
-                        self._initialize_ocr()
-                        if self.ocr_available:
+                        if self.ocr_extractor.is_available():
                             ocr_attempted = True
-                            ocr_text = self._ocr_pdf(file_path)
+                            ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
                             if ocr_text:
-                                # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
-                                content = ocr_text
+                                # OCR 결과 후처리 (띄어쓰기 보존)
+                                content = process_ocr_text(ocr_text, preserve_spacing=True)
                                 doc_type = 'PDF-OCR'
-                                print(f"  ✓ OCR로 추출 완료 ({len(ocr_text)}자)")
+                                print(f"  ✓ OCR 추출 및 후처리 완료 ({len(content)}자)")
                             else:
                                 print(f"  ✗ OCR 추출 실패 (결과 없음)")
                         else:
@@ -451,15 +339,14 @@ class KoFIUScraperV2:
                             
                             # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                             if not content or len(content.strip()) < self.min_text_length:
-                                self._initialize_ocr()
-                                if self.ocr_available:
+                                if self.ocr_extractor.is_available():
                                     ocr_attempted = True
-                                    ocr_text = self._ocr_pdf(file_path)
+                                    ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
                                     if ocr_text:
-                                        # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
-                                        content = ocr_text
+                                        # OCR 결과 후처리 (띄어쓰기 보존)
+                                        content = process_ocr_text(ocr_text, preserve_spacing=True)
                                         doc_type = 'PDF-OCR'
-                                        print(f"  ✓ OCR로 추출 완료 ({len(ocr_text)}자)")
+                                        print(f"  ✓ OCR 추출 및 후처리 완료 ({len(content)}자)")
                                     else:
                                         print(f"  ✗ OCR 추출 실패 (결과 없음)")
                                 else:
@@ -775,18 +662,8 @@ class KoFIUScraperV2:
                 
                 # PDF 내용에서 금융회사명, 제재조치일, 제재내용 추출
                 if attachment_content and not attachment_content.startswith('['):
-                    # OCR로 추출한 경우 OCR 전용 함수 사용
-                    if is_ocr and OCR_MODULE_AVAILABLE:
-                        extract_metadata_fn = extract_metadata_from_content_ocr
-                        extract_sanction_fn = extract_sanction_details_ocr
-                        extract_incidents_fn = extract_incidents_ocr
-                        print(f"  OCR 텍스트로 메타데이터 추출 중...")
-                    else:
-                        extract_metadata_fn = extract_metadata_from_content
-                        extract_sanction_fn = extract_sanction_details
-                        extract_incidents_fn = extract_incidents
-                    
-                    institution, sanction_date = extract_metadata_fn(attachment_content)
+                    # OCR이든 일반 추출이든 동일한 함수 사용 (이미 process_ocr_text로 후처리됨)
+                    institution, sanction_date = extract_metadata_from_content(attachment_content)
                     if institution:
                         item['금융회사명'] = institution
                         # 업종 매핑
@@ -800,13 +677,13 @@ class KoFIUScraperV2:
                         print(f"  제재조치일 추출: {sanction_date}")
                     
                     # 제재내용 (표 데이터) 추출
-                    sanction_details = extract_sanction_fn(attachment_content)
+                    sanction_details = extract_sanction_details(attachment_content)
                     if sanction_details:
                         item['제재내용'] = sanction_details
                         print(f"  제재내용 추출: {len(sanction_details)}자")
                     
                     # 사건 제목/내용 추출 (4번 항목)
-                    incidents = extract_incidents_fn(attachment_content)
+                    incidents = extract_incidents(attachment_content)
                     if incidents:
                         item.update(incidents)
                         incident_count = len([k for k in incidents.keys() if k.startswith('제목')])
@@ -876,6 +753,50 @@ class KoFIUScraperV2:
         result = result.strip()
         
         return result
+    
+    def _post_process_content(self, text):
+        """
+        '내용' 필드 후처리
+        - <관련법규>, <관련규정> 앞에 줄바꿈 추가
+        """
+        if not text:
+            return text
+        
+        result = text
+        
+        # <관련법규> 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)<관련법규>', '\n<관련법규>', result)
+        
+        # <관련규정> 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)<관련규정>', '\n<관련규정>', result)
+        
+        return result
+    
+    def _post_process_sanction_content(self, text):
+        """
+        '제재내용' 필드 후처리
+        - "기 관" -> "기관"
+        - "임 원" -> "임원"
+        - "직 원" -> "직원"
+        - "임원", "직원" 앞에 줄바꿈 추가
+        """
+        if not text:
+            return text
+        
+        result = text
+        
+        # 공백 제거: "기 관" -> "기관", "임 원" -> "임원", "직 원" -> "직원"
+        result = re.sub(r'기\s+관', '기관', result)
+        result = re.sub(r'임\s+원', '임원', result)
+        result = re.sub(r'직\s+원', '직원', result)
+        
+        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)임원', '\n임원', result)
+        
+        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)직원', '\n직원', result)
+        
+        return result
 
     def _split_incidents(self):
         """
@@ -885,14 +806,18 @@ class KoFIUScraperV2:
         split_results = []
         
         for item in self.results:
-            # 기본 필드 추출 (줄바꿈 정리 적용)
+            # 기본 필드 추출 (줄바꿈 정리 및 후처리 적용)
+            raw_sanction_content = item.get('제재내용', '')
+            cleaned_sanction_content = self._clean_content(raw_sanction_content)
+            processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
+            
             base_data = {
                 '구분': '제재사례',
                 '출처': '금융정보분석원',
                 '금융회사명': item.get('금융회사명', ''),
                 '업종': item.get('업종', '기타'),
                 '제재조치일': item.get('제재조치일', ''),
-                '제재내용': self._clean_content(item.get('제재내용', '')),
+                '제재내용': processed_sanction_content,
                 '상세페이지URL': item.get('상세페이지URL', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
@@ -913,13 +838,14 @@ class KoFIUScraperV2:
                     title = item.get(f'제목{i}', '')
                     raw_content = item.get(f'내용{i}', '')
                     
-                    # 내용 정리 (<관련법규>/<관련규정> 섹션 제거 및 줄바꿈 정리)
-                    content = self._clean_content(raw_content)
+                    # 내용 정리 (줄바꿈 정리 및 후처리)
+                    cleaned_content = self._clean_content(raw_content)
+                    processed_content = self._post_process_content(cleaned_content)
                     
                     split_results.append({
                         **base_data,
                         '제목': title,
-                        '내용': content
+                        '내용': processed_content
                     })
         
         return split_results
