@@ -15,7 +15,7 @@ import time
 import re
 import argparse
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from pathlib import Path
 import sys
@@ -794,17 +794,17 @@ class FSSScraperV2:
 
 
 if __name__ == "__main__":
-    # 기본 검색 기간 설정 (오늘 날짜 기준)
+    # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)
     today = datetime.now()
     default_edate = today.strftime('%Y-%m-%d')
-    # 기본 시작일: 1년 전
-    default_sdate = (datetime(today.year - 1, today.month, today.day)).strftime('%Y-%m-%d')
+    # 일주일 전 날짜 계산
+    default_sdate = (today - timedelta(days=7)).strftime('%Y-%m-%d')
     
     parser = argparse.ArgumentParser(description='금융감독원(FSS) 제재조치 현황 스크래퍼')
     parser.add_argument('--limit', type=int, default=None,
                         help='수집할 최대 항목 수 (기본값: 전체 수집)')
-    parser.add_argument('--after', type=str, default='2024.03.30',
-                        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: 2024.03.30)')
+    parser.add_argument('--after', type=str, default=None,
+                        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: None)')
     parser.add_argument('--sdate', type=str, default=default_sdate,
                         help=f'검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_sdate})')
     parser.add_argument('--edate', type=str, default=default_edate,
@@ -827,4 +827,8 @@ if __name__ == "__main__":
     print("스크래핑 완료!")
     print(f"총 {len(results)}개 제재 건 수집 (사건별로 분리되어 저장됨)")
     print("=" * 60)
+    
+    # 기본값으로 실행했을 때 데이터가 없는 경우 메시지 출력
+    if len(results) == 0 and args.sdate == default_sdate and args.edate == default_edate and args.after is None:
+        print("\n일주일 이내 업데이트된 게시물이 없습니다.")
 

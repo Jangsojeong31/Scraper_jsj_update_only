@@ -13,7 +13,7 @@ import re
 import argparse
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from pathlib import Path
 import sys
@@ -41,7 +41,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'KoFIU_Scraper'
 from extract_metadata import (
     extract_metadata_from_content as extract_metadata_from_content_normal,
     extract_sanction_details as extract_sanction_details_base,
-    extract_incidents as extract_incidents_base
+    extract_incidents as extract_incidents_base,
+    format_date_to_iso
 )
 
 # OCR 전용 extract_metadata 모듈 import
@@ -469,17 +470,24 @@ class FSSManagementNoticesScraperV2:
                     
                     # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                     if not content or len(content.strip()) < self.min_text_length:
+                        print(f"  텍스트 추출 실패 또는 부족 ({len(content.strip()) if content else 0}자 < {self.min_text_length}자), OCR 시도...")
                         if self.ocr_extractor.is_available():
                             ocr_attempted = True
-                            ocr_text = self.ocr_extractor.extract_text(file_path, self.min_text_length)
-                            if ocr_text:
-                                # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
+                            ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
+                            if ocr_text and len(ocr_text.strip()) >= self.min_text_length:
+                                # OCR 결과가 있고 최소 길이 이상이면 사용
                                 content = ocr_text
                                 doc_type = 'PDF-OCR'
+                                print(f"  ✓ OCR 추출 성공 ({len(ocr_text)}자)")
+                            elif ocr_text:
+                                # OCR 결과가 있지만 너무 짧은 경우도 사용 (최소한 OCR은 시도했으므로)
+                                content = ocr_text
+                                doc_type = 'PDF-OCR'
+                                print(f"  ⚠ OCR 추출 완료 (길이 부족: {len(ocr_text)}자)")
                             else:
                                 print(f"  ✗ OCR 추출 실패 (결과 없음)")
                         else:
-                            print(f"  ✗ OCR 사용 불가")
+                            print(f"  ✗ OCR 사용 불가 (is_available() = False)")
                     
                     # 임시 파일 삭제
                     try:
@@ -547,19 +555,25 @@ class FSSManagementNoticesScraperV2:
                             
                             # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                             if not content or len(content.strip()) < self.min_text_length:
+                                print(f"  텍스트 추출 실패 또는 부족 ({len(content.strip()) if content else 0}자 < {self.min_text_length}자), OCR 시도...")
                                 self._initialize_ocr()
                                 if self.ocr_available:
                                     ocr_attempted = True
                                     ocr_text = self._ocr_pdf(file_path)
-                                    if ocr_text:
-                                        # OCR 결과가 있으면 무조건 사용 (OCR이 실행되었으므로)
+                                    if ocr_text and len(ocr_text.strip()) >= self.min_text_length:
+                                        # OCR 결과가 있고 최소 길이 이상이면 사용
                                         content = ocr_text
                                         doc_type = 'PDF-OCR'
-                                        print(f"  ✓ OCR로 추출 완료 ({len(ocr_text)}자)")
+                                        print(f"  ✓ OCR 추출 성공 ({len(ocr_text)}자)")
+                                    elif ocr_text:
+                                        # OCR 결과가 있지만 너무 짧은 경우도 사용 (최소한 OCR은 시도했으므로)
+                                        content = ocr_text
+                                        doc_type = 'PDF-OCR'
+                                        print(f"  ⚠ OCR 추출 완료 (길이 부족: {len(ocr_text)}자)")
                                     else:
                                         print(f"  ✗ OCR 추출 실패 (결과 없음)")
                                 else:
-                                    print(f"  ✗ OCR 사용 불가")
+                                    print(f"  ✗ OCR 사용 불가 (ocr_available = False)")
                             
                             # 임시 파일 삭제
                             try:
@@ -953,12 +967,18 @@ class FSSManagementNoticesScraperV2:
         
         for item in self.results:
             # 기본 필드 추출 (줄바꿈 정리 적용)
+            # 제재조치일 포맷팅 (PDF에서 추출한 값 또는 목록에서 가져온 제재조치요구일)
+            sanction_date = item.get('제재조치일', item.get('제재조치요구일', ''))
+            if sanction_date:
+                # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
+                sanction_date = format_date_to_iso(sanction_date)
+            
             base_data = {
                 '구분': '경영유의',  # ManagementNotices 전용
                 '출처': '금융감독원',
                 '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
                 '업종': item.get('업종', '기타'),
-                '제재조치일': item.get('제재조치일', item.get('제재조치요구일', '')),
+                '제재조치일': sanction_date,
                 '제재내용': item.get('제재내용', ''),  # 띄어쓰기 보존
                 '파일다운로드URL': item.get('파일다운로드URL', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
@@ -1037,13 +1057,15 @@ class FSSManagementNoticesScraperV2:
 
 
 if __name__ == "__main__":
-    # 기본 검색 기간 설정 (오늘 날짜 기준)
+    # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)
     today = datetime.now()
     default_edate = today.strftime('%Y-%m-%d')
+    # 일주일 전 날짜 계산
+    default_sdate = (today - timedelta(days=7)).strftime('%Y-%m-%d')
     
     parser = argparse.ArgumentParser(description="금융감독원 경영유의사항 공시 스크래퍼 v2")
     parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
-    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
+    parser.add_argument('--sdate', type=str, default=default_sdate, help=f'검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_sdate})')
     parser.add_argument('--edate', type=str, default=default_edate, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
     parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
     parser.add_argument('--output', type=str, default='fss_results.json', help='출력 파일명 (기본: fss_results.json)')
@@ -1063,4 +1085,8 @@ if __name__ == "__main__":
     print("스크래핑 완료!")
     print(f"총 {len(results)}개 데이터 수집")
     print("=" * 60)
+    
+    # 기본값으로 실행했을 때 데이터가 없는 경우 메시지 출력
+    if len(results) == 0 and args.sdate == default_sdate and args.edate == default_edate and args.after is None:
+        print("\n일주일 이내 업데이트된 게시물이 없습니다.")
 

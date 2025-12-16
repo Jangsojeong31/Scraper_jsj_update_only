@@ -262,7 +262,7 @@ def extract_incidents(content):
         if first_match:
             title_text = first_match.group(1).strip()
             
-            # 문책사항/자율처리 등이 아닌 경우에만 사건제목으로 사용
+            # 문책사항/자율처리 등이 아닌 경우
             if not re.match(r'^(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리)', title_text):
                 # 이전 사건 저장
                 if current_title and current_content:
@@ -271,43 +271,74 @@ def extract_incidents(content):
                     incidents[f'제목{incident_num}'] = current_title
                     incidents[f'내용{incident_num}'] = content_text
                     incident_num += 1
+                elif current_title:  # 제목만 있고 내용이 없는 경우도 저장
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = ''
+                    incident_num += 1
                 
-                # 새 사건 시작
-                current_title = title_text
+                # 상위 제목으로 저장하고, 사건도 시작
+                # 다음에 "(1)"이 나오면 parent_title과 조합하여 새 사건 시작
+                # "(1)"이 없으면 그냥 "제목1"이 사건 제목이 됨
+                parent_title = title_text
+                current_title = title_text  # 사건 시작 (나중에 "(1)"이 나오면 덮어씀)
                 current_content = []
-                in_incident = True
-                parent_title = ""  # 상위 제목 초기화
+                in_incident = True  # 사건 시작
+            i += 1
+            continue
+        
+        # "1) 내용" 패턴 체크 (숫자 뒤에 바로 괄호, 내용으로 처리)
+        # "(1) 제목" 패턴과 구분하기 위해 먼저 체크
+        numbered_content_pattern = r'^(\d+)\s*[\)）]\s*(.+)$'
+        numbered_content_match = re.match(numbered_content_pattern, line)
+        
+        if numbered_content_match and not re.match(r'^[\(（]', line):
+            # 괄호가 앞에 없고 숫자 뒤에 바로 괄호가 있는 경우 내용으로 처리
+            if in_incident and current_title:
+                current_content.append(line)
             i += 1
             continue
         
         # "(1) 제목" 패턴 (줄 시작에서만 매칭!)
         # "(1)", "⑴" 등 전각 괄호 숫자도 지원
+        # 괄호가 앞에 있어야 함
         numbered_pattern = r'^(?:[\(（](\d+)[\)）]|[\u2474-\u247C])\s*(.+)$'
         numbered_match = re.match(numbered_pattern, line)
         
         if numbered_match:
-            # 이전 사건 저장
-            if current_title and current_content:
-                content_text = '\n'.join(current_content).strip()
-                content_text = remove_page_numbers(content_text)
-                incidents[f'제목{incident_num}'] = current_title
-                incidents[f'내용{incident_num}'] = content_text
-                incident_num += 1
-            
-            # 새 사건 시작
+            # 하위 제목 추출
             if numbered_match.lastindex >= 2 and numbered_match.group(2):
                 sub_title = numbered_match.group(2).strip()
             else:
                 # ⑴ 패턴인 경우
                 sub_title = re.sub(r'^[\u2474-\u247C]\s*', '', line).strip()
             
-            # 상위 제목이 있으면 조합
-            if parent_title:
+            # 상위 제목(parent_title)이 있고, 현재 제목이 parent_title과 같으면
+            # 이전 사건을 저장하지 않고 제목만 덮어씀 (같은 "가." 항목의 하위 "(1)" 항목)
+            if parent_title and current_title == parent_title:
+                # 같은 "가." 항목의 하위 "(1)" 항목이므로 이전 사건 저장하지 않음
+                # 하지만 새로운 하위 항목이므로 내용은 초기화
                 current_title = f"{parent_title} - {sub_title}"
+                current_content = []
             else:
-                current_title = sub_title
+                # 이전 사건 저장
+                if current_title and current_content:
+                    content_text = '\n'.join(current_content).strip()
+                    content_text = remove_page_numbers(content_text)
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = content_text
+                    incident_num += 1
+                elif current_title:  # 제목만 있고 내용이 없는 경우도 저장
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = ''
+                    incident_num += 1
+                
+                # 새 사건 시작
+                if parent_title:
+                    current_title = f"{parent_title} - {sub_title}"
+                else:
+                    current_title = sub_title
+                current_content = []
             
-            current_content = []
             in_incident = True
             i += 1
             continue
@@ -340,13 +371,55 @@ def extract_incidents(content):
         i += 1
     
     # 마지막 사건 저장
-    if current_title and current_content:
-        content_text = '\n'.join(current_content).strip()
-        content_text = remove_page_numbers(content_text)
-        incidents[f'제목{incident_num}'] = current_title
-        incidents[f'내용{incident_num}'] = content_text
+    if current_title:
+        if current_content:
+            content_text = '\n'.join(current_content).strip()
+            content_text = remove_page_numbers(content_text)
+            incidents[f'제목{incident_num}'] = current_title
+            incidents[f'내용{incident_num}'] = content_text
+        else:
+            # 제목만 있고 내용이 없는 경우도 저장
+            incidents[f'제목{incident_num}'] = current_title
+            incidents[f'내용{incident_num}'] = ''
     
     return incidents
+
+
+def format_date_to_iso(date_str):
+    """
+    날짜 문자열을 YYYY-MM-DD 형식으로 변환
+    
+    Args:
+        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일")
+        
+    Returns:
+        str: YYYY-MM-DD 형식의 날짜 문자열 (변환 실패 시 원본 반환)
+    """
+    if not date_str:
+        return date_str
+    
+    # 숫자만 추출 (년, 월, 일)
+    numbers = re.findall(r'\d+', date_str)
+    
+    if len(numbers) >= 3:
+        year = numbers[0]
+        month = numbers[1].zfill(2)  # 한 자리 월은 0으로 패딩
+        day = numbers[2].zfill(2)     # 한 자리 일은 0으로 패딩
+        
+        # 유효성 검사
+        try:
+            year_int = int(year)
+            month_int = int(month)
+            day_int = int(day)
+            
+            # 기본적인 유효성 검사
+            if 1900 <= year_int <= 2100 and 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                return f"{year}-{month}-{day}"
+        except ValueError:
+            pass
+    
+    # 변환 실패 시 원본 반환
+    return date_str
 
 
 def extract_metadata_from_content(content):
@@ -411,6 +484,8 @@ def extract_metadata_from_content(content):
             sanction_date = re.sub(r'^[:\-\.\s]+', '', sanction_date)
             sanction_date = re.sub(r'[\-\.\s]+$', '', sanction_date)
             if sanction_date:
+                # 날짜 포맷을 YYYY-MM-DD 형식으로 변환
+                sanction_date = format_date_to_iso(sanction_date)
                 break
     
     return institution, sanction_date

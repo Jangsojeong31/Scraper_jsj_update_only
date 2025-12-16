@@ -131,11 +131,25 @@ def add_particle_spacing(text: str) -> str:
     if text is None:
         return text
     
-    # 긴 토큰을 먼저 처리하여 중첩 매칭 방지
-    particles = ['하여', '및', '록', '면', '다', '터', '의', '음', '는', '은', '를', '을', '에']
-    for token in particles:
-        # 조사/어미 바로 뒤에 공백이 없으면 공백 추가
+    # 뒤에만 공백 추가하는 조사/어미
+    particles_suffix = [
+        '하여', '록', '면', '다', '터', '의', '음', '는', '은', '를', '을', '에',
+        '경우', '따라', '관한', '하며', '한후', '통해', '하였으나', '하였고', 
+        '위한', '향후', '대한', '적인', '하고', '그러나', '하거나', '으며', '앞으로'
+    ]
+    
+    # 앞뒤로 공백 추가하는 조사/어미
+    particles_both = ['및', '등', '이후', '또는']
+    
+    # 뒤에만 공백 추가
+    for token in particles_suffix:
         text = re.sub(rf'({re.escape(token)})(?=\S)', r'\1 ', text)
+    
+    # 앞뒤로 공백 추가
+    for token in particles_both:
+        # 앞뒤에 공백이 없으면 추가
+        text = re.sub(rf'(?<!\s)({re.escape(token)})(?!\s)', r' \1 ', text)
+    
     return text
 
 

@@ -35,11 +35,27 @@ if not tesseract_found:
 with open('fss_results.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
-# 짧은 내용을 가진 항목 찾기 (제재조치내용 또는 제재내용 확인)
+# OCR로 추출한 데이터 또는 추출 실패한 데이터만 추리기
+# 기준:
+# - OCR추출여부 == '예' (OCR로 추출한 항목)
+# - 또는 내용이 짧거나(<100자) OCR 실패 메시지가 포함된 항목
 short_items = []
 for item in data:
     content = item.get('제재조치내용', '') or item.get('제재내용', '')
-    if len(content) < 100:
+    ocr_flag = item.get('OCR추출여부', '')
+    
+    # OCR로 추출한 항목인지 확인
+    is_ocr_extracted = ocr_flag == '예'
+    
+    # 추출 실패 여부 확인 (짧은 내용 또는 실패 메시지 포함)
+    is_failed = (
+        len(content) < 100 or
+        '[OCR 텍스트 추출 실패]' in content or
+        '[OCR 오류 발생]' in content
+    )
+    
+    # OCR 추출 항목이거나 추출 실패한 항목만 포함
+    if is_ocr_extracted or is_failed:
         short_items.append(item)
 
 print(f"OCR 처리할 항목: {len(short_items)}개")

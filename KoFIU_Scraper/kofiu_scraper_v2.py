@@ -12,7 +12,7 @@ import re
 import argparse
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 from pathlib import Path
 import sys
@@ -597,25 +597,60 @@ class KoFIUScraperV2:
             except ValueError:
                 continue
         return None
+    
+    def normalize_date_format(self, date_str):
+        """
+        날짜 문자열을 YYYY-MM-DD 형식으로 변환
+        지원 형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD
+        """
+        if not date_str:
+            return ''
+        
+        date_str = date_str.strip()
+        if not date_str:
+            return ''
+        
+        # 이미 YYYY-MM-DD 형식이면 그대로 반환
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            return date_str
+        
+        # 다른 형식 변환 시도
+        date_obj = self.parse_date(date_str)
+        if date_obj:
+            return date_obj.strftime('%Y-%m-%d')
+        
+        return ''
 
-    def scrape_all(self, limit=None, after_date=None):
+    def scrape_all(self, limit=None, after_date=None, sdate='', edate=''):
         """
         전체 페이지 스크래핑
         
         Args:
             limit: 수집할 최대 항목 수 (None이면 전체 수집)
             after_date: 이 날짜 이후 항목만 수집 (YYYY-MM-DD 또는 YYYY.MM.DD 형식)
+            sdate: 검색 시작일 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식 지원)
+            edate: 검색 종료일 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식 지원)
         """
+        # 날짜 형식 정규화 (YYYY-MM-DD로 통일)
+        sdate_normalized = self.normalize_date_format(sdate) if sdate else ''
+        edate_normalized = self.normalize_date_format(edate) if edate else ''
+        
         print("=" * 60)
         print("금융정보분석원 제재공시 스크래핑 시작 (v2 - FileExtractor 사용)")
         if limit:
             print(f"  수집 제한: {limit}개")
         if after_date:
             print(f"  날짜 필터: {after_date} 이후")
+        if sdate_normalized or edate_normalized:
+            print(f"  검색 기간: {sdate_normalized or '전체'} ~ {edate_normalized or '전체'}")
+        else:
+            print(f"  검색 기간: 전체")
         print("=" * 60)
         
-        # after_date 문자열을 datetime으로 변환
+        # 날짜 문자열을 datetime으로 변환
         after_datetime = self.parse_date(after_date) if after_date else None
+        sdate_datetime = self.parse_date(sdate_normalized) if sdate_normalized else None
+        edate_datetime = self.parse_date(edate_normalized) if edate_normalized else None
         
         if not SELENIUM_AVAILABLE:
             print("  ※ Selenium이 설치되어 있지 않아 스크래핑을 수행할 수 없습니다.")
@@ -655,16 +690,24 @@ class KoFIUScraperV2:
                     break
                 
                 # 날짜 필터링
-                if after_datetime:
-                    post_date_str = item.get('_post_date', '')
-                    post_datetime = self.parse_date(post_date_str)
+                post_date_str = item.get('_post_date', '')
+                post_datetime = self.parse_date(post_date_str)
+                
+                if post_datetime:
+                    # after_date 필터링
+                    if after_datetime and post_datetime < after_datetime:
+                        # 날짜순 정렬이므로, 이 날짜보다 이전이면 더 이상 수집 불필요
+                        print(f"  날짜 {post_date_str}가 기준일({after_date}) 이전이므로 건너뜀")
+                        stop_by_date = True
+                        break
                     
-                    if post_datetime:
-                        if post_datetime < after_datetime:
-                            # 날짜순 정렬이므로, 이 날짜보다 이전이면 더 이상 수집 불필요
-                            print(f"  날짜 {post_date_str}가 기준일({after_date}) 이전이므로 건너뜀")
-                            stop_by_date = True
-                            break
+                    # sdate, edate 필터링
+                    if sdate_datetime and post_datetime < sdate_datetime:
+                        # 시작일보다 이전이면 건너뜀
+                        continue
+                    if edate_datetime and post_datetime > edate_datetime:
+                        # 종료일보다 이후이면 건너뜀
+                        continue
                     
                 pdf_url = item.get('상세페이지URL')
                 if pdf_url and pdf_url in seen_urls:
@@ -929,22 +972,36 @@ class KoFIUScraperV2:
 
 
 if __name__ == "__main__":
+    # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)
+    today = datetime.now()
+    default_edate = today.strftime('%Y-%m-%d')
+    # 일주일 전 날짜 계산
+    default_sdate = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+    
     parser = argparse.ArgumentParser(description='금융정보분석원(KoFIU) 제재공시 스크래퍼')
     parser.add_argument('--limit', type=int, default=None,
                         help='수집할 최대 항목 수 (기본값: 전체 수집)')
-    parser.add_argument('--after', type=str, default='2024.03.30',
-                        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD 또는 YYYY.MM.DD, 기본값: 2024.03.30)')
+    parser.add_argument('--after', type=str, default=None,
+                        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD 또는 YYYY.MM.DD, 기본값: None)')
+    parser.add_argument('--sdate', type=str, default=default_sdate,
+                        help=f'검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_sdate})')
+    parser.add_argument('--edate', type=str, default=default_edate,
+                        help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
     parser.add_argument('--output', type=str, default='kofiu_results.json',
                         help='출력 파일명 (기본값: kofiu_results.json)')
     
     args = parser.parse_args()
     
     scraper = KoFIUScraperV2()
-    results = scraper.scrape_all(limit=args.limit, after_date=args.after)
+    results = scraper.scrape_all(limit=args.limit, after_date=args.after, sdate=args.sdate, edate=args.edate)
     scraper.save_results(filename=args.output)
 
     print("\n" + "=" * 60)
     print("스크래핑 완료!")
     print(f"총 {len(results)}개 제재 건 수집 (사건별로 분리되어 저장됨)")
     print("=" * 60)
+    
+    # 기본값으로 실행했을 때 데이터가 없는 경우 메시지 출력
+    if len(results) == 0 and args.sdate == default_sdate and args.edate == default_edate and args.after is None:
+        print("\n일주일 이내 업데이트된 게시물이 없습니다.")
 
