@@ -35,10 +35,39 @@ if not tesseract_found:
 with open('fss_results.json', 'r', encoding='utf-8') as f:
     data = json.load(f)
 
-# 짧은 내용을 가진 항목 찾기
-short_items = [item for item in data if len(item.get('제재조치내용', '')) < 100]
+# OCR로 추출한 데이터 또는 추출 실패한 데이터만 추리기
+# 기준:
+# - OCR추출여부 == '예' (OCR로 추출한 항목)
+# - 또는 내용이 짧거나(<100자) OCR 실패 메시지가 포함된 항목
+short_items = []
+for item in data:
+    content = item.get('제재조치내용', '') or item.get('제재내용', '')
+    ocr_flag = item.get('OCR추출여부', '')
+    
+    # OCR로 추출한 항목인지 확인
+    is_ocr_extracted = ocr_flag == '예'
+    
+    # 추출 실패 여부 확인 (짧은 내용 또는 실패 메시지 포함)
+    is_failed = (
+        len(content) < 100 or
+        '[OCR 텍스트 추출 실패]' in content or
+        '[OCR 오류 발생]' in content
+    )
+    
+    # OCR 추출 항목이거나 추출 실패한 항목만 포함
+    if is_ocr_extracted or is_failed:
+        short_items.append(item)
+
 print(f"OCR 처리할 항목: {len(short_items)}개")
-print(f"번호: {', '.join([item['번호'] for item in short_items])}")
+if short_items:
+    # 번호 필드가 있으면 사용, 없으면 인덱스 사용
+    numbers = []
+    for idx, item in enumerate(short_items, 1):
+        if '번호' in item and item['번호']:
+            numbers.append(str(item['번호']))
+        else:
+            numbers.append(f"항목{idx}")
+    print(f"번호: {', '.join(numbers)}")
 print("=" * 80)
 
 headers = {
@@ -95,11 +124,21 @@ updated_count = 0
 failed_count = 0
 
 for idx, item in enumerate(short_items, 1):
-    print(f"\n[{idx}/{len(short_items)}] 번호 {item['번호']}: {item['제재대상기관']}")
+    # 식별자 생성 (번호가 있으면 사용, 없으면 인덱스)
+    item_id = item.get('번호', f"항목{idx}")
+    company_name = item.get('금융회사명', item.get('제재대상기관', 'N/A'))
+    print(f"\n[{idx}/{len(short_items)}] 번호 {item_id}: {company_name}")
     
     try:
+        # 상세 페이지 URL 확인 (상세페이지URL 또는 파일다운로드URL 사용)
+        detail_url = item.get('상세페이지URL', '') or item.get('파일다운로드URL', '')
+        if not detail_url:
+            print(f"  ✗ 상세 페이지 URL이 없음")
+            failed_count += 1
+            continue
+        
         # 상세 페이지 접속
-        response = requests.get(item['상세페이지URL'], headers=headers, timeout=10)
+        response = requests.get(detail_url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         # 첨부파일 찾기
@@ -129,7 +168,7 @@ for idx, item in enumerate(short_items, 1):
                 pdf_response = requests.get(pdf_url, headers=headers, timeout=15)
                 
                 if pdf_response.status_code == 200:
-                    temp_filename = f'temp_ocr_{item["번호"]}.pdf'
+                    temp_filename = f'temp_ocr_{item_id}.pdf'
                     with open(temp_filename, 'wb') as f:
                         f.write(pdf_response.content)
                     
@@ -142,12 +181,30 @@ for idx, item in enumerate(short_items, 1):
                     
                     if len(extracted_text) > 100 and not extracted_text.startswith('['):
                         # 원래 데이터에서 해당 항목 찾아서 업데이트
+                        # 번호로 매칭 시도, 없으면 파일다운로드URL로 매칭
+                        updated = False
                         for data_item in data:
-                            if data_item['번호'] == item['번호']:
+                            # 번호로 매칭
+                            if '번호' in item and '번호' in data_item and data_item.get('번호') == item.get('번호'):
                                 data_item['제재조치내용'] = extracted_text
+                                if '제재내용' not in data_item or not data_item.get('제재내용'):
+                                    data_item['제재내용'] = ''  # 제재내용은 나중에 추출
+                                updated = True
                                 updated_count += 1
                                 print(f"    ✓ 업데이트 완료")
                                 break
+                            # 파일다운로드URL로 매칭 (번호가 없는 경우)
+                            elif not item.get('번호') and data_item.get('파일다운로드URL') == item.get('파일다운로드URL'):
+                                data_item['제재조치내용'] = extracted_text
+                                if '제재내용' not in data_item or not data_item.get('제재내용'):
+                                    data_item['제재내용'] = ''  # 제재내용은 나중에 추출
+                                updated = True
+                                updated_count += 1
+                                print(f"    ✓ 업데이트 완료")
+                                break
+                        
+                        if not updated:
+                            print(f"    ⚠ 해당 항목을 데이터에서 찾을 수 없음")
                     else:
                         print(f"    ✗ 추출 실패 또는 내용 부족")
                         failed_count += 1
@@ -189,15 +246,25 @@ if updated_count > 0:
     # 성공한 항목 번호 출력
     success_numbers = []
     for item in short_items:
+        item_id = item.get('번호', '')
         for data_item in data:
-            if data_item['번호'] == item['번호'] and len(data_item.get('제재조치내용', '')) > 100:
-                success_numbers.append(item['번호'])
-                break
+            # 번호로 매칭
+            if item_id and '번호' in data_item and data_item.get('번호') == item_id:
+                content = data_item.get('제재조치내용', '') or data_item.get('제재내용', '')
+                if len(content) > 100:
+                    success_numbers.append(str(item_id))
+                    break
+            # 파일다운로드URL로 매칭 (번호가 없는 경우)
+            elif not item_id and data_item.get('파일다운로드URL') == item.get('파일다운로드URL'):
+                content = data_item.get('제재조치내용', '') or data_item.get('제재내용', '')
+                if len(content) > 100:
+                    success_numbers.append(f"URL:{item.get('파일다운로드URL', '')[:30]}")
+                    break
     
     if success_numbers:
         print(f"\nOCR 성공한 항목 번호: {', '.join(success_numbers)}")
 else:
     print("\n업데이트할 내용이 없습니다.")
 
-print("\n다음 단계: extract_sanctions.py를 실행하여 제재대상과 제재내용을 추출하세요.")
+print("\n다음 단계: fss_scraper_v2.py 또는 run_pipeline.py를 실행하여 제재대상과 제재내용을 추출하세요.")
 

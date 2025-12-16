@@ -133,7 +133,8 @@ def main() -> None:
     
     parser = argparse.ArgumentParser(description="금감원 제재조치 현황 스크래핑 전체 파이프라인")
     parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
-    parser.add_argument('--skip-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 생략')
+    parser.add_argument('--run-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 (기본값: 실행 안 함)')
+    parser.add_argument('--skip-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 생략 (deprecated: 기본값이 실행 안 함)')
     parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
     parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
     parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
@@ -175,16 +176,22 @@ def main() -> None:
         else:
             log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
 
-        # OCR 후처리 실행 (extract_metadata_ocr.py에서 추출된 제재내용 후처리)
+        # OCR 후처리 실행 (V3 OCR로 추출된 제재내용 후처리)
         run_step('post_process_ocr.py', '2. OCR 후처리')
 
+        # OCR 실패 항목 재처리 (기본값: 실행 안 함, --run-ocr-retry 옵션으로 실행)
         ocr_retry_script = ROOT_DIR / 'ocr_failed_items.py'
-        if not args.skip_ocr_retry and ocr_retry_script.exists():
-            run_step('ocr_failed_items.py', '3. OCR 실패 항목 재처리')
-        elif not ocr_retry_script.exists():
-            log("\n[정보] ocr_failed_items.py 파일이 없어 재처리 단계를 건너뜁니다.")
-        else:
+        if args.run_ocr_retry:
+            if ocr_retry_script.exists():
+                run_step('ocr_failed_items.py', '3. OCR 실패 항목 재처리')
+            else:
+                log("\n[정보] ocr_failed_items.py 파일이 없어 재처리 단계를 건너뜁니다.")
+        elif args.skip_ocr_retry:
+            # --skip-ocr-retry 옵션은 하위 호환성을 위해 유지
             log("\n[건너뜀] --skip-ocr-retry 옵션으로 OCR 재처리 단계를 생략했습니다.")
+        else:
+            # 기본값: 실행 안 함
+            log("\n[건너뜀] OCR 재처리 단계는 기본적으로 실행하지 않습니다. (실행하려면 --run-ocr-retry 옵션 사용)")
 
         print_stats(json_path)
     finally:
