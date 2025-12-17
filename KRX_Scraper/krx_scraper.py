@@ -58,7 +58,7 @@ class KrxScraper(BaseScraper):
     JSON_FILENAME = "krx_scraper.json"
     CSV_FILENAME = "krx_scraper.csv"
     
-    def __init__(self, delay: float = 1.0):
+    def __init__(self, delay: float = 1.0, content_all: bool = False):
         super().__init__(delay)
         self.base_dir = Path(__file__).resolve().parent
         self.output_dir = self.base_dir / "output"
@@ -72,6 +72,8 @@ class KrxScraper(BaseScraper):
         self.current_dir.mkdir(parents=True, exist_ok=True)
         # 파일 비교기 초기화
         self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
+        # 본문 전체 가져오기 플래그
+        self.content_all = content_all
     
     def _backup_current_to_previous(self) -> None:
         """스크래퍼 시작 시 current 디렉토리를 previous로 백업
@@ -329,7 +331,7 @@ class KrxScraper(BaseScraper):
             
             # iframe에서 나와서 새 창 확인
             driver.switch_to.default_content()
-            detail_text, download_link, file_name = self._extract_detail(driver, wait, current_handles_before, keyword)
+            detail_text, download_link, file_name, revision_reason, promulgation_date, enforcement_date, revision_content = self._extract_detail(driver, wait, current_handles_before, keyword)
             
             # KFB_Scraper와 동일한 컬럼 구조로 매핑
             record = {
@@ -340,6 +342,10 @@ class KrxScraper(BaseScraper):
                 "제정일": "",  # KRX에서는 제정일 정보가 별도로 제공되지 않음
                 "최근 개정일": revised_date,
                 "소관부서": department,
+                "개정이유": revision_reason,
+                "개정내용": revision_content,
+                "공포일": promulgation_date,
+                "시행일": enforcement_date,
                 "파일 다운로드 링크": download_link,
                 "파일 이름": file_name,
             }
@@ -359,15 +365,15 @@ class KrxScraper(BaseScraper):
                 print(f"  ⚠ iframe 컨텍스트 복원 실패: {e}")
         return results
 
-    def _extract_detail(self, driver, wait, existing_handles: set = None, keyword: str = "") -> Tuple[str, str, str]:
-        """상세 페이지(새 창)에서 내용, 다운로드 링크, 파일 이름 추출
+    def _extract_detail(self, driver, wait, existing_handles: set = None, keyword: str = "") -> Tuple[str, str, str, str, str, str, str]:
+        """상세 페이지(새 창)에서 내용, 다운로드 링크, 파일 이름, 개정이유, 공포일, 시행일, 개정내용 추출
         Args:
             driver: WebDriver 인스턴스
             wait: WebDriverWait 인스턴스
             existing_handles: 클릭 전 창 핸들 집합 (None이면 현재 창 핸들 사용)
             keyword: 검색 키워드 (파일명으로 사용)
         Returns:
-            (본문 내용, 다운로드 링크, 파일 이름) 튜플
+            (본문 내용, 다운로드 링크, 파일 이름, 개정이유, 공포일, 시행일, 개정내용) 튜플
         """
         current_handle = driver.current_window_handle
         if existing_handles is None:
@@ -375,6 +381,10 @@ class KrxScraper(BaseScraper):
         content = "상세 내용 없음"
         download_link = ""
         file_name = ""
+        revision_reason = ""
+        promulgation_date = ""
+        enforcement_date = ""
+        revision_content = ""
         
         # 새 창이 열릴 때까지 대기 (최대 15초)
         try:
@@ -519,6 +529,90 @@ class KrxScraper(BaseScraper):
                     else:
                         file_name = "download.pdf"
                 
+                # 개정이유 버튼 클릭 및 파일 다운로드
+                try:
+                    print(f"  → 개정이유 버튼 찾는 중...")
+                    # 상세 페이지 창(new_handle)이 활성화되어 있는지 확인
+                    if driver.current_window_handle != new_handle:
+                        if new_handle in driver.window_handles:
+                            driver.switch_to.window(new_handle)
+                    
+                    # 개정이유 버튼 찾기
+                    revision_button = None
+                    try:
+                        revision_button = driver.find_element(By.CSS_SELECTOR, "body > div.funGroup > div.funRight > a:nth-child(5)")
+                        print(f"  ✓ 개정이유 버튼 발견")
+                    except NoSuchElementException:
+                        # 대체 선택자 시도
+                        try:
+                            revision_button = driver.find_element(By.XPATH, "//body//div[@class='funGroup']//div[@class='funRight']//a[5]")
+                            print(f"  ✓ 개정이유 버튼 발견 (XPath)")
+                        except:
+                            print(f"  ⚠ 개정이유 버튼을 찾을 수 없음")
+                    
+                    if revision_button:
+                        # 버튼 클릭 전 다운로드 디렉토리 파일 목록 확인
+                        files_before = set(self.current_dir.glob("*"))
+                        
+                        # 버튼 클릭
+                        try:
+                            print(f"  → 개정이유 버튼 클릭 중...")
+                            driver.execute_script("arguments[0].scrollIntoView(true);", revision_button)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", revision_button)
+                            time.sleep(3)  # 파일 다운로드 대기
+                            print(f"  ✓ 버튼 클릭 완료")
+                        except Exception as e:
+                            print(f"  ⚠ 버튼 클릭 실패: {e}")
+                            try:
+                                revision_button.click()
+                                time.sleep(3)
+                            except:
+                                pass
+                        
+                        # 다운로드된 파일 찾기
+                        files_after = set(self.current_dir.glob("*"))
+                        new_files = files_after - files_before
+                        
+                        if new_files:
+                            # 가장 최근 파일 선택
+                            downloaded_file = max(new_files, key=lambda p: p.stat().st_mtime if p.is_file() else 0)
+                            if downloaded_file.is_file():
+                                print(f"  → 다운로드된 파일 발견: {downloaded_file.name}")
+                                
+                                # 파일 내용 추출
+                                from common.file_extractor import FileExtractor
+                                file_extractor = FileExtractor(download_dir=str(self.current_dir))
+                                
+                                file_ext = downloaded_file.suffix.lower()
+                                if file_ext == '.pdf':
+                                    file_content = file_extractor.extract_pdf_content(str(downloaded_file))
+                                elif file_ext in ['.hwp', '.hwpx']:
+                                    file_content = file_extractor.extract_hwp_content(str(downloaded_file))
+                                else:
+                                    # 기타 파일 형식 시도
+                                    file_content = file_extractor.extract_hwp_content(str(downloaded_file))
+                                
+                                if file_content:
+                                    print(f"  → 파일 내용 추출 완료 ({len(file_content)}자)")
+                                    
+                                    # 개정이유, 공포일, 시행일, 개정내용 추출
+                                    revision_info = self._extract_revision_info_from_content(file_content)
+                                    revision_reason = revision_info.get('revision_reason', '')
+                                    promulgation_date = revision_info.get('promulgation_date', '')
+                                    enforcement_date = revision_info.get('enforcement_date', '')
+                                    revision_content = revision_info.get('revision_content', '')
+                                    
+                                    print(f"  ✓ 개정이유: {len(revision_reason)}자, 개정내용: {len(revision_content)}자, 공포일: {promulgation_date}, 시행일: {enforcement_date}")
+                                else:
+                                    print(f"  ⚠ 파일 내용 추출 실패")
+                        else:
+                            print(f"  ⚠ 다운로드된 파일을 찾을 수 없음")
+                except Exception as e:
+                    print(f"  ⚠ 개정이유 추출 중 오류: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
                 # 상세 페이지 창(new_handle) 닫기
                 try:
                     # 현재 상세 페이지 창이 활성화되어 있는지 확인
@@ -542,7 +636,7 @@ class KrxScraper(BaseScraper):
                     if driver.window_handles:
                         driver.switch_to.window(driver.window_handles[0])
                 
-                return (content, download_link, file_name)
+                return (content, download_link, file_name, revision_reason, promulgation_date, enforcement_date, revision_content)
         except TimeoutException:
             print("  ⚠ 새 창이 열리지 않음 (타임아웃)")
         except Exception as exc:
@@ -557,7 +651,7 @@ class KrxScraper(BaseScraper):
         except Exception as e:
             print(f"  ⚠ 창 복귀 실패: {e}")
         
-        return (content, download_link, file_name)
+        return (content, download_link, file_name, revision_reason, promulgation_date, enforcement_date, revision_content)
     
     def _download_pdf_from_print_url(self, driver, print_url: str, file_name: str) -> str:
         """프린트 팝업 URL에서 PDF 파일 다운로드 (Chrome print-to-pdf 사용)
@@ -731,15 +825,288 @@ class KrxScraper(BaseScraper):
         # 다른 형태의 날짜는 그대로 반환 (추가 파싱 필요 시 확장 가능)
         return date_str
     
+    def _extract_revision_info_from_content(self, content: str) -> Dict[str, str]:
+        """파일 내용에서 개정이유, 공포일, 시행일, 개정내용 추출
+        Args:
+            content: 파일에서 추출한 텍스트 내용
+        Returns:
+            {'revision_reason': str, 'promulgation_date': str, 'enforcement_date': str, 'revision_content': str} 딕셔너리
+        """
+        revision_reason = ""
+        promulgation_date = ""
+        enforcement_date = ""
+        revision_content = ""
+        
+        if not content:
+            return {
+                'revision_reason': revision_reason,
+                'promulgation_date': promulgation_date,
+                'enforcement_date': enforcement_date,
+                'revision_content': revision_content
+            }
+        
+        # 파일 내용을 라인별로 분석
+        lines = content.split('\n')
+        
+        # 공포일 추출 (공포일, 공포, 개정일 등 키워드와 함께)
+        promulgation_keywords = ['공포일', '공포', '개정일']
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            for keyword in promulgation_keywords:
+                if keyword in line_stripped:
+                    # 키워드가 포함된 라인에서 날짜 찾기
+                    date_patterns = [
+                        r'(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})',  # YYYY.MM.DD 또는 YYYY-MM-DD
+                        r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일',  # YYYY년 MM월 DD일
+                        r'(\d{4})(\d{2})(\d{2})',  # YYYYMMDD
+                    ]
+                    
+                    for pattern in date_patterns:
+                        match = re.search(pattern, line_stripped)
+                        if match:
+                            if len(match.groups()) >= 3:
+                                year = match.group(1)
+                                month = match.group(2).zfill(2)
+                                day = match.group(3).zfill(2)
+                                promulgation_date = f"{year}-{month}-{day}"
+                                print(f"  → 공포일 추출: {promulgation_date} (라인: {line_stripped[:50]}...)")
+                                break
+                    if promulgation_date:
+                        break
+            if promulgation_date:
+                break
+        
+        # 시행일 추출 (시행일, 시행 등 키워드와 함께)
+        enforcement_keywords = ['시행일', '시행']
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            for keyword in enforcement_keywords:
+                if keyword in line_stripped:
+                    # 키워드가 포함된 라인에서 날짜 찾기
+                    date_patterns = [
+                        r'(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})',  # YYYY.MM.DD 또는 YYYY-MM-DD
+                        r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일',  # YYYY년 MM월 DD일
+                        r'(\d{4})(\d{2})(\d{2})',  # YYYYMMDD
+                    ]
+                    
+                    for pattern in date_patterns:
+                        match = re.search(pattern, line_stripped)
+                        if match:
+                            if len(match.groups()) >= 3:
+                                year = match.group(1)
+                                month = match.group(2).zfill(2)
+                                day = match.group(3).zfill(2)
+                                enforcement_date = f"{year}-{month}-{day}"
+                                print(f"  → 시행일 추출: {enforcement_date} (라인: {line_stripped[:50]}...)")
+                                break
+                    if enforcement_date:
+                        break
+            if enforcement_date:
+                break
+        
+        # 개정이유 추출 (개정이유, 개정사유 등 섹션에서 추출)
+        revision_keywords = ['개정이유', '개정사유', '개정 이유', '개정 사유', '제정·개정이유', '제정개정이유', '개정이유서']
+        revision_start_idx = -1
+        
+        # 개정이유 섹션 시작 위치 찾기
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            for keyword in revision_keywords:
+                if keyword in line_stripped:
+                    revision_start_idx = i
+                    print(f"  → 개정이유 섹션 발견 (라인 {i+1}): {line_stripped[:50]}...")
+                    break
+            if revision_start_idx >= 0:
+                break
+        
+        # '2. 주요내용' 섹션 시작 위치 찾기
+        main_content_start_idx = -1
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            # '2. 주요내용', '2 주요내용', '주요내용' 등 패턴 확인
+            if re.match(r'^2[.\s]*주요내용', line_stripped) or (line_stripped.startswith('주요내용') and i > revision_start_idx):
+                main_content_start_idx = i
+                print(f"  → 주요내용 섹션 발견 (라인 {i+1}): {line_stripped[:50]}...")
+                break
+        
+        if revision_start_idx >= 0:
+            # 개정이유 섹션에서 내용 추출 (주요내용 섹션 전까지)
+            revision_lines = []
+            end_idx = main_content_start_idx if main_content_start_idx > revision_start_idx else len(lines)
+            
+            for i in range(revision_start_idx + 1, end_idx):
+                line = lines[i].strip()
+                
+                # '2. 주요내용' 섹션 시작 확인
+                if re.match(r'^2[.\s]*주요내용', line):
+                    break
+                
+                # 다음 섹션 시작 확인 (다른 키워드가 나타나면 중단)
+                is_next_section = False
+                section_keywords = ['공포일', '시행일', '제정일', '시행', '공포', '부칙', '제1조', '제 1 조']
+                for section_keyword in section_keywords:
+                    if line.startswith(section_keyword) and len(line) < 50:  # 섹션 제목으로 보이는 경우
+                        is_next_section = True
+                        break
+                
+                if is_next_section:
+                    break
+                
+                # 빈 라인은 건너뛰기 (단, 이미 내용이 있으면 하나만 허용)
+                if not line:
+                    if revision_lines and revision_lines[-1]:  # 이전 라인이 비어있지 않으면 빈 라인 하나 허용
+                        continue
+                    else:
+                        continue
+                
+                # 날짜만 있는 라인 제외
+                if re.match(r'^\d{4}', line) and len(line) < 20:
+                    continue
+                
+                revision_lines.append(line)
+            
+            if revision_lines:
+                revision_reason = '\n'.join(revision_lines).strip()
+                # 불필요한 공백 정리
+                revision_reason = re.sub(r'\s+', ' ', revision_reason)
+                # 의미 있는 내용인지 확인
+                if revision_reason and len(revision_reason) > 10:
+                    # 의미 없는 키워드가 포함되어 있으면 제외
+                    meaningless_keywords = ['개정정보', '연혁 선택', 'SBLAW', '표준 규정', '약관 연혁']
+                    if not any(keyword in revision_reason for keyword in meaningless_keywords):
+                        print(f"  → 개정이유 추출: {revision_reason[:100]}...")
+                    else:
+                        print(f"  ⚠ 개정이유에 의미 없는 텍스트 포함, 빈 값으로 처리")
+                        revision_reason = ""
+                else:
+                    print(f"  ⚠ 개정이유가 비어있거나 너무 짧음")
+                    revision_reason = ""
+        
+        # '2. 주요내용' 섹션 추출
+        if main_content_start_idx >= 0:
+            main_content_lines = []
+            # 다음 섹션 시작까지 또는 파일 끝까지 추출
+            for i in range(main_content_start_idx + 1, len(lines)):
+                line = lines[i].strip()
+                
+                # 다음 섹션 시작 확인 (3. 참고사항, 3 참고사항 등)
+                if re.match(r'^3[.\s]*참고사항', line) or re.match(r'^3[.\s]*기타', line):
+                    break
+                
+                # 다른 섹션 시작 확인
+                is_next_section = False
+                section_keywords = ['공포일', '시행일', '제정일', '시행', '공포', '부칙', '제1조', '제 1 조']
+                for section_keyword in section_keywords:
+                    if line.startswith(section_keyword) and len(line) < 50:
+                        is_next_section = True
+                        break
+                
+                if is_next_section:
+                    break
+                
+                # 빈 라인은 건너뛰기 (단, 이미 내용이 있으면 하나만 허용)
+                if not line:
+                    if main_content_lines and main_content_lines[-1]:
+                        continue
+                    else:
+                        continue
+                
+                # 날짜만 있는 라인 제외
+                if re.match(r'^\d{4}', line) and len(line) < 20:
+                    continue
+                
+                main_content_lines.append(line)
+            
+            if main_content_lines:
+                revision_content = '\n'.join(main_content_lines).strip()
+                # 불필요한 공백 정리
+                revision_content = re.sub(r'\s+', ' ', revision_content)
+                if revision_content and len(revision_content) > 10:
+                    print(f"  → 개정내용 추출: {revision_content[:100]}...")
+                else:
+                    revision_content = ""
+        
+        # 개정이유를 찾지 못한 경우, 파일 전체에서 의미 있는 부분 추출 시도
+        if not revision_reason:
+            # 파일 앞부분에서 의미 있는 텍스트 블록 추출
+            meaningful_lines = []
+            for line in lines[:30]:  # 처음 30줄만 확인
+                line = line.strip()
+                if line and len(line) > 10:
+                    # 날짜만 있는 라인 제외
+                    if not re.match(r'^\d{4}', line):
+                        # 섹션 제목 제외
+                        if not any(keyword in line for keyword in ['공포일', '시행일', '제정일', '개정일']):
+                            meaningful_lines.append(line)
+                            if len(meaningful_lines) >= 10:  # 최대 10줄
+                                break
+            
+            if meaningful_lines:
+                revision_reason = ' '.join(meaningful_lines)
+                print(f"  → 개정이유 추출 (전체 내용에서): {revision_reason[:100]}...")
+        
+        return {
+            'revision_reason': revision_reason,
+            'promulgation_date': promulgation_date,
+            'enforcement_date': enforcement_date,
+            'revision_content': revision_content
+        }
+    
+    def _normalize_extracted_date(self, date_str: str) -> str:
+        """추출한 날짜 문자열을 yyyy-mm-dd 형태로 정규화
+        Args:
+            date_str: 추출한 날짜 문자열
+        Returns:
+            yyyy-mm-dd 형태의 날짜 문자열
+        """
+        if not date_str:
+            return ""
+        
+        date_str = date_str.strip()
+        
+        # YYYYMMDD 형태
+        if re.match(r'^\d{8}$', date_str):
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        
+        # YYYY.MM.DD 또는 YYYY-MM-DD 형태
+        match = re.match(r'(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})', date_str)
+        if match:
+            year = match.group(1)
+            month = match.group(2).zfill(2)
+            day = match.group(3).zfill(2)
+            return f"{year}-{month}-{day}"
+        
+        # YYYY년 MM월 DD일 형태
+        match = re.match(r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', date_str)
+        if match:
+            year = match.group(1)
+            month = match.group(2).zfill(2)
+            day = match.group(3).zfill(2)
+            return f"{year}-{month}-{day}"
+        
+        # 이미 yyyy-mm-dd 형태인 경우
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            return date_str
+        
+        return ""
+    
     def _save_outputs(self, records: List[Dict], meta: Dict) -> None:
         """JSON / CSV 결과 저장 (KFB_Scraper와 동일한 컬럼 구조)"""
-        # 날짜 필드 정규화
+        # 날짜 필드 정규화 및 본문 길이 제한
         normalized_records = []
         for item in records:
             normalized_item = item.copy()
             # 날짜 필드 정규화
             normalized_item['제정일'] = self.normalize_date_format(normalized_item.get('제정일', ''))
             normalized_item['최근 개정일'] = self.normalize_date_format(normalized_item.get('최근 개정일', ''))
+            # 본문 내용 처리 (content_all 플래그에 따라 길이 제한)
+            content = normalized_item.get('본문', '') or ''
+            # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+            content = content.replace("\r\n", "\n").replace("\r", "\n")
+            # content_all이 False인 경우에만 1000자로 제한
+            if not self.content_all and len(content) > 1000:
+                content = content[:1000]
+            normalized_item['본문'] = content
             normalized_records.append(normalized_item)
         
         # JSON 저장
@@ -761,17 +1128,18 @@ class KrxScraper(BaseScraper):
             print("저장할 레코드가 없어 CSV 생성을 건너뜁니다.")
             return
         
-        # KFB_Scraper와 동일한 헤더 순서
-        headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]
+        # KFB_Scraper와 동일한 헤더 순서 (개정이유, 개정내용, 공포일, 시행일 추가)
+        headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "개정내용", "공포일", "시행일", "파일 다운로드 링크", "파일 이름"]
         with open(csv_path, "w", encoding="utf-8-sig", newline="") as cf:
             writer = csv.DictWriter(cf, fieldnames=headers)
             writer.writeheader()
             for item in normalized_records:
-                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                # 본문 내용 처리 (content_all 플래그에 따라 길이 제한)
                 content = item.get('본문', '') or ''
                 # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                 content = content.replace("\r\n", "\n").replace("\r", "\n")
-                if len(content) > 1000:
+                # content_all이 False인 경우에만 1000자로 제한
+                if not self.content_all and len(content) > 1000:
                     content = content[:1000]
                 
                 csv_item = item.copy()
@@ -781,7 +1149,17 @@ class KrxScraper(BaseScraper):
 
 
 if __name__ == "__main__":
-    crawler = KrxScraper()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="KRX 법무포탈 스크래퍼")
+    parser.add_argument(
+        "--content-all",
+        action="store_true",
+        help="본문 내용을 전체로 가져옵니다 (기본값: 1000자 제한)"
+    )
+    args = parser.parse_args()
+    
+    crawler = KrxScraper(content_all=args.content_all)
     results = crawler.crawl_krx_legal_portal()
     print(f"추출된 데이터: {len(results)}개")
 
