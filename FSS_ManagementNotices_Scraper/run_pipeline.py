@@ -4,8 +4,9 @@ import subprocess
 import sys
 import os
 import io
+import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -99,6 +100,156 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
         raise RuntimeError(f"{script_name} 실행이 실패했습니다 (exit code: {process.returncode}).")
 
 
+def normalize_date_format(date_str: str) -> str:
+    """
+    날짜 문자열을 YYYY-MM-DD 형식으로 정규화
+    
+    Args:
+        date_str: 다양한 형식의 날짜 문자열 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)
+        
+    Returns:
+        str: YYYY-MM-DD 형식의 날짜 문자열
+    """
+    if not date_str:
+        return date_str
+    
+    # 숫자만 추출
+    numbers = re.findall(r'\d+', date_str)
+    if len(numbers) >= 3:
+        year = numbers[0]
+        month = numbers[1].zfill(2)
+        day = numbers[2].zfill(2)
+        return f"{year}-{month}-{day}"
+    
+    return date_str
+
+
+def parse_date(date_str: str) -> datetime:
+    """
+    날짜 문자열을 datetime 객체로 변환
+    
+    Args:
+        date_str: YYYY-MM-DD 형식의 날짜 문자열
+        
+    Returns:
+        datetime: 변환된 datetime 객체
+    """
+    if not date_str:
+        return None
+    
+    normalized = normalize_date_format(date_str)
+    try:
+        return datetime.strptime(normalized, '%Y-%m-%d')
+    except:
+        return None
+
+
+def get_latest_sanction_date(archive_path: Path) -> datetime:
+    """
+    archive 데이터에서 가장 최근 제재조치일 찾기
+    
+    Args:
+        archive_path: archive JSON 파일 경로
+        
+    Returns:
+        datetime: 가장 최근 제재조치일 (없으면 None)
+    """
+    if not archive_path.exists():
+        return None
+    
+    try:
+        with archive_path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        if not data:
+            return None
+        
+        latest_date = None
+        for item in data:
+            sanction_date_str = item.get('제재조치일', '')
+            if sanction_date_str:
+                date_obj = parse_date(sanction_date_str)
+                if date_obj:
+                    if latest_date is None or date_obj > latest_date:
+                        latest_date = date_obj
+        
+        return latest_date
+    except Exception as e:
+        log(f"  ※ archive 데이터 읽기 오류: {e}")
+        return None
+
+
+def is_duplicate(new_item: dict, archive_data: list) -> bool:
+    """
+    새 항목이 archive 데이터와 중복되는지 확인 (제재조치일 + 금융회사명 기준)
+    
+    Args:
+        new_item: 새로 크롤링한 항목
+        archive_data: 기존 archive 데이터
+        
+    Returns:
+        bool: 중복이면 True
+    """
+    new_sanction_date = new_item.get('제재조치일', '').strip()
+    new_company = new_item.get('금융회사명', '').strip()
+    
+    if not new_sanction_date or not new_company:
+        return False
+    
+    for archive_item in archive_data:
+        archive_sanction_date = archive_item.get('제재조치일', '').strip()
+        archive_company = archive_item.get('금융회사명', '').strip()
+        
+        # 제재조치일과 금융회사명이 모두 일치하면 중복
+        if new_sanction_date == archive_sanction_date and new_company == archive_company:
+            return True
+    
+    return False
+
+
+def merge_with_archive(new_data: list, archive_path: Path) -> list:
+    """
+    새 데이터를 archive 데이터와 병합 (중복 제거)
+    
+    Args:
+        new_data: 새로 크롤링한 데이터
+        archive_path: archive JSON 파일 경로
+        
+    Returns:
+        list: 병합된 데이터
+    """
+    # archive 데이터 로드
+    archive_data = []
+    if archive_path.exists():
+        try:
+            with archive_path.open('r', encoding='utf-8') as f:
+                archive_data = json.load(f)
+        except Exception as e:
+            log(f"  ※ archive 데이터 로드 오류: {e}")
+            archive_data = []
+    
+    # 중복 제거하면서 새 데이터 추가
+    merged_data = archive_data.copy()
+    added_count = 0
+    duplicate_count = 0
+    
+    for new_item in new_data:
+        if is_duplicate(new_item, archive_data):
+            duplicate_count += 1
+        else:
+            merged_data.append(new_item)
+            added_count += 1
+    
+    log(f"\n[병합 결과]")
+    log(f" - archive 기존 데이터: {len(archive_data)}건")
+    log(f" - 새로 크롤링한 데이터: {len(new_data)}건")
+    log(f" - 중복 제외: {duplicate_count}건")
+    log(f" - 새로 추가: {added_count}건")
+    log(f" - 최종 데이터: {len(merged_data)}건")
+    
+    return merged_data
+
+
 def print_stats(json_path: Path) -> None:
     if not json_path.exists():
         log(f"통계 생성을 위한 파일이 존재하지 않습니다: {json_path}")
@@ -131,6 +282,9 @@ def main() -> None:
     today = datetime.now()
     default_edate = today.strftime('%Y-%m-%d')
     
+    # archive 경로
+    archive_path = ROOT_DIR / 'archive' / 'fss_results.json'
+    
     parser = argparse.ArgumentParser(description="금감원 제재조치 현황 스크래핑 전체 파이프라인")
     parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
     parser.add_argument('--run-ocr-retry', action='store_true', help='ocr_failed_items.py 실행 (기본값: 실행 안 함)')
@@ -138,12 +292,13 @@ def main() -> None:
     parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
     parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
     parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
-    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
-    parser.add_argument('--edate', type=str, default=default_edate, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
+    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: archive 기준 자동 계산)')
+    parser.add_argument('--edate', type=str, default=None, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
     parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
+    parser.add_argument('--no-merge', action='store_true', help='archive와 병합하지 않고 새 데이터만 저장')
     args = parser.parse_args()
 
-    json_path = ROOT_DIR / 'fss_results.json'
+    json_path = ROOT_DIR / 'output' / 'fss_results.json'
 
     log_file_handle = None
 
@@ -163,16 +318,130 @@ def main() -> None:
             return
 
         if not args.skip_scrape:
+            # archive에서 가장 최근 제재조치일 찾기
+            latest_sanction_date = get_latest_sanction_date(archive_path)
+            
+            # 크롤링 기간 계산
+            if args.sdate:
+                # 사용자가 직접 지정한 경우
+                sdate = args.sdate
+            elif latest_sanction_date:
+                # archive 기준: 최근 제재조치일 -3일부터
+                start_date = latest_sanction_date - timedelta(days=3)
+                sdate = start_date.strftime('%Y-%m-%d')
+                log(f"\n[크롤링 기간 설정]")
+                log(f" - archive 최근 제재조치일: {latest_sanction_date.strftime('%Y-%m-%d')}")
+                log(f" - 크롤링 시작일: {sdate} (최근 제재조치일 -3일)")
+            else:
+                # archive가 없으면 기본값 사용 (일주일 전)
+                sdate = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+                log(f"\n[크롤링 기간 설정]")
+                log(f" - archive 데이터 없음, 기본값 사용")
+                log(f" - 크롤링 시작일: {sdate} (일주일 전)")
+            
+            edate = args.edate if args.edate else default_edate
+            
             scraper_args = []
             if args.limit:
                 scraper_args.extend(['--limit', str(args.limit)])
-            if args.sdate:
-                scraper_args.extend(['--sdate', args.sdate])
-            if args.edate:
-                scraper_args.extend(['--edate', args.edate])
+            scraper_args.extend(['--sdate', sdate])
+            scraper_args.extend(['--edate', edate])
             if args.after:
                 scraper_args.extend(['--after', args.after])
             run_step('fss_scraper_v2.py', '1. 목록 및 PDF 스크래핑', scraper_args if scraper_args else None)
+            
+            # 새로 크롤링한 데이터와 archive 병합
+            if not args.no_merge and json_path.exists():
+                log(f"\n[단계] archive 데이터와 병합 중...")
+                try:
+                    with json_path.open('r', encoding='utf-8') as f:
+                        new_data = json.load(f)
+                    
+                    # archive와 병합
+                    merged_data = merge_with_archive(new_data, archive_path)
+                    
+                    # 병합된 데이터를 archive에 저장
+                    archive_path.parent.mkdir(parents=True, exist_ok=True)
+                    with archive_path.open('w', encoding='utf-8') as f:
+                        json.dump(merged_data, f, ensure_ascii=False, indent=2)
+                    
+                    log(f"  ✓ archive 데이터 업데이트 완료: {archive_path}")
+                    
+                    # output은 새로 크롤링한 데이터만 유지 (스크래퍼가 이미 저장함)
+                    log(f"  ✓ output 폴더는 새로 크롤링한 데이터만 유지됩니다")
+                    
+                    # archive CSV 생성 (병합된 전체 데이터)
+                    archive_csv_path = archive_path.parent / archive_path.name.replace('.json', '.csv')
+                    
+                    try:
+                        import csv
+                        # 사건별로 분리된 결과 생성 (스크래퍼와 동일한 로직)
+                        split_results = []
+                        for item in merged_data:
+                            # 사건이 여러 개인 경우 각 사건마다 별도의 행으로 확장
+                            titles = []
+                            contents = []
+                            
+                            # 제목1, 제목2, ... 찾기
+                            for key in sorted(item.keys()):
+                                if key.startswith('제목'):
+                                    idx = key.replace('제목', '')
+                                    title = item.get(key, '').strip()
+                                    content = item.get(f'내용{idx}', '').strip()
+                                    if title:
+                                        titles.append(title)
+                                        contents.append(content)
+                            
+                            if titles:
+                                # 사건이 여러 개인 경우
+                                for title, content in zip(titles, contents):
+                                    split_results.append({
+                                        '구분': item.get('구분', '제재사례'),
+                                        '출처': item.get('출처', '금융감독원'),
+                                        '업종': item.get('업종', '기타'),
+                                        '금융회사명': item.get('금융회사명', ''),
+                                        '제목': title,
+                                        '내용': content,
+                                        '제재내용': item.get('제재내용', ''),
+                                        '제재조치일': item.get('제재조치일', ''),
+                                        '파일다운로드URL': item.get('파일다운로드URL', ''),
+                                        'OCR추출여부': item.get('OCR추출여부', '아니오')
+                                    })
+                            else:
+                                # 사건이 없는 경우
+                                split_results.append({
+                                    '구분': item.get('구분', '제재사례'),
+                                    '출처': item.get('출처', '금융감독원'),
+                                    '업종': item.get('업종', '기타'),
+                                    '금융회사명': item.get('금융회사명', ''),
+                                    '제목': '',
+                                    '내용': '',
+                                    '제재내용': item.get('제재내용', ''),
+                                    '제재조치일': item.get('제재조치일', ''),
+                                    '파일다운로드URL': item.get('파일다운로드URL', ''),
+                                    'OCR추출여부': item.get('OCR추출여부', '아니오')
+                                })
+                        
+                        # archive CSV 저장 (병합된 전체 데이터)
+                        fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
+                        with archive_csv_path.open('w', encoding='utf-8-sig', newline='') as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                            writer.writeheader()
+                            for item in split_results:
+                                row = {}
+                                for field in fieldnames:
+                                    value = item.get(field, '')
+                                    if value is None:
+                                        value = ''
+                                    row[field] = str(value)
+                                writer.writerow(row)
+                        
+                        log(f"  ✓ archive CSV 파일 업데이트 완료: {archive_csv_path}")
+                    except Exception as csv_error:
+                        log(f"  ※ CSV 생성 중 오류: {csv_error}")
+                    
+                except Exception as e:
+                    log(f"  ※ 병합 중 오류: {e}")
         else:
             log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
 

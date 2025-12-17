@@ -642,7 +642,6 @@ class FSSManagementNoticesScraperV2:
                     link_text = link.get_text(strip=True)
                 
                 items.append({
-                    '번호': number,
                     '제재대상기관': institution,
                     '제재조치요구일': date,
                     '관련부서': department,
@@ -1012,12 +1011,16 @@ class FSSManagementNoticesScraperV2:
         return split_results
     
     def save_results(self, filename='fss_results.json'):
-        """결과 저장 (JSON, CSV) - 루트 디렉토리에 저장"""
+        """결과 저장 (JSON, CSV) - output 폴더에 저장"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # output 폴더 생성
+        output_dir = os.path.join(script_dir, 'output')
+        os.makedirs(output_dir, exist_ok=True)
         
         # 파일명만 추출 (경로가 포함된 경우)
         base_filename = os.path.basename(filename)
-        json_filepath = os.path.join(script_dir, base_filename)
+        json_filepath = os.path.join(output_dir, base_filename)
         
         # 사건별로 분리된 결과 생성
         split_results = self._split_incidents()
@@ -1030,7 +1033,7 @@ class FSSManagementNoticesScraperV2:
         
         try:
             csv_filename = base_filename.replace('.json', '.csv')
-            csv_filepath = os.path.join(script_dir, csv_filename)
+            csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
                 # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부

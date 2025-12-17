@@ -60,12 +60,9 @@ for item in data:
 
 print(f"OCR 처리할 항목: {len(short_items)}개")
 if short_items:
-    # 번호 필드가 있으면 사용, 없으면 인덱스 사용
+    # 인덱스 사용
     numbers = []
     for idx, item in enumerate(short_items, 1):
-        if '번호' in item and item['번호']:
-            numbers.append(str(item['번호']))
-        else:
             numbers.append(f"항목{idx}")
     print(f"번호: {', '.join(numbers)}")
 print("=" * 80)
@@ -124,8 +121,8 @@ updated_count = 0
 failed_count = 0
 
 for idx, item in enumerate(short_items, 1):
-    # 식별자 생성 (번호가 있으면 사용, 없으면 인덱스)
-    item_id = item.get('번호', f"항목{idx}")
+    # 식별자 생성 (인덱스 사용)
+    item_id = f"항목{idx}"
     company_name = item.get('금융회사명', item.get('제재대상기관', 'N/A'))
     print(f"\n[{idx}/{len(short_items)}] 번호 {item_id}: {company_name}")
     
@@ -181,20 +178,11 @@ for idx, item in enumerate(short_items, 1):
                     
                     if len(extracted_text) > 100 and not extracted_text.startswith('['):
                         # 원래 데이터에서 해당 항목 찾아서 업데이트
-                        # 번호로 매칭 시도, 없으면 파일다운로드URL로 매칭
+                        # 파일다운로드URL 또는 상세페이지URL로 매칭
                         updated = False
                         for data_item in data:
-                            # 번호로 매칭
-                            if '번호' in item and '번호' in data_item and data_item.get('번호') == item.get('번호'):
-                                data_item['제재조치내용'] = extracted_text
-                                if '제재내용' not in data_item or not data_item.get('제재내용'):
-                                    data_item['제재내용'] = ''  # 제재내용은 나중에 추출
-                                updated = True
-                                updated_count += 1
-                                print(f"    ✓ 업데이트 완료")
-                                break
-                            # 파일다운로드URL로 매칭 (번호가 없는 경우)
-                            elif not item.get('번호') and data_item.get('파일다운로드URL') == item.get('파일다운로드URL'):
+                            # 파일다운로드URL로 매칭
+                            if data_item.get('파일다운로드URL') == item.get('파일다운로드URL'):
                                 data_item['제재조치내용'] = extracted_text
                                 if '제재내용' not in data_item or not data_item.get('제재내용'):
                                     data_item['제재내용'] = ''  # 제재내용은 나중에 추출
@@ -237,25 +225,19 @@ print(f"OCR 처리 완료:")
 print(f"  성공: {updated_count}개")
 print(f"  실패: {failed_count}개")
 
-# JSON 파일 저장
+# JSON 파일 저장 (output 폴더에)
 if updated_count > 0:
-    with open('fss_results.json', 'w', encoding='utf-8') as f:
+    os.makedirs(output_dir, exist_ok=True)
+    with open(json_filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print("\nJSON 파일 업데이트 완료!")
     
     # 성공한 항목 번호 출력
     success_numbers = []
     for item in short_items:
-        item_id = item.get('번호', '')
         for data_item in data:
-            # 번호로 매칭
-            if item_id and '번호' in data_item and data_item.get('번호') == item_id:
-                content = data_item.get('제재조치내용', '') or data_item.get('제재내용', '')
-                if len(content) > 100:
-                    success_numbers.append(str(item_id))
-                    break
-            # 파일다운로드URL로 매칭 (번호가 없는 경우)
-            elif not item_id and data_item.get('파일다운로드URL') == item.get('파일다운로드URL'):
+            # 파일다운로드URL로 매칭
+            if data_item.get('파일다운로드URL') == item.get('파일다운로드URL'):
                 content = data_item.get('제재조치내용', '') or data_item.get('제재내용', '')
                 if len(content) > 100:
                     success_numbers.append(f"URL:{item.get('파일다운로드URL', '')[:30]}")

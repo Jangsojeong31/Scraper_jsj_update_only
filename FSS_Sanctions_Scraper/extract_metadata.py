@@ -198,6 +198,45 @@ def extract_incidents(content):
             start_pos = match.end()
             break
     
+    # 숫자 패턴이 없으면 로마숫자 패턴 체크 (Ⅳ. 제재대상사실 등)
+    if start_pos is None:
+        # 로마숫자 패턴 (Ⅳ, 4 등)
+        roman_section4_patterns = [
+            # "Ⅳ. 제재대상사실" 형식
+            r'[Ⅳ4]\s*[\.．]\s*제\s*재\s*대\s*상\s*사\s*실',
+            r'[Ⅳ4]\s*[\.．]\s*제재대상사실',
+            r'[Ⅳ4]\s*[\.．]\s*제재대상\s*사실',
+            # "Ⅳ. 조치대상사실" 형식
+            r'[Ⅳ4]\s*[\.．]\s*조\s*치\s*대\s*상\s*사\s*실',
+            r'[Ⅳ4]\s*[\.．]\s*조치대상사실',
+            r'[Ⅳ4]\s*[\.．]\s*조치대상\s*사실',
+            # "Ⅳ. 제재조치사유" 형식
+            r'[Ⅳ4]\s*[\.．]\s*제\s*재\s*조\s*치\s*사\s*유',
+            r'[Ⅳ4]\s*[\.．]\s*제재조치사유',
+            r'[Ⅳ4]\s*[\.．]\s*제재조치\s*사유',
+            # "Ⅳ. 제재사유" 형식
+            r'[Ⅳ4]\s*[\.．]\s*제\s*재\s*사\s*유',
+            r'[Ⅳ4]\s*[\.．]\s*제재사유',
+            r'[Ⅳ4]\s*[\.．]\s*제재\s*사유',
+            # "Ⅳ. 조치사유" 형식
+            r'[Ⅳ4]\s*[\.．]\s*조\s*치\s*사\s*유',
+            r'[Ⅳ4]\s*[\.．]\s*조치사유',
+            r'[Ⅳ4]\s*[\.．]\s*조치\s*사유',
+            # "Ⅳ. 위반내용" 형식
+            r'[Ⅳ4]\s*[\.．]\s*위\s*반\s*내\s*용',
+            r'[Ⅳ4]\s*[\.．]\s*위반내용',
+            r'[Ⅳ4]\s*[\.．]\s*위반\s*내용',
+            # "Ⅳ. 사유" 형식
+            r'[Ⅳ4]\s*[\.．]\s*사\s*유',
+            r'[Ⅳ4]\s*[\.．]\s*사유',
+        ]
+        
+        for pattern in roman_section4_patterns:
+            match = re.search(pattern, content)
+            if match:
+                start_pos = match.end()
+                break
+    
     if start_pos is None:
         return {}
     
@@ -213,6 +252,14 @@ def extract_incidents(content):
     
     # 줄 단위로 처리
     lines = section_text.split('\n')
+    
+    # "가." 패턴이 있는지 먼저 확인
+    has_ga_pattern = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^[가]\s*[._]\s*', stripped):
+            has_ga_pattern = True
+            break
     
     incidents = {}
     incident_num = 1
@@ -230,8 +277,8 @@ def extract_incidents(content):
             continue
         
         # "가. 문책사항" 또는 "가 . 문 책 사 항" 패턴 체크 (상위 제목)
-        # OCR 텍스트를 위해 점 앞뒤 공백 허용
-        header_pattern = r'^[가-하]\s*\.\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항)(.*)$'
+        # OCR 텍스트를 위해 점 앞뒤 공백 허용, 또한 "가_" 같은 패턴도 허용
+        header_pattern = r'^[가-하]\s*[._]\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항)(.*)$'
         header_match = re.match(header_pattern, line)
         
         if header_match:
@@ -255,8 +302,8 @@ def extract_incidents(content):
             continue
         
         # "가. 일반제목" 또는 "가 . 일반제목" 패턴 (문책사항이 아닌 직접 제목)
-        # OCR 텍스트를 위해 점 앞뒤 공백 허용
-        first_type_pattern = r'^[가-하]\s*\.\s*(.+)$'
+        # OCR 텍스트를 위해 점 앞뒤 공백 허용, 또한 "가_" 같은 패턴도 허용
+        first_type_pattern = r'^[가-하]\s*[._]\s*(.+)$'
         first_match = re.match(first_type_pattern, line)
         
         if first_match:
@@ -354,17 +401,71 @@ def extract_incidents(content):
             i += 1
             continue
         
+        # "□ 제목" 패턴 체크 (사각형 기호로 시작하는 사건 제목)
+        # "가." 패턴이 없을 때만 체크 (서로 다른 문서 형식)
+        # OCR 텍스트를 위해 다양한 사각형 기호 지원 (□, ■, ▣ 등)
+        if not has_ga_pattern:
+            square_pattern = r'^[□■▣▢]\s*(.+)$'
+            square_match = re.match(square_pattern, line)
+            
+            if square_match:
+                # 이전 사건 저장
+                if current_title and current_content:
+                    content_text = '\n'.join(current_content).strip()
+                    content_text = remove_page_numbers(content_text)
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = content_text
+                    incident_num += 1
+                
+                # 새 사건 시작
+                current_title = square_match.group(1).strip()
+                current_content = []
+                in_incident = True
+                i += 1
+                continue
+            
+            # "◦ 내용" 또는 "○ 내용" 패턴 체크 (원형 기호로 시작하는 사건 내용)
+            # "가." 패턴이 없을 때만 체크
+            # OCR 텍스트를 위해 다양한 원형 기호 지원 (◦, ○, ●, ◯ 등)
+            circle_pattern = r'^[◦○●◯]\s*(.+)$'
+            circle_match = re.match(circle_pattern, line)
+            
+            if circle_match:
+                # 사건 내용으로 추가
+                if in_incident and current_title:
+                    current_content.append(line)
+                i += 1
+                continue
+            
+            # "<관련법규>" 섹션 체크 - 사건 내용에 포함시키고, 이후 새로운 사건이 나오면 종료
+            if re.match(r'^<관련법규>', line) or re.match(r'^<관련\s*법규>', line):
+                # "<관련법규>" 섹션도 사건 내용에 포함
+                if in_incident and current_title:
+                    current_content.append(line)
+                    # "<관련법규>" 섹션 이후의 내용도 계속 수집 (다음 "□" 또는 "가." 패턴이 나올 때까지)
+                    i += 1
+                    continue
+                else:
+                    # 사건이 시작되지 않은 상태에서 "<관련법규>"가 나오면 건너뛰기
+                    i += 1
+                    continue
+        
         # 사건 내용으로 추가
         if in_incident and current_title:
             # 다음 "가.", "나." 등이 나오면 중단 (새 사건)
-            # OCR 텍스트를 위해 점 앞뒤 공백 허용
-            if re.match(r'^[가-하]\s*\.\s*', line):
+            # OCR 텍스트를 위해 점 앞뒤 공백 허용, 또한 "가_" 같은 패턴도 허용
+            if re.match(r'^[가-하]\s*[._]\s*', line):
                 i += 1
                 continue  # 위에서 처리됨
             # "(1)", "(2)" 등이 줄 시작에 나오면 중단 (새 사건)
             if re.match(r'^[\(（]\d+[\)）]\s*', line) or re.match(r'^[\u2474-\u247C]', line):
                 i += 1
                 continue  # 위에서 처리됨
+            # "□" 패턴이 나오면 중단 (새 사건) - "가." 패턴이 없을 때만
+            if not has_ga_pattern:
+                if re.match(r'^[□■▣▢]\s*', line):
+                    i += 1
+                    continue  # 위에서 처리됨
             
             current_content.append(line)
         

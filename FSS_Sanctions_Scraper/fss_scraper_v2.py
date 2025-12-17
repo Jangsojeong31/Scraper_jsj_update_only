@@ -392,7 +392,6 @@ class FSSScraperV2:
                     link_text = link.get_text(strip=True)
                 
                 items.append({
-                    '번호': number,
                     '제재대상기관': institution,
                     '제재조치요구일': date,
                     '조회수': view_count,
@@ -710,7 +709,6 @@ class FSSScraperV2:
             base_data = {
                 '구분': '제재사례',
                 '출처': '금융감독원',
-                '번호': item.get('번호', ''),  # 번호 필드 추가
                 '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
                 '업종': item.get('업종', '기타'),
                 '제재조치일': item.get('제재조치일', item.get('제재조치요구일', '')),
@@ -749,12 +747,16 @@ class FSSScraperV2:
         return split_results
 
     def save_results(self, filename='fss_results.json'):
-        """결과 저장 (JSON, CSV) - 루트 디렉토리에 저장"""
+        """결과 저장 (JSON, CSV) - output 폴더에 저장"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # output 폴더 생성
+        output_dir = os.path.join(script_dir, 'output')
+        os.makedirs(output_dir, exist_ok=True)
         
         # 파일명만 추출 (경로가 포함된 경우)
         base_filename = os.path.basename(filename)
-        json_filepath = os.path.join(script_dir, base_filename)
+        json_filepath = os.path.join(output_dir, base_filename)
         
         # 사건별로 분리된 결과 생성
         split_results = self._split_incidents()
@@ -767,11 +769,11 @@ class FSSScraperV2:
 
         try:
             csv_filename = base_filename.replace('.json', '.csv')
-            csv_filepath = os.path.join(script_dir, csv_filename)
+            csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 번호, 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
-                fieldnames = ['번호', '구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
+                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
+                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
 
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
