@@ -957,6 +957,65 @@ class FSSManagementNoticesScraperV2:
         
         return result
     
+    def _post_process_content(self, text):
+        """
+        '내용' 필드 후처리
+        - <관련법규>, <관련규정> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        """
+        if not text:
+            return text
+        
+        result = text
+        
+        # <관련법규> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # <관련법규> 또는 < 관련법규 > 형태 모두 처리
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)관련법규(\s*)>', r'\n<\1관련법규\2>', result)
+        
+        # <관련규정> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # <관련규정> 또는 < 관련규정 > 형태 모두 처리
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)관련규정(\s*)>', r'\n<\1관련규정\2>', result)
+        
+        return result
+    
+    def _post_process_sanction_content(self, text):
+        """
+        '제재내용' 필드 후처리
+        - "기 관" -> "기관"
+        - "임 원" -> "임원"
+        - "직 원" -> "직원"
+        - "임 직 원" -> "임직원" (먼저 처리)
+        - "임직원", "임원", "직원" 앞에 줄바꿈 추가
+        """
+        if not text:
+            return text
+        
+        result = text
+        
+        # 공백 제거: "기 관" -> "기관"
+        result = re.sub(r'기\s+관', '기관', result)
+        
+        # "임 직 원" -> "임직원" (먼저 처리하여 "임직원"을 하나의 단어로 만듦)
+        result = re.sub(r'임\s+직\s+원', '임직원', result)
+        
+        # "임 원" -> "임원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'임\s+원(?!직)', '임원', result)
+        
+        # "직 원" -> "직원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!임)직\s+원', '직원', result)
+        
+        # "임직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)임직원', '\n임직원', result)
+        
+        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임)임원', '\n임원', result)
+        
+        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임직)직원', '\n직원', result)
+        
+        return result
+    
     def _split_incidents(self):
         """
         각 제재 건에서 사건들을 분리하여 개별 행으로 변환
@@ -972,13 +1031,21 @@ class FSSManagementNoticesScraperV2:
                 # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
                 sanction_date = format_date_to_iso(sanction_date)
             
+            # 제재내용: 후처리 적용
+            raw_sanction_content = item.get('제재내용', '')
+            if raw_sanction_content:
+                cleaned_sanction_content = self._clean_content(raw_sanction_content)
+                processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
+            else:
+                processed_sanction_content = ''
+            
             base_data = {
                 '구분': '경영유의',  # ManagementNotices 전용
                 '출처': '금융감독원',
                 '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
                 '업종': item.get('업종', '기타'),
                 '제재조치일': sanction_date,
-                '제재내용': item.get('제재내용', ''),  # 띄어쓰기 보존
+                '제재내용': processed_sanction_content,  # 후처리 적용
                 '파일다운로드URL': item.get('파일다운로드URL', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
@@ -999,13 +1066,17 @@ class FSSManagementNoticesScraperV2:
                     title = item.get(f'제목{i}', '')
                     raw_content = item.get(f'내용{i}', '')
                     
-                    # 내용은 원본 그대로 보존 (띄어쓰기 보존)
-                    content = raw_content
+                    # 내용: 후처리 적용
+                    if raw_content:
+                        cleaned_content = self._clean_content(raw_content)
+                        processed_content = self._post_process_content(cleaned_content)
+                    else:
+                        processed_content = ''
                     
                     split_results.append({
                         **base_data,
                         '제목': title,
-                        '내용': content
+                        '내용': processed_content  # 후처리 적용
                     })
         
         return split_results

@@ -58,6 +58,93 @@ def extract_sanction_details(content):
     if not content or content.startswith('['):
         return ""
     
+    # 먼저 "Ⅲ. 재조치 내용" 패턴 체크 (재조치 패턴 우선)
+    rejaechae_section_patterns = [
+        r'[Ⅲ3]\s*[\.．]\s*재\s*조\s*치\s*내\s*용',
+        r'[Ⅲ3]\s*[\.．]\s*재조치\s*내용',
+        r'[Ⅲ3]\s*[\.．]\s*재조치내용',
+        r'Ⅲ\s*[\.．]\s*재\s*조\s*치\s*내\s*용',
+        r'Ⅲ\s*[\.．]\s*재조치\s*내용',
+    ]
+    
+    rejaechae_section_start = None
+    for pattern in rejaechae_section_patterns:
+        match = re.search(pattern, content)
+        if match:
+            rejaechae_section_start = match.start()
+            break
+    
+    # "Ⅲ. 재조치 내용" 섹션이 있으면 그 안에서 "재조치 대상자 및 제재종류" 찾기
+    if rejaechae_section_start is not None:
+        # "Ⅲ. 재조치 내용" 섹션의 끝 찾기 (다음 로마숫자 섹션 또는 문서 끝)
+        remaining_after_rejaechae = content[rejaechae_section_start:]
+        next_section_match = re.search(r'\n\s*[Ⅳ4]\s*[\.．]\s*[가-힣]', remaining_after_rejaechae)
+        if next_section_match:
+            rejaechae_section = remaining_after_rejaechae[:next_section_match.start()]
+        else:
+            rejaechae_section = remaining_after_rejaechae
+        
+        # "재조치 대상자 및 제재종류", "대상자 및 재조치내용", "재조치내용" 패턴 찾기
+        rejaechae_sanction_patterns = [
+            r'재\s*조\s*치\s*대\s*상\s*자\s*및\s*제\s*재\s*종\s*류',
+            r'재조치\s*대상자\s*및\s*제재종류',
+            r'대\s*상\s*자\s*및\s*재\s*조\s*치\s*내\s*용',
+            r'대상자\s*및\s*재조치내용',
+            r'대상자\s*및\s*재\s*조\s*치\s*내\s*용',
+            r'2\.\s*재\s*조\s*치\s*내\s*용',
+            r'2\.\s*재조치\s*내용',
+            r'2\.\s*재조치내용',
+            r'재\s*조\s*치\s*내\s*용',
+            r'재조치\s*내용',
+            r'재조치내용',
+        ]
+        
+        sanction_start_pos = None
+        for pattern in rejaechae_sanction_patterns:
+            match = re.search(pattern, rejaechae_section)
+            if match:
+                sanction_start_pos = match.end()
+                break
+        
+        if sanction_start_pos is not None:
+            # "재조치 대상자 및 제재종류" 또는 "대상자 및 재조치내용" 이후 내용 추출
+            remaining_after_sanction = rejaechae_section[sanction_start_pos:]
+            
+            # 다음 항목(2. 재조치대상사실 등) 또는 문서 끝까지의 내용 추출
+            next_section_match = re.search(r'\n\s*[2-9]\.\s*[가-힣]', remaining_after_sanction)
+            if next_section_match:
+                sanction_content = remaining_after_sanction[:next_section_match.start()]
+            else:
+                sanction_content = remaining_after_sanction
+            
+            # "◦", "○", "□", "※" 등으로 시작하는 줄 추출
+            lines = sanction_content.split('\n')
+            sanction_lines = []
+            for line in lines:
+                line = line.strip()
+                if line and (line.startswith('◦') or line.startswith('○') or line.startswith('●') or line.startswith('◯')):
+                    # 기호 제거하고 내용만 추출
+                    line = re.sub(r'^[◦○●◯]\s*', '', line)
+                    sanction_lines.append(line)
+                elif line and (line.startswith('□') or line.startswith('■') or line.startswith('▣') or line.startswith('▢')):
+                    # "□"로 시작하는 줄도 추출 (대상자 및 재조치내용 패턴)
+                    line = re.sub(r'^[□■▣▢]\s*', '', line)
+                    sanction_lines.append(line)
+                elif line and line.startswith('※'):
+                    # "※"로 시작하는 줄도 추출 (재조치내용 패턴)
+                    line = re.sub(r'^※\s*', '', line)
+                    sanction_lines.append(line)
+                elif line and not re.match(r'^[가-힣]\s*[\.．]', line) and not re.match(r'^[1-9]\.', line):  # "가.", "2." 같은 패턴이 아니면
+                    sanction_lines.append(line)
+            
+            if sanction_lines:
+                result = '\n'.join(sanction_lines)
+                result = remove_page_numbers(result)
+                return result.strip()
+        
+        # 패턴이 없으면 빈 문자열 반환 (재조치 섹션이지만 제재종류가 없는 경우)
+        return ""
+    
     # 3번 항목 제목 패턴 (다양한 형태 지원)
     sanction_patterns = [
         # "3. 제재조치내용" 형식
@@ -146,6 +233,7 @@ def extract_incidents(content):
     1. 가. 제목1 / 내용1, 나. 제목2 / 내용2 형태
     2. 가. 문책사항 (1) 제목1 / 내용1 (2) 제목2 / 내용2 형태
     3. 가. (1) 제목 (가) 내용 (나) 내용 형태 -> (가), (나)는 내용으로 처리
+    4. Ⅲ. 재조치 내용 > 2. 재조치대상사실 패턴
     
     Args:
         content: PDF에서 추출한 텍스트 내용
@@ -159,6 +247,63 @@ def extract_incidents(content):
     # 일반 텍스트 추출용이므로 collapse_split_syllables() 호출 제거
     # (OCR 텍스트는 V3 post_process_ocr.py에서 후처리됨)
     # content = collapse_split_syllables(content)  # 제거됨
+    
+    # 먼저 "Ⅲ. 재조치 내용" 패턴 체크 (재조치 패턴 우선)
+    rejaechae_section_patterns = [
+        r'[Ⅲ3]\s*[\.．]\s*재\s*조\s*치\s*내\s*용',
+        r'[Ⅲ3]\s*[\.．]\s*재조치\s*내용',
+        r'[Ⅲ3]\s*[\.．]\s*재조치내용',
+        r'Ⅲ\s*[\.．]\s*재\s*조\s*치\s*내\s*용',
+        r'Ⅲ\s*[\.．]\s*재조치\s*내용',
+    ]
+    
+    rejaechae_section_start = None
+    for pattern in rejaechae_section_patterns:
+        match = re.search(pattern, content)
+        if match:
+            rejaechae_section_start = match.start()
+            break
+    
+    # "Ⅲ. 재조치 내용" 섹션이 있으면 그 안에서 "재조치대상사실" 찾기
+    if rejaechae_section_start is not None:
+        # "Ⅲ. 재조치 내용" 섹션의 끝 찾기 (다음 로마숫자 섹션 또는 문서 끝)
+        remaining_after_rejaechae = content[rejaechae_section_start:]
+        next_section_match = re.search(r'\n\s*[Ⅳ4]\s*[\.．]\s*[가-힣]', remaining_after_rejaechae)
+        if next_section_match:
+            rejaechae_section = remaining_after_rejaechae[:next_section_match.start()]
+        else:
+            rejaechae_section = remaining_after_rejaechae
+        
+        # "재조치대상사실" 패턴 찾기
+        rejaechae_incident_patterns = [
+            r'2\.\s*재\s*조\s*치\s*대\s*상\s*사\s*실',
+            r'2\.\s*재조치대상사실',
+            r'2\.\s*재조치대상\s*사실',
+            r'재\s*조\s*치\s*대\s*상\s*사\s*실',
+            r'재조치대상사실',
+            r'재조치대상\s*사실',
+        ]
+        
+        start_pos = None
+        for pattern in rejaechae_incident_patterns:
+            match = re.search(pattern, rejaechae_section)
+            if match:
+                start_pos = match.end()
+                break
+        
+        if start_pos is not None:
+            # "재조치대상사실" 이후 내용 추출
+            remaining_content = rejaechae_section[start_pos:]
+            
+            # 다음 번호 항목(3., 4. 등) 또는 문서 끝까지의 내용 추출
+            next_section_match = re.search(r'\n\s*[3-9]\.\s*[가-힣]', remaining_content)
+            if next_section_match:
+                section_text = remaining_content[:next_section_match.start()]
+            else:
+                section_text = remaining_content
+            
+            # 기존 extract_incidents 로직 재사용
+            return _extract_incidents_from_section(section_text)
     
     # 4번 항목 제목 패턴 (다양한 형태 지원)
     section4_patterns = [
@@ -250,6 +395,20 @@ def extract_incidents(content):
     else:
         section_text = remaining_content
     
+    # 기존 extract_incidents 로직 재사용
+    return _extract_incidents_from_section(section_text)
+
+
+def _extract_incidents_from_section(section_text):
+    """
+    섹션 텍스트에서 사건 제목/내용 추출 (공통 로직)
+    
+    Args:
+        section_text: 추출할 섹션 텍스트
+        
+    Returns:
+        dict: {'제목1': '...', '내용1': '...', '제목2': '...', ...}
+    """
     # 줄 단위로 처리
     lines = section_text.split('\n')
     
@@ -268,6 +427,7 @@ def extract_incidents(content):
     current_content = []
     in_incident = False
     parent_title = ""  # 상위 제목 (가. 문책사항 등)
+    is_unified_incident = False  # 통합 사건 모드 (가. 일반제목 -> 모든 (1), (2)를 하나의 사건으로)
     
     i = 0
     while i < len(lines):
@@ -323,13 +483,24 @@ def extract_incidents(content):
                     incidents[f'내용{incident_num}'] = ''
                     incident_num += 1
                 
-                # 상위 제목으로 저장하고, 사건도 시작
-                # 다음에 "(1)"이 나오면 parent_title과 조합하여 새 사건 시작
-                # "(1)"이 없으면 그냥 "제목1"이 사건 제목이 됨
-                parent_title = title_text
-                current_title = title_text  # 사건 시작 (나중에 "(1)"이 나오면 덮어씀)
-                current_content = []
-                in_incident = True  # 사건 시작
+                # "문책", "책임", "자율처리", "주의" 같은 특정 키워드가 있으면 기존 패턴 (각 (1), (2)를 별도 사건)
+                # 그렇지 않으면 새로운 패턴 (모든 (1), (2)를 하나의 사건으로)
+                has_special_keyword = re.search(r'(문책|책임|자율처리|주의)', title_text)
+                
+                if has_special_keyword:
+                    # 기존 패턴: "나. 주의사항" -> 각 (1), (2)를 별도 사건으로
+                    parent_title = title_text
+                    current_title = None  # "(1)"이 나올 때까지 제목 없음
+                    current_content = []
+                    in_incident = False
+                    is_unified_incident = False
+                else:
+                    # 새로운 패턴: "가. 일반제목" -> 모든 (1), (2)를 하나의 사건으로
+                    parent_title = title_text
+                    current_title = title_text  # 즉시 사건 시작
+                    current_content = []
+                    in_incident = True
+                    is_unified_incident = True
             i += 1
             continue
         
@@ -359,34 +530,37 @@ def extract_incidents(content):
                 # ⑴ 패턴인 경우
                 sub_title = re.sub(r'^[\u2474-\u247C]\s*', '', line).strip()
             
-            # 상위 제목(parent_title)이 있고, 현재 제목이 parent_title과 같으면
-            # 이전 사건을 저장하지 않고 제목만 덮어씀 (같은 "가." 항목의 하위 "(1)" 항목)
-            if parent_title and current_title == parent_title:
-                # 같은 "가." 항목의 하위 "(1)" 항목이므로 이전 사건 저장하지 않음
-                # 하지만 새로운 하위 항목이므로 내용은 초기화
+            # 통합 사건 모드인 경우: "(1)", "(2)" 등을 모두 내용으로 처리
+            if is_unified_incident and current_title == parent_title:
+                # 현재 사건이 통합 사건 모드이고, 제목이 parent_title과 같으면
+                # "(1)", "(2)" 등을 모두 내용으로 추가
+                current_content.append(line)
+                i += 1
+                continue
+            
+            # 기존 패턴: 각 "(1)", "(2)"를 별도 사건으로 처리
+            # 이전 사건 저장
+            if current_title and current_content:
+                content_text = '\n'.join(current_content).strip()
+                content_text = remove_page_numbers(content_text)
+                incidents[f'제목{incident_num}'] = current_title
+                incidents[f'내용{incident_num}'] = content_text
+                incident_num += 1
+            elif current_title:  # 제목만 있고 내용이 없는 경우도 저장
+                incidents[f'제목{incident_num}'] = current_title
+                incidents[f'내용{incident_num}'] = ''
+                incident_num += 1
+            
+            # 새 사건 시작
+            # parent_title이 있으면 "상위제목 - 하위제목" 형식으로, 없으면 하위제목만
+            if parent_title:
                 current_title = f"{parent_title} - {sub_title}"
-                current_content = []
             else:
-                # 이전 사건 저장
-                if current_title and current_content:
-                    content_text = '\n'.join(current_content).strip()
-                    content_text = remove_page_numbers(content_text)
-                    incidents[f'제목{incident_num}'] = current_title
-                    incidents[f'내용{incident_num}'] = content_text
-                    incident_num += 1
-                elif current_title:  # 제목만 있고 내용이 없는 경우도 저장
-                    incidents[f'제목{incident_num}'] = current_title
-                    incidents[f'내용{incident_num}'] = ''
-                    incident_num += 1
-                
-                # 새 사건 시작
-                if parent_title:
-                    current_title = f"{parent_title} - {sub_title}"
-                else:
-                    current_title = sub_title
-                current_content = []
+                current_title = sub_title
+            current_content = []
             
             in_incident = True
+            is_unified_incident = False  # 하위 항목은 통합 모드 해제
             i += 1
             continue
         
@@ -457,15 +631,12 @@ def extract_incidents(content):
             if re.match(r'^[가-하]\s*[._]\s*', line):
                 i += 1
                 continue  # 위에서 처리됨
-            # "(1)", "(2)" 등이 줄 시작에 나오면 중단 (새 사건)
-            if re.match(r'^[\(（]\d+[\)）]\s*', line) or re.match(r'^[\u2474-\u247C]', line):
-                i += 1
-                continue  # 위에서 처리됨
-            # "□" 패턴이 나오면 중단 (새 사건) - "가." 패턴이 없을 때만
-            if not has_ga_pattern:
-                if re.match(r'^[□■▣▢]\s*', line):
+            # "(1)", "(2)" 등이 줄 시작에 나오면 중단 (새 사건) - 통합 사건 모드가 아닐 때만
+            if not is_unified_incident:
+                if re.match(r'^[\(（]\d+[\)）]\s*', line) or re.match(r'^[\u2474-\u247C]', line):
                     i += 1
                     continue  # 위에서 처리됨
+            # "□" 패턴은 내용으로 포함 (모든 경우)
             
             current_content.append(line)
         
@@ -562,8 +733,65 @@ def extract_metadata_from_content(content):
             if institution:
                 break
     
-    # 제재조치일 추출 패턴 (숫자 포함만)
-    # 주의: 더 구체적인 패턴(일자)을 먼저 검사해야 함
+    # 제재조치일 추출 패턴
+    # 먼저 "Ⅲ. 재조치 내용" 패턴 체크 (재조치 패턴 우선)
+    rejaechae_section_patterns = [
+        r'[Ⅲ3]\s*[\.．]\s*재\s*조\s*치\s*내\s*용',
+        r'[Ⅲ3]\s*[\.．]\s*재조치\s*내용',
+        r'[Ⅲ3]\s*[\.．]\s*재조치내용',
+        r'Ⅲ\s*[\.．]\s*재\s*조\s*치\s*내\s*용',
+        r'Ⅲ\s*[\.．]\s*재조치\s*내용',
+    ]
+    
+    rejaechae_section_start = None
+    for pattern in rejaechae_section_patterns:
+        match = re.search(pattern, content)
+        if match:
+            rejaechae_section_start = match.start()
+            break
+    
+    # "Ⅲ. 재조치 내용" 섹션이 있으면 그 안에서 "재조치 일자" 찾기
+    if rejaechae_section_start is not None:
+        # "Ⅲ. 재조치 내용" 섹션의 끝 찾기 (다음 로마숫자 섹션 또는 문서 끝)
+        remaining_after_rejaechae = content[rejaechae_section_start:]
+        next_section_match = re.search(r'\n\s*[Ⅳ4]\s*[\.．]\s*[가-힣]', remaining_after_rejaechae)
+        if next_section_match:
+            rejaechae_section = remaining_after_rejaechae[:next_section_match.start()]
+        else:
+            rejaechae_section = remaining_after_rejaechae
+        
+        # "재조치 일자" 또는 "재조치일자" 패턴 찾기
+        rejaechae_date_patterns = [
+            r'재\s*조\s*치\s*일\s*자\s*[:：]?\s*([^\n\r]+)',
+            r'재조치\s*일\s*자\s*[:：]?\s*([^\n\r]+)',
+            r'재조치\s*일자\s*[:：]?\s*([^\n\r]+)',
+            r'재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
+            r'재조치일\s*[:：]?\s*([^\n\r]+)',
+            r'재\s*조\s*치\s*일자\s*[:：]?\s*([^\n\r]+)',
+            r'재조치일자\s*[:：]?\s*([^\n\r]+)',
+            r'1\.\s*재\s*조\s*치\s*일\s*자\s*[:：]?\s*([^\n\r]+)',
+            r'1\.\s*재조치\s*일\s*자\s*[:：]?\s*([^\n\r]+)',
+            r'1\.\s*재조치\s*일자\s*[:：]?\s*([^\n\r]+)',
+            r'1\.\s*재조치일\s*[:：]?\s*([^\n\r]+)',
+            r'1\.\s*재조치일자\s*[:：]?\s*([^\n\r]+)',
+        ]
+        
+        for pattern in rejaechae_date_patterns:
+            match = re.search(pattern, rejaechae_section)
+            if match:
+                sanction_date = match.group(1).strip()
+                sanction_date = sanction_date.split('\n')[0].strip()
+                sanction_date = re.sub(r'^[:\-\.\s]+', '', sanction_date)
+                sanction_date = re.sub(r'[\-\.\s]+$', '', sanction_date)
+                if sanction_date:
+                    # 날짜 포맷을 YYYY-MM-DD 형식으로 변환
+                    sanction_date = format_date_to_iso(sanction_date)
+                    break
+        
+        if sanction_date:
+            return institution, sanction_date
+    
+    # 기존 패턴 (일반 제재조치일 패턴)
     date_patterns = [
         # "2. 제재조치 일자 :" 형식 (다양한 공백 패턴) - 먼저 검사
         r'2\.\s*제\s*재\s*조\s*치\s+일\s*자\s*[:：]?\s*([^\n\r]+)',
@@ -711,4 +939,3 @@ if __name__ == "__main__":
     print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
     for key, value in sorted(incidents.items()):
         print(f"  {key}: {value[:100]}..." if len(value) > 100 else f"  {key}: {value}")
-

@@ -37,7 +37,7 @@ except ImportError:
 # common 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
-from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents
+from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
 from ocr_extractor import OCRExtractor
 from post_process_ocr import process_ocr_text, clean_content_symbols
 
@@ -898,23 +898,34 @@ class KoFIUScraperV2:
         - "기 관" -> "기관"
         - "임 원" -> "임원"
         - "직 원" -> "직원"
-        - "임원", "직원" 앞에 줄바꿈 추가
+        - "임 직 원" -> "임직원" (먼저 처리)
+        - "임직원", "임원", "직원" 앞에 줄바꿈 추가
         """
         if not text:
             return text
         
         result = text
         
-        # 공백 제거: "기 관" -> "기관", "임 원" -> "임원", "직 원" -> "직원"
+        # 공백 제거: "기 관" -> "기관"
         result = re.sub(r'기\s+관', '기관', result)
-        result = re.sub(r'임\s+원', '임원', result)
-        result = re.sub(r'직\s+원', '직원', result)
         
-        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
-        result = re.sub(r'(?<!\n)임원', '\n임원', result)
+        # "임 직 원" -> "임직원" (먼저 처리하여 "임직원"을 하나의 단어로 만듦)
+        result = re.sub(r'임\s+직\s+원', '임직원', result)
         
-        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
-        result = re.sub(r'(?<!\n)직원', '\n직원', result)
+        # "임 원" -> "임원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'임\s+원(?!직)', '임원', result)
+        
+        # "직 원" -> "직원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!임)직\s+원', '직원', result)
+        
+        # "임직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)임직원', '\n임직원', result)
+        
+        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임)임원', '\n임원', result)
+        
+        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임직)직원', '\n직원', result)
         
         return result
 
@@ -931,12 +942,18 @@ class KoFIUScraperV2:
             cleaned_sanction_content = self._clean_content(raw_sanction_content)
             processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
             
+            # 제재조치일 포맷팅 (PDF에서 추출한 값)
+            sanction_date = item.get('제재조치일', '')
+            if sanction_date:
+                # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
+                sanction_date = format_date_to_iso(sanction_date)
+            
             base_data = {
                 '구분': '제재사례',
                 '출처': '금융정보분석원',
                 '금융회사명': item.get('금융회사명', ''),
                 '업종': item.get('업종', '기타'),
-                '제재조치일': item.get('제재조치일', ''),
+                '제재조치일': sanction_date,
                 '제재내용': processed_sanction_content,
                 '상세페이지URL': item.get('상세페이지URL', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
