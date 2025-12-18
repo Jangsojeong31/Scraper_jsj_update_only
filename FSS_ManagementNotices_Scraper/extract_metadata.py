@@ -421,6 +421,16 @@ def _extract_incidents_from_section(section_text):
             has_ga_pattern = True
             break
     
+    # "가." 패턴 없이 바로 "(1)"로 시작하는 경우 체크
+    has_direct_numbered_pattern = False
+    if not has_ga_pattern:
+        for line in lines:
+            stripped = line.strip()
+            # 바로 "(1)"로 시작하는 패턴 확인
+            if re.match(r'^[\(（]1[\)）]\s*', stripped):
+                has_direct_numbered_pattern = True
+                break
+    
     incidents = {}
     incident_num = 1
     
@@ -429,6 +439,7 @@ def _extract_incidents_from_section(section_text):
     in_incident = False
     parent_title = ""  # 상위 제목 (가. 문책사항 등)
     is_unified_incident = False  # 통합 사건 모드 (가. 일반제목 -> 모든 (1), (2)를 하나의 사건으로)
+    treat_numbered_as_incidents = has_direct_numbered_pattern  # "(1)"을 별도 사건으로 처리할지 여부
     
     i = 0
     while i < len(lines):
@@ -439,7 +450,8 @@ def _extract_incidents_from_section(section_text):
         
         # "가. 문책사항" 또는 "가 . 문 책 사 항" 패턴 체크 (상위 제목)
         # OCR 텍스트를 위해 점 앞뒤 공백 허용, 또한 "가_" 같은 패턴도 허용
-        header_pattern = r'^[가-하]\s*[._]\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항)(.*)$'
+        # '경영유의', '개선사항' 패턴도 포함
+        header_pattern = r'^[가-하]\s*[._]\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항|경\s*영\s*유\s*의|경영유의사항|개\s*선\s*사\s*항|개선사항)(.*)$'
         header_match = re.match(header_pattern, line)
         
         if header_match:
@@ -470,8 +482,8 @@ def _extract_incidents_from_section(section_text):
         if first_match:
             title_text = first_match.group(1).strip()
             
-            # 문책사항/자율처리 등이 아닌 경우
-            if not re.match(r'^(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리)', title_text):
+            # 문책사항/자율처리/경영유의/개선사항 등이 아닌 경우
+            if not re.match(r'^(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항|경\s*영\s*유\s*의|경영유의사항|개\s*선\s*사\s*항|개선사항)', title_text):
                 # 이전 사건 저장
                 if current_title and current_content:
                     content_text = '\n'.join(current_content).strip()
@@ -484,9 +496,9 @@ def _extract_incidents_from_section(section_text):
                     incidents[f'내용{incident_num}'] = ''
                     incident_num += 1
                 
-                # "문책", "책임", "자율처리", "주의" 같은 특정 키워드가 있으면 기존 패턴 (각 (1), (2)를 별도 사건)
+                # "문책", "책임", "자율처리", "주의", "경영유의", "개선사항" 같은 특정 키워드가 있으면 기존 패턴 (각 (1), (2)를 별도 사건)
                 # 그렇지 않으면 새로운 패턴 (모든 (1), (2)를 하나의 사건으로)
-                has_special_keyword = re.search(r'(문책|책임|자율처리|주의)', title_text)
+                has_special_keyword = re.search(r'(문책|책임|자율처리|주의|경영유의사항|경영유의|개선사항)', title_text)
                 
                 if has_special_keyword:
                     # 기존 패턴: "나. 주의사항" -> 각 (1), (2)를 별도 사건으로
@@ -536,6 +548,27 @@ def _extract_incidents_from_section(section_text):
                 # 현재 사건이 통합 사건 모드이고, 제목이 parent_title과 같으면
                 # "(1)", "(2)" 등을 모두 내용으로 추가
                 current_content.append(line)
+                i += 1
+                continue
+            
+            # "가." 패턴 없이 바로 "(1)"로 시작하는 경우: 각 (1), (2)를 별도 사건으로 처리
+            if treat_numbered_as_incidents and not parent_title:
+                # 이전 사건 저장
+                if current_title and current_content:
+                    content_text = '\n'.join(current_content).strip()
+                    content_text = remove_page_numbers(content_text)
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = content_text
+                    incident_num += 1
+                elif current_title:
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = ''
+                    incident_num += 1
+                
+                # 새 사건 시작
+                current_title = sub_title
+                current_content = []
+                in_incident = True
                 i += 1
                 continue
             

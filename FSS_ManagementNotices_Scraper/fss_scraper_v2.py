@@ -36,8 +36,7 @@ from common.file_extractor import FileExtractor
 # OCR 추출 모듈 import
 from ocr_extractor import OCRExtractor
 
-# KoFIU_Scraper의 extract_metadata 모듈에서 함수 import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'KoFIU_Scraper'))
+# 같은 폴더의 extract_metadata 모듈에서 함수 import (FSS_ManagementNotices 전용)
 from extract_metadata import (
     extract_metadata_from_content as extract_metadata_from_content_normal,
     extract_sanction_details as extract_sanction_details_base,

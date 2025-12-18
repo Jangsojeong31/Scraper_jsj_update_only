@@ -33,17 +33,12 @@
 - 금융회사명, 제재조치일, 제재내용(표 데이터), 사건목록 추출
 - OCR/일반 텍스트 모두 동일한 함수 사용
 
-### 5. `ocr_failed_items.py`
-- OCR 실패 항목 재처리 스크립트 (선택적)
-- 제재조치내용이 짧은 항목 재처리 시도
-
-### 6. `run_pipeline.py`
+### 5. `run_pipeline.py`
 - 전체 파이프라인 자동 실행 스크립트
-- 순서대로 `fss_scraper_v2.py` → `post_process_ocr.py` → `ocr_failed_items.py` (선택적) 실행
+- 순서대로 `fss_scraper_v2.py` → `post_process_ocr.py` 실행
 - 실행 후 `fss_results.json`을 기반으로 제재내용 추출 통계를 출력
 - 주요 옵션
   - `--skip-scrape`: 기존 스크래핑 결과를 유지하고 후처리 단계부터 실행
-  - `--skip-ocr-retry`: `ocr_failed_items.py` 실행 생략
   - `--stats-only`: 현존하는 결과 파일에 대한 통계만 출력 (스크립트 실행 없음)
   - `--limit`: 수집할 최대 항목 수 제한
 
@@ -107,8 +102,7 @@ python run_pipeline.py --log-file logs/pipeline.log
 **자동 처리 과정:**
 1. `fss_scraper_v2.py`: 전체 페이지 스크래핑, PDF 다운로드 및 텍스트 추출 (V3 하이브리드 OCR 포함), 메타데이터 추출
 2. `post_process_ocr.py`: OCR 오류 자동 수정 및 품질 검증
-3. `ocr_failed_items.py` (선택): 이미지 PDF 등 추가 재처리
-4. `run_pipeline.py`: 위 단계를 순서대로 실행하고 추출 성공률 통계를 출력
+3. `run_pipeline.py`: 위 단계를 순서대로 실행하고 추출 성공률 통계를 출력
 
 ### 방법 2: 명령줄 옵션으로 특정 기간만 스크래핑
 
@@ -273,9 +267,6 @@ tesseract --version
 
 # 2. 한글 언어팩 확인
 tesseract --list-langs
-
-# 3. OCR 실패 항목 재처리
-python ocr_failed_items.py
 ```
 
 ### 인코딩 오류
