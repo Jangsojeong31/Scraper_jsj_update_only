@@ -435,6 +435,14 @@ class KoFIUScraperV2:
                     title_link = subject_p.find('a') if subject_p else None
                     title = title_link.get_text(strip=True) if title_link else ""
                     
+                    # 제목에서 금융회사명 추출 (형식: "{금융회사명} 제재내용 공개안")
+                    institution_from_title = ""
+                    if title:
+                        # "제재내용 공개안" 또는 "제재" 앞까지 추출
+                        match = re.match(r'^(.+?)\s+제재', title)
+                        if match:
+                            institution_from_title = match.group(1).strip()
+                    
                     # 날짜 추출 (첫 번째 li_date가 게시일)
                     date_spans = li.find_all('span', class_='li_date')
                     post_date = ""
@@ -463,7 +471,8 @@ class KoFIUScraperV2:
                         '상세페이지URL': pdf_url,
                         '_pdf_filename': pdf_filename,
                         '_link_text': title,
-                        '_post_date': post_date
+                        '_post_date': post_date,
+                        '_institution_from_title': institution_from_title  # 목록에서 추출한 금융회사명
                     })
                     
                 except Exception as e:
@@ -686,6 +695,7 @@ class KoFIUScraperV2:
             link_text = item.pop('_link_text', '')
             pdf_filename = item.pop('_pdf_filename', '')
             item.pop('_post_date', None)  # 임시 필드 제거
+            institution_from_title = item.pop('_institution_from_title', '')  # 목록에서 추출한 금융회사명
             
             print(f"\n[{idx}/{len(all_items)}] {pdf_filename or link_text or 'N/A'} 처리 중...")
             
@@ -704,14 +714,23 @@ class KoFIUScraperV2:
                 if attachment_content and not attachment_content.startswith('['):
                     # OCR이든 일반 추출이든 동일한 함수 사용 (이미 process_ocr_text로 후처리됨)
                     institution, sanction_date = extract_metadata_from_content(attachment_content)
-                    if institution:
+                    
+                    # 금융회사명: 목록에서 추출한 값 우선, 없으면 PDF에서 추출한 값 사용
+                    if institution_from_title:
+                        item['금융회사명'] = institution_from_title
+                        print(f"  금융회사명 (목록): {institution_from_title}")
+                    elif institution:
                         # 마지막 '*', '@' 제거
                         institution = institution.rstrip('*@')
                         item['금융회사명'] = institution
-                        # 업종 매핑
-                        industry = self.get_industry(institution)
+                        print(f"  금융회사명 (PDF): {institution}")
+                    
+                    # 업종 매핑
+                    final_institution = item.get('금융회사명', '')
+                    if final_institution:
+                        industry = self.get_industry(final_institution)
                         item['업종'] = industry
-                        print(f"  금융회사명 추출: {institution} (업종: {industry})")
+                        print(f"  업종: {industry}")
                     else:
                         item['업종'] = '기타'
                     if sanction_date:
@@ -755,13 +774,25 @@ class KoFIUScraperV2:
                                 
                                 # OCR 결과로 다시 메타데이터 추출
                                 institution, sanction_date = extract_metadata_from_content(ocr_content)
-                                if institution:
+                                
+                                # 금융회사명: 목록에서 추출한 값 우선, 없으면 OCR에서 추출한 값 사용
+                                if institution_from_title:
+                                    item['금융회사명'] = institution_from_title
+                                    print(f"  ✓ OCR 재시도 후 금융회사명 (목록): {institution_from_title}")
+                                elif institution:
                                     # 마지막 '*', '@' 제거
                                     institution = institution.rstrip('*@')
                                     item['금융회사명'] = institution
-                                    industry = self.get_industry(institution)
+                                    print(f"  ✓ OCR 재시도 후 금융회사명 (OCR): {institution}")
+                                
+                                # 업종 매핑
+                                final_institution = item.get('금융회사명', '')
+                                if final_institution:
+                                    industry = self.get_industry(final_institution)
                                     item['업종'] = industry
-                                    print(f"  ✓ OCR 재시도 후 금융회사명 추출: {institution} (업종: {industry})")
+                                    print(f"  ✓ 업종: {industry}")
+                                else:
+                                    item['업종'] = '기타'
                                 
                                 if sanction_date:
                                     item['제재조치일'] = sanction_date
@@ -806,7 +837,14 @@ class KoFIUScraperV2:
                             pass
             else:
                 item['제재조치내용'] = "[첨부파일 URL이 없습니다]"
-                item['업종'] = '기타'
+                # 목록에서 추출한 금융회사명이 있으면 사용
+                if institution_from_title:
+                    item['금융회사명'] = institution_from_title
+                    industry = self.get_industry(institution_from_title)
+                    item['업종'] = industry
+                    print(f"  금융회사명 (목록): {institution_from_title} (업종: {industry})")
+                else:
+                    item['업종'] = '기타'
                 item['OCR추출여부'] = '아니오'
             
             # 업종 필드가 없는 경우 기타로 설정

@@ -625,12 +625,11 @@ class FSSManagementNoticesScraperV2:
                 continue
             
             try:
-                # 번호, 제재대상기관, 제재조치요구일, 제재조치요구내용(링크), 관련부서
+                # 번호, 제재대상기관, 제재조치요구일, 제재조치요구내용(링크)
                 number = cells[0].get_text(strip=True)
                 institution = cells[1].get_text(strip=True)
                 date = cells[2].get_text(strip=True)
                 content_cell = cells[3]
-                department = cells[4].get_text(strip=True)
                 
                 # 링크 찾기
                 link = content_cell.find('a', href=True)
@@ -643,7 +642,6 @@ class FSSManagementNoticesScraperV2:
                 items.append({
                     '제재대상기관': institution,
                     '제재조치요구일': date,
-                    '관련부서': department,
                     '조회수': '-',  # ManagementNotices는 조회수 없음
                     '상세페이지URL': detail_url,
                     '_link_text': link_text
@@ -830,11 +828,11 @@ class FSSManagementNoticesScraperV2:
                     
                     institution, sanction_date = extract_metadata_fn(attachment_content)
                     
-                    # 금융회사명: PDF에서 추출 실패 시 목록에서 가져온 값 사용
-                    if institution:
-                        item['금융회사명'] = institution
-                    elif institution_from_list:
+                    # 금융회사명: 목록에서 추출한 값 우선, 없으면 PDF에서 추출한 값 사용
+                    if institution_from_list:
                         item['금융회사명'] = institution_from_list
+                    elif institution:
+                        item['금융회사명'] = institution
                     
                     # 업종 매핑
                     final_institution = item.get('금융회사명', institution_from_list)
@@ -842,9 +840,14 @@ class FSSManagementNoticesScraperV2:
                     item['업종'] = industry
                     print(f"  금융회사명: {final_institution} (업종: {industry})")
                     
-                    if sanction_date:
+                    # 제재조치일: 목록에서 추출한 값(제재조치요구일) 우선, 없으면 PDF에서 추출한 값 사용
+                    date_from_list = item.get('제재조치요구일', '')
+                    if date_from_list:
+                        item['제재조치일'] = date_from_list
+                        print(f"  제재조치일 (목록): {date_from_list}")
+                    elif sanction_date:
                         item['제재조치일'] = sanction_date
-                        print(f"  제재조치일 추출: {sanction_date}")
+                        print(f"  제재조치일 (PDF): {sanction_date}")
                     
                     # 제재내용 (표 데이터) 추출 - ManagementNotices 전용 함수 사용
                     sanction_details = extract_sanction_fn(attachment_content)
@@ -1024,7 +1027,7 @@ class FSSManagementNoticesScraperV2:
         
         for item in self.results:
             # 기본 필드 추출 (줄바꿈 정리 적용)
-            # 제재조치일 포맷팅 (PDF에서 추출한 값 또는 목록에서 가져온 제재조치요구일)
+            # 제재조치일 포맷팅 (목록에서 추출한 값이 우선, 없으면 PDF에서 추출한 값)
             sanction_date = item.get('제재조치일', item.get('제재조치요구일', ''))
             if sanction_date:
                 # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
