@@ -1036,7 +1036,6 @@ class LawGoKrScraper(BaseScraper):
             try:
                 print(f"    → 부칙 버튼 클릭 중... (접힌 목록 열기)")
                 driver.execute_script("arguments[0].scrollIntoView(true);", ar_button)
-                time.sleep(0.3)
                 
                 # 부칙 목록이 이미 열려있는지 확인
                 li_id = None
@@ -1065,19 +1064,24 @@ class LawGoKrScraper(BaseScraper):
                 if is_closed:
                     # 부칙 버튼 클릭하여 열기
                     driver.execute_script("arguments[0].click();", ar_button)
-                    time.sleep(0.5)  # 클릭 후 짧은 대기
                     
                     # 부칙 목록이 열릴 때까지 대기
                     if li_id:
                         try:
-                            WebDriverWait(driver, 3).until(
+                            WebDriverWait(driver, 2).until(
                                 lambda d: d.find_element(By.CSS_SELECTOR, f"#{li_id}SpanAr").value_of_css_property('display') != 'none'
                             )
                             print(f"    ✓ 부칙 목록이 열렸습니다")
                         except:
                             print(f"    ⚠ 부칙 목록 열기 대기 시간 초과")
                     else:
-                        time.sleep(1)  # 대체 대기
+                        # 대체 대기 (최소화)
+                        try:
+                            WebDriverWait(driver, 2).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, "[id^='liBgcolor'][id$='SpanAr'] ul li"))
+                            )
+                        except:
+                            pass
                 else:
                     print(f"    ✓ 부칙 목록이 이미 열려있습니다")
                 
@@ -1091,15 +1095,14 @@ class LawGoKrScraper(BaseScraper):
             # 부칙 목록이 나타날 때까지 대기 (더 확실하게)
             try:
                 if li_id:
-                    WebDriverWait(driver, 5).until(
+                    WebDriverWait(driver, 3).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, f"#{li_id}SpanAr ul li"))
                     )
                 else:
-                    WebDriverWait(driver, 5).until(
+                    WebDriverWait(driver, 3).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "[id^='liBgcolor'][id$='SpanAr'] ul li"))
                     )
                 print(f"    ✓ 부칙 목록 로드 완료")
-                time.sleep(0.5)  # 추가 안정화 대기
             except Exception as e:
                 print(f"    ⚠ 부칙 목록 로드 대기 시간 초과: {e}")
                 # 계속 진행 (이미 열려있을 수 있음)
@@ -1580,9 +1583,14 @@ class LawGoKrScraper(BaseScraper):
                 try:
                     print(f"  → 새 창 열기 버튼 클릭 중...")
                     driver.execute_script("arguments[0].scrollIntoView(true);", button_element)
-                    time.sleep(0.5)
                     driver.execute_script("arguments[0].click();", button_element)
-                    time.sleep(2)  # 새 창이 열릴 때까지 대기
+                    # 새 창이 열릴 때까지 대기 (조건부 대기)
+                    try:
+                        WebDriverWait(driver, 3).until(
+                            lambda d: len(d.window_handles) > len(all_windows_before)
+                        )
+                    except:
+                        pass  # 새 창이 이미 열렸을 수 있음
                     print(f"  ✓ 버튼 클릭 완료")
                 except Exception as e:
                     print(f"  ⚠ 버튼 클릭 실패: {e}")
@@ -1603,16 +1611,14 @@ class LawGoKrScraper(BaseScraper):
             
             # 새 창 로드 대기 (#rvsDonRsnArea 요소가 나타날 때까지)
             try:
-                WebDriverWait(driver, 10).until(
+                WebDriverWait(driver, 5).until(
                     EC.any_of(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsDonRsnArea")),
                         EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]"))
                     )
                 )
-                time.sleep(1)  # 추가 안정화 대기
                 print(f"  ✓ 새 창 로드 완료")
             except:
-                time.sleep(2)  # fallback 대기
                 print(f"  ⚠ 새 창 로드 대기 시간 초과 (계속 진행)")
             
             # 부제목에서 시행일과 공포일 추출 (#rvsConTop > div)
@@ -1669,7 +1675,7 @@ class LawGoKrScraper(BaseScraper):
                 
                 # CSS 셀렉터로 찾기
                 try:
-                    content_element = WebDriverWait(driver, 5).until(
+                    content_element = WebDriverWait(driver, 3).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsDonRsnArea"))
                     )
                     print(f"  ✓ #rvsDonRsnArea 영역 발견 (CSS 셀렉터)")
@@ -1679,7 +1685,7 @@ class LawGoKrScraper(BaseScraper):
                 # XPath로 찾기
                 if not content_element:
                     try:
-                        content_element = WebDriverWait(driver, 5).until(
+                        content_element = WebDriverWait(driver, 3).until(
                             EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]"))
                         )
                         print(f"  ✓ 개정이유 영역 발견 (XPath)")
@@ -1751,9 +1757,14 @@ class LawGoKrScraper(BaseScraper):
                                 # 버튼 클릭
                                 print(f"  → 개정이유 로드 버튼 클릭 중...")
                                 driver.execute_script("arguments[0].scrollIntoView(true);", load_button)
-                                time.sleep(0.3)
                                 driver.execute_script("arguments[0].click();", load_button)
-                                time.sleep(2)  # 내용 로드 대기
+                                # 내용 로드 대기 (조건부 대기)
+                                try:
+                                    WebDriverWait(driver, 3).until(
+                                        lambda d: d.find_element(By.CSS_SELECTOR, "#rvsDonRsnArea").text.strip() != ""
+                                    )
+                                except:
+                                    pass  # 내용이 이미 로드되었을 수 있음
                                 print(f"  ✓ 버튼 클릭 완료")
                                 
                                 # 다시 #rvsDonRsnArea에서 텍스트 추출
@@ -1861,9 +1872,14 @@ class LawGoKrScraper(BaseScraper):
                                     # 버튼 클릭
                                     print(f"  → 개정이유 로드 버튼 클릭 중...")
                                     driver.execute_script("arguments[0].scrollIntoView(true);", load_button)
-                                    time.sleep(0.3)
                                     driver.execute_script("arguments[0].click();", load_button)
-                                    time.sleep(2)  # 내용 로드 대기
+                                    # 내용 로드 대기 (조건부 대기)
+                                    try:
+                                        WebDriverWait(driver, 3).until(
+                                            lambda d: d.find_element(By.CSS_SELECTOR, "#rvsDonRsnArea").text.strip() != ""
+                                        )
+                                    except:
+                                        pass  # 내용이 이미 로드되었을 수 있음
                                     print(f"  ✓ 버튼 클릭 완료")
                                     
                                     # 다시 #rvsDonRsnArea에서 텍스트 추출
@@ -1945,7 +1961,7 @@ class LawGoKrScraper(BaseScraper):
                 
                 # 방법 1: CSS 셀렉터로 찾기 (#rvsConBody > div:nth-child(9))
                 try:
-                    revision_content_element = WebDriverWait(driver, 3).until(
+                    revision_content_element = WebDriverWait(driver, 2).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsConBody > div:nth-child(9)"))
                     )
                     if revision_content_element:
@@ -1956,7 +1972,7 @@ class LawGoKrScraper(BaseScraper):
                 # 방법 2: XPath로 찾기
                 if not revision_content_element:
                     try:
-                        revision_content_element = WebDriverWait(driver, 3).until(
+                        revision_content_element = WebDriverWait(driver, 2).until(
                             EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[2]"))
                         )
                         if revision_content_element:
@@ -2488,8 +2504,8 @@ class LawGoKrScraper(BaseScraper):
             print(f"저장할 데이터가 없습니다.")
             return
             
-        # 헤더 정의 (번호, 파일 다운로드 링크 제거, 구분 추가, 개정이유 추가)
-        headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "개정내용", "시행일", "공포일", "파일 이름"]
+        # 헤더 정의 (번호, 파일 다운로드 링크 제거, 구분 추가, 개정이유 추가, 약칭 추가)
+        headers = ["구분", "규정명", "기관명", "약칭", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "개정내용", "시행일", "공포일", "파일 이름"]
             
         with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=headers)
@@ -2775,10 +2791,9 @@ def main():
                             try:
                                 # 검색 페이지로 이동
                                 driver.get(search_url)
-                                time.sleep(2)
                                 
                                 # 검색 결과 목록 대기 (liBgcolor 요소 또는 테이블)
-                                WebDriverWait(driver, 10).until(
+                                WebDriverWait(driver, 5).until(
                                     EC.any_of(
                                         EC.presence_of_element_located((By.CSS_SELECTOR, "li[id^='liBgcolor']")),
                                         EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a"))
@@ -2917,15 +2932,12 @@ def main():
                                     # JavaScript로 클릭 시도
                                     print(f"  → 법령 링크 클릭 중...")
                                     driver.execute_script("arguments[0].scrollIntoView(true);", target_anchor)
-                                    time.sleep(0.5)
                                     driver.execute_script("arguments[0].click();", target_anchor)
-                                    time.sleep(2)
                                     
                                     # 상세 페이지 로드 대기
-                                    WebDriverWait(driver, 10).until(
+                                    WebDriverWait(driver, 5).until(
                                         EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view"))
                                     )
-                                    time.sleep(1)
                                     detail_soup = BeautifulSoup(driver.page_source, 'lxml')
                                     print(f"  ✓ 상세 페이지 로드 완료")
                                 else:
@@ -3004,10 +3016,9 @@ def main():
                                     print(f"  → 검색 결과 목록에서 부칙 목록 추출 시도 중...")
                                     # 검색 페이지로 다시 이동
                                     driver.get(search_url)
-                                    time.sleep(2)
                                     
                                     # 검색 결과 테이블 대기
-                                    WebDriverWait(driver, 10).until(
+                                    WebDriverWait(driver, 5).until(
                                         EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a"))
                                     )
                                     
@@ -3205,11 +3216,10 @@ def main():
                         try:
                             # 목록 페이지로 이동 후 첫 번째 결과 클릭
                             driver.get(first_page_url)
-                            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")))
+                            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")))
                             first_anchor = driver.find_element(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
                             driver.execute_script("arguments[0].click();", first_anchor)
-                            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view")))
-                            time.sleep(1)
+                            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view")))
                             detail_soup = BeautifulSoup(driver.page_source, 'lxml')
                         except Exception as _:
                             pass
@@ -3325,12 +3335,27 @@ def main():
             if len(content) > effective_max:
                 content = content[:effective_max]
             return content
+        
+        def extract_abbreviation(text: str) -> str:
+            """본문에서 약칭을 추출합니다. ( 약칭: ... ) 패턴을 찾습니다."""
+            if not text:
+                return ''
+            import re
+            # ( 약칭: ... ) 패턴 찾기
+            pattern = r'\(\s*약칭\s*:\s*([^)]+)\s*\)'
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).strip()
+            return ''
 
         for item in all_results:
             # 원본 법령명 우선 사용 (괄호 포함), 없으면 검색 결과의 법령명 사용
             regulation_name = item.get('original_law_name', '') or item.get('regulation_name', '') or item.get('law_name', '')
             full_content = item.get('content', item.get('law_content', ''))
             truncated_content = truncate_content(full_content, 4000)
+            
+            # 약칭 추출
+            abbreviation = extract_abbreviation(full_content)
             
             # 개정이유/개정내용도 4000자 제한 적용
             revision_reason = truncate_content(item.get('revision_reason', ''), 4000)
@@ -3345,6 +3370,7 @@ def main():
                 '구분': item.get('division', ''),  # CSV의 구분 값
                 '규정명': regulation_name,  # 원본 법령명 (괄호 포함) 사용
                 '기관명': item.get('organization', '법제처'),
+                '약칭': abbreviation,  # 본문에서 추출한 약칭
                 '본문': truncated_content,
                 '제정일': crawler.normalize_date_format(item.get('enactment_date', '')),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
                 '최근 개정일': crawler.normalize_date_format(item.get('revision_date', '')),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
@@ -3410,6 +3436,7 @@ def main():
                         '구분': division,
                         '규정명': original_name,
                         '기관명': '법제처',
+                        '약칭': '',
                         '본문': '',
                         '제정일': '',
                         '최근 개정일': '',
