@@ -671,6 +671,9 @@ class KofiaScraper(BaseScraper):
                 file_info = self._extract_files_from_iframe01(iframe01_soup)
                 dates_info = self._extract_dates_from_iframe01(iframe01_soup)
                 
+                # 개정문 버튼 클릭 및 파일 다운로드 (개정이유, 개정내용, 시행일, 공포일 추출)
+                revision_info = self._extract_revision_info_from_button(driver, iframe01_soup)
+                
                 # #lawFullContent는 iframe 태그 자체이므로 iframe으로 찾기
                 try:
                     # #lawFullContent iframe 찾기
@@ -693,6 +696,8 @@ class KofiaScraper(BaseScraper):
                         soup.file_info = file_info
                     if dates_info:
                         soup.dates_info = dates_info
+                    if revision_info:
+                        soup.revision_info = revision_info
                     
                     # 디버깅: 최종 HTML에서 본문 요소 확인
                     lawcontent_div = soup.select_one("#lawcontent")
@@ -731,6 +736,8 @@ class KofiaScraper(BaseScraper):
                             soup.file_info = file_info
                         if dates_info:
                             soup.dates_info = dates_info
+                        if revision_info:
+                            soup.revision_info = revision_info
                         driver.switch_to.default_content()
                         return soup
                     else:
@@ -743,6 +750,8 @@ class KofiaScraper(BaseScraper):
                             soup.file_info = file_info
                         if dates_info:
                             soup.dates_info = dates_info
+                        if revision_info:
+                            soup.revision_info = revision_info
                         driver.switch_to.default_content()
                         return soup
                 
@@ -992,11 +1001,79 @@ class KofiaScraper(BaseScraper):
             file_info["file_buttons"].append(button_selector)
             print(f"  ✓ {file_type[0]} 파일 발견: {name}")
 
+        # PDF를 우선적으로 정렬 (PDF 파일을 앞으로 이동)
+        if file_info["file_names"]:
+            # PDF와 HWP를 분리
+            pdf_items = []
+            hwp_items = []
+            other_items = []
+            
+            for i, file_type in enumerate(file_info["file_types"]):
+                item = (
+                    file_info["file_names"][i],
+                    file_info["file_types"][i],
+                    file_info["file_buttons"][i]
+                )
+                if file_type == "pdf":
+                    pdf_items.append(item)
+                elif file_type == "hwp":
+                    hwp_items.append(item)
+                else:
+                    other_items.append(item)
+            
+            # PDF 먼저, 그 다음 HWP, 그 다음 기타 순서로 재정렬
+            reordered_items = pdf_items + hwp_items + other_items
+            
+            if reordered_items:
+                file_info["file_names"] = [item[0] for item in reordered_items]
+                file_info["file_types"] = [item[1] for item in reordered_items]
+                file_info["file_buttons"] = [item[2] for item in reordered_items]
+                
+                if pdf_items:
+                    print(f"  → 파일 순서 재정렬: PDF {len(pdf_items)}개를 우선순위로 설정")
+        
         if file_info["file_names"]:
             return file_info
 
         return None
 
+    # ------------------------------------------------------------------
+    # 참조 텍스트 확인
+    # ------------------------------------------------------------------
+    def _is_reference_text(self, text: str) -> bool:
+        """
+        본문이 파일을 참조하라는 안내 텍스트인지 확인
+        
+        Args:
+            text: 확인할 텍스트
+            
+        Returns:
+            참조 텍스트이면 True, 아니면 False
+        """
+        if not text:
+            return False
+        
+        # 참조 텍스트 패턴들
+        reference_patterns = [
+            r'전문은\s*(상단\s*)?(한글\s*)?파일.*참조',
+            r'전문은\s*(상단\s*)?(PDF\s*)?파일.*참조',
+            r'전문은\s*(상단\s*)?파일.*참조',
+            r'전문.*파일.*참조',
+            r'상단.*파일.*참조',
+            r'파일.*참조',
+        ]
+        
+        text_lower = text.lower()
+        for pattern in reference_patterns:
+            if re.search(pattern, text_lower):
+                return True
+        
+        # 짧은 텍스트이고 '참조' 키워드가 포함된 경우
+        if len(text) < 100 and '참조' in text:
+            return True
+        
+        return False
+    
     # ------------------------------------------------------------------
     # 콘텐츠 iframe에서 정보 추출
     # ------------------------------------------------------------------
@@ -1013,6 +1090,10 @@ class KofiaScraper(BaseScraper):
             "file_buttons": [],  # 버튼 선택자 정보
             "enactment_date": "",
             "revision_date": "",
+            "revision_reason": "",  # 개정이유
+            "revision_content": "",  # 개정내용
+            "enforcement_date": "",  # 시행일
+            "promulgation_date": "",  # 공포일
         }
 
         if soup is None:
@@ -1035,12 +1116,19 @@ class KofiaScraper(BaseScraper):
                 if text and len(text) > 20:
                     # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                     text = text.replace("\r\n", "\n").replace("\r", "\n")
-                    # 1000자 제한
-                    if len(text) > 1000:
-                        text = text[:1000]
+                    # 4000자 제한
+                    if len(text) > 4000:
+                        text = text[:4000]
                     info["content"] = text
                     print(f"  ✓ 본문 추출 성공 (셀렉터: {selector}, {len(text)}자)")
                     break
+        
+        # 본문이 참조 텍스트인지 확인 (파일을 참조하라는 안내인 경우)
+        if info["content"]:
+            if self._is_reference_text(info["content"]):
+                print(f"  ⚠ 본문이 참조 텍스트입니다. 파일 다운로드 후 내용을 추출합니다.")
+                # 참조 텍스트임을 표시 (나중에 파일 다운로드 후 처리)
+                info["_needs_file_extraction"] = True
 
         # 담당부서 추출 - iframe01에서 추출한 정보 사용
         # soup 객체에 department_info 속성이 있으면 사용 (iframe01에서 추출한 것)
@@ -1094,7 +1182,308 @@ class KofiaScraper(BaseScraper):
             # 하지만 본문의 별표/서식 파일은 제외해야 하므로 여기서는 찾지 않음
             pass
 
+        # 개정정보 추출 - click_tree_link_and_extract에서 추출한 정보 사용
+        # soup 객체에 revision_info 속성이 있으면 사용
+        if hasattr(soup, 'revision_info') and soup.revision_info:
+            if soup.revision_info.get("revision_reason"):
+                info["revision_reason"] = soup.revision_info["revision_reason"]
+            if soup.revision_info.get("revision_content"):
+                info["revision_content"] = soup.revision_info["revision_content"]
+            if soup.revision_info.get("enforcement_date"):
+                info["enforcement_date"] = soup.revision_info["enforcement_date"]
+            if soup.revision_info.get("promulgation_date"):
+                info["promulgation_date"] = soup.revision_info["promulgation_date"]
+            print(f"  ✓ 개정정보 추출: 개정이유={len(info.get('revision_reason', ''))}자, 개정내용={len(info.get('revision_content', ''))}자, 시행일={info.get('enforcement_date', '')}, 공포일={info.get('promulgation_date', '')}")
+
         return info
+
+    # ------------------------------------------------------------------
+    # 개정문 버튼 클릭 및 개정정보 추출
+    # ------------------------------------------------------------------
+    def _extract_revision_info_from_button(
+        self, driver: webdriver.Chrome, iframe01_soup: BeautifulSoup
+    ) -> Optional[Dict]:
+        """
+        개정문 버튼을 클릭하여 파일을 다운로드하고 개정정보를 추출한다.
+        
+        Args:
+            driver: Selenium WebDriver
+            iframe01_soup: iframe01의 BeautifulSoup 객체
+            
+        Returns:
+            개정정보 딕셔너리 (revision_reason, revision_content, enforcement_date, promulgation_date) 또는 None
+        """
+        revision_info = {
+            "revision_reason": "",
+            "revision_content": "",
+            "enforcement_date": "",
+            "promulgation_date": "",
+        }
+        
+        try:
+            # iframe01 내부에서 개정문 버튼 찾기
+            revision_button = iframe01_soup.select_one("#lawbtn > ul.btn > li:nth-child(1) > a")
+            
+            if not revision_button:
+                # 다른 선택자 시도
+                revision_button = iframe01_soup.select_one("#lawbtn ul.btn li:first-child a")
+            
+            if not revision_button:
+                print(f"  ⚠ 개정문 버튼을 찾지 못함")
+                return None
+            
+            # 버튼의 href 확인
+            href = revision_button.get("href", "")
+            if not href or "download.do" not in href:
+                print(f"  ⚠ 개정문 버튼의 href가 유효하지 않음: {href}")
+                return None
+            
+            print(f"  → 개정문 버튼 발견: {href[:100]}...")
+            
+            # 현재 iframe01에 있으므로 버튼 클릭
+            try:
+                # Selenium에서 버튼 찾기 및 클릭
+                button_element = driver.find_element(By.CSS_SELECTOR, "#lawbtn > ul.btn > li:nth-child(1) > a")
+                
+                # 다운로드 전 파일 목록 확인
+                files_before = set(self.current_dir.glob("*"))
+                
+                # 버튼 클릭
+                driver.execute_script("arguments[0].click();", button_element)
+                time.sleep(3)  # 파일 다운로드 대기
+                
+                # 다운로드된 파일 찾기
+                files_after = set(self.current_dir.glob("*"))
+                new_files = files_after - files_before
+                
+                if new_files:
+                    # 가장 최근 파일 선택
+                    downloaded_file = max(new_files, key=lambda p: p.stat().st_mtime if p.is_file() else 0)
+                    if downloaded_file.is_file():
+                        print(f"  → 다운로드된 파일 발견: {downloaded_file.name}")
+                        
+                        # 파일 내용 추출
+                        file_ext = downloaded_file.suffix.lower()
+                        if file_ext == '.pdf':
+                            file_content = self.file_extractor.extract_pdf_content(str(downloaded_file))
+                        elif file_ext in ['.hwp', '.hwpx']:
+                            file_content = self.file_extractor.extract_hwp_content(str(downloaded_file))
+                        else:
+                            # 기타 파일 형식 시도 (HWP로 시도)
+                            file_content = self.file_extractor.extract_hwp_content(str(downloaded_file))
+                        
+                        if file_content:
+                            print(f"  → 파일 내용 추출 완료 ({len(file_content)}자)")
+                            
+                            # 개정이유, 공포일, 시행일, 개정내용 추출
+                            extracted_info = self._extract_revision_info_from_content(file_content)
+                            revision_info.update(extracted_info)
+                            
+                            print(f"  ✓ 개정정보 추출: 개정이유={len(revision_info.get('revision_reason', ''))}자, 개정내용={len(revision_info.get('revision_content', ''))}자, 시행일={revision_info.get('enforcement_date', '')}, 공포일={revision_info.get('promulgation_date', '')}")
+                        else:
+                            print(f"  ⚠ 파일 내용 추출 실패")
+                else:
+                    print(f"  ⚠ 다운로드된 파일을 찾을 수 없음")
+                    
+            except Exception as e:
+                print(f"  ⚠ 개정문 버튼 클릭 실패: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+                
+        except Exception as e:
+            print(f"  ⚠ 개정정보 추출 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
+        # 개정정보가 하나라도 있으면 반환
+        if any(revision_info.values()):
+            return revision_info
+        
+        return None
+    
+    def _extract_revision_info_from_content(self, content: str) -> Dict[str, str]:
+        """파일 내용에서 개정이유, 공포일, 시행일, 개정내용 추출
+        Args:
+            content: 파일에서 추출한 텍스트 내용
+        Returns:
+            {'revision_reason': str, 'promulgation_date': str, 'enforcement_date': str, 'revision_content': str} 딕셔너리
+        """
+        revision_reason = ""
+        promulgation_date = ""
+        enforcement_date = ""
+        revision_content = ""
+        
+        if not content:
+            return {
+                'revision_reason': revision_reason,
+                'promulgation_date': promulgation_date,
+                'enforcement_date': enforcement_date,
+                'revision_content': revision_content
+            }
+        
+        lines = content.split('\n')
+        
+        # 공포일 추출 (공포일, 공포, 개정일 등 키워드와 함께)
+        promulgation_keywords = ['공포일', '공포', '개정일']
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            for keyword in promulgation_keywords:
+                if keyword in line_stripped:
+                    date_patterns = [
+                        r'(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})',
+                        r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일',
+                        r'(\d{4})(\d{2})(\d{2})',
+                    ]
+                    for pattern in date_patterns:
+                        match = re.search(pattern, line_stripped)
+                        if match:
+                            if len(match.groups()) >= 3:
+                                year = match.group(1)
+                                month = match.group(2).zfill(2)
+                                day = match.group(3).zfill(2)
+                                promulgation_date = f"{year}-{month}-{day}"
+                                print(f"  → 공포일 추출: {promulgation_date} (라인: {line_stripped[:50]}...)")
+                                break
+                    if promulgation_date:
+                        break
+            if promulgation_date:
+                break
+        
+        # 시행일 추출 (시행일, 시행 등 키워드와 함께)
+        enforcement_keywords = ['시행일', '시행']
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            for keyword in enforcement_keywords:
+                if keyword in line_stripped:
+                    date_patterns = [
+                        r'(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})',
+                        r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일',
+                        r'(\d{4})(\d{2})(\d{2})',
+                    ]
+                    for pattern in date_patterns:
+                        match = re.search(pattern, line_stripped)
+                        if match:
+                            if len(match.groups()) >= 3:
+                                year = match.group(1)
+                                month = match.group(2).zfill(2)
+                                day = match.group(3).zfill(2)
+                                enforcement_date = f"{year}-{month}-{day}"
+                                print(f"  → 시행일 추출: {enforcement_date} (라인: {line_stripped[:50]}...)")
+                                break
+                    if enforcement_date:
+                        break
+            if enforcement_date:
+                break
+        
+        # 개정이유 및 개정내용 추출
+        revision_reason_start_idx = -1
+        revision_content_start_idx = -1
+        
+        # '개정이유' 섹션 시작 위치 찾기
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            # KRX 스타일: '개정이유', '개정 사유' 등
+            if re.match(r'^(【?\s*개정이유\s*】?|개정사유|개정 이유|개정 사유|제정·개정이유|제정개정이유|개정이유서)[:\s]*', line_stripped):
+                revision_reason_start_idx = i
+                print(f"  → '개정이유' 섹션 시작 발견 (라인 {i+1}): {line_stripped[:50]}...")
+                break
+            # KOFIA 스타일: '1. 개정 배경'
+            if re.match(r'^\s*1\.\s*개정\s*배경', line_stripped):
+                revision_reason_start_idx = i
+                print(f"  → '1. 개정 배경' 섹션 시작 발견 (라인 {i+1}): {line_stripped[:50]}...")
+                break
+            # KOFIA 스타일: 숫자 없이 '개정 배경'만 있는 경우
+            if re.match(r'^\s*개정\s*배경\s*$', line_stripped):
+                revision_reason_start_idx = i
+                print(f"  → '개정 배경' 섹션 시작 발견 (라인 {i+1}): {line_stripped[:50]}...")
+                break
+        
+        if revision_reason_start_idx >= 0:
+            # '개정이유' 섹션 내용 추출 (다음 섹션 또는 '2. 주요 내용' 전까지)
+            reason_lines = []
+            for i in range(revision_reason_start_idx + 1, len(lines)):
+                line = lines[i].strip()
+                if not line:
+                    continue
+                
+                # 바로 다음 줄이 섹션 타이틀(예: "1. 개정 배경", "개정 배경")이면 스킵
+                if i == revision_reason_start_idx + 1 and (
+                    re.match(r'^\s*1\.\s*개정\s*배경', line) or
+                    re.match(r'^\s*개정\s*배경\s*$', line)
+                ):
+                    continue
+                
+                # '2. 주요 내용' 또는 다른 섹션 시작 감지
+                # - 숫자 있는 형식: '2. 주요 내용'
+                # - 숫자 없는 형식: '개정 주요 내용', '주요 내용'
+                if re.match(r'^\d+\.\s*주요\s*내용', line) or \
+                   re.match(r'^\s*(개정\s*)?주요\s*내용\s*$', line) or \
+                   re.match(r'^\d+\.\s*[가-힣]+', line):
+                    revision_content_start_idx = i
+                    print(f"  → '2. 주요 내용' 섹션 시작 발견 (라인 {i+1}): {line[:50]}...")
+                    break
+                
+                # 다른 섹션 제목 감지 (예: '부칙', '제1조')
+                if re.match(r'^(부칙|제\d+조|제\s*\d+\s*조)', line) and len(line) < 50:
+                    break
+                
+                reason_lines.append(line)
+            
+            if reason_lines:
+                revision_reason = ' '.join(reason_lines).strip()
+                revision_reason = re.sub(r'\s+', ' ', revision_reason)
+                if revision_reason and len(revision_reason) > 10:
+                    meaningless_keywords = ['개정정보', '연혁 선택', 'SBLAW', '표준 규정', '약관 연혁']
+                    if not any(keyword in revision_reason for keyword in meaningless_keywords):
+                        print(f"  → 개정이유 추출: {revision_reason[:100]}...")
+                    else:
+                        print(f"  ⚠ 개정이유에 의미 없는 텍스트 포함, 빈 값으로 처리")
+                        revision_reason = ""
+                else:
+                    print(f"  ⚠ 개정이유가 비어있거나 너무 짧음")
+                    revision_reason = ""
+        
+        if revision_content_start_idx >= 0:
+            # '2. 주요 내용' 섹션 내용 추출 (다음 섹션 또는 파일 끝까지)
+            content_lines = []
+            for i in range(revision_content_start_idx, len(lines)):
+                line = lines[i].strip()
+                if not line:
+                    continue
+                
+                # 다른 섹션 제목 감지 (예: '3. 시행일', '3. 참고사항', '부칙', '제1조')
+                if i > revision_content_start_idx and (
+                    re.match(r'^\d+\.\s*[가-힣]+', line)
+                    or (re.match(r'^(부칙|제\d+조|제\s*\d+\s*조)', line) and len(line) < 50)
+                ):
+                    break
+                
+                # 첫 줄이 섹션 타이틀(예: '2. 주요 내용', '개정 주요 내용')이면 스킵
+                if i == revision_content_start_idx and (
+                    re.match(r'^\d+\.\s*주요\s*내용', line) or
+                    re.match(r'^\s*(개정\s*)?주요\s*내용\s*$', line)
+                ):
+                    continue
+                
+                content_lines.append(line)
+            
+            if content_lines:
+                revision_content = ' '.join(content_lines).strip()
+                revision_content = re.sub(r'\s+', ' ', revision_content)
+                if revision_content and len(revision_content) > 10:
+                    print(f"  → 개정내용 추출: {revision_content[:100]}...")
+                else:
+                    print(f"  ⚠ 개정내용이 비어있거나 너무 짧음")
+                    revision_content = ""
+        
+        return {
+            'revision_reason': revision_reason,
+            'promulgation_date': promulgation_date,
+            'enforcement_date': enforcement_date,
+            'revision_content': revision_content
+        }
 
     # ------------------------------------------------------------------
     # 스크래핑 메인
@@ -1211,13 +1600,13 @@ class KofiaScraper(BaseScraper):
                     # 콘텐츠에서 정보 추출
                     content_info = self.extract_content_from_iframe(content_soup)
                     
-                    # 본문 길이 제한 적용 (1000자로 제한, 개행 유지)
+                    # 본문 길이 제한 적용 (4000자로 제한, 개행 유지)
                     if content_info.get("content"):
                         content = content_info["content"]
                         # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                         content = content.replace("\r\n", "\n").replace("\r", "\n")
-                        # 1000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 1000자)
-                        max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                        # 4000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 4000자)
+                        max_length = min(4000, content_limit) if content_limit > 0 else 4000
                         if len(content) > max_length:
                             original_length = len(content)
                             content = content[:max_length]
@@ -1239,10 +1628,33 @@ class KofiaScraper(BaseScraper):
                         
                         # 파일 다운로드 및 비교
                         if download_files:
-                            # 여러 첨부파일 다운로드
-                            for file_idx, (file_name, file_type, button_selector) in enumerate(zip(file_names, file_types, file_buttons)):
+                            # PDF를 우선적으로 다운로드, PDF가 없으면 HWP 다운로드
+                            # 파일 목록에서 PDF와 HWP를 분리
+                            pdf_files = []
+                            hwp_files = []
+                            
+                            for file_name, file_type, button_selector in zip(file_names, file_types, file_buttons):
+                                if file_type == "pdf":
+                                    pdf_files.append((file_name, file_type, button_selector))
+                                elif file_type == "hwp":
+                                    hwp_files.append((file_name, file_type, button_selector))
+                            
+                            # 디버깅: 발견된 파일 목록 출력
+                            if pdf_files:
+                                print(f"  → PDF 파일 {len(pdf_files)}개 발견")
+                            if hwp_files:
+                                print(f"  → HWP 파일 {len(hwp_files)}개 발견")
+                            
+                            # 우선순위: PDF 먼저, 없으면 HWP
+                            files_to_download = pdf_files if pdf_files else hwp_files
+                            
+                            if files_to_download:
+                                # 첫 번째 파일만 다운로드 (PDF 우선, 없으면 HWP)
+                                file_name, file_type, button_selector = files_to_download[0]
+                                print(f"  → 선택된 파일: {file_name} (타입: {file_type.upper()}, PDF 우선순위 적용)")
+                                
                                 if button_selector:
-                                    print(f"  → 첨부파일 다운로드 중 [{file_idx + 1}/{len(file_names)}]: {file_name}")
+                                    print(f"  → 전문 파일 다운로드 중: {file_name} ({file_type.upper()})")
                                     comparison_result = self._download_file_by_clicking_button(
                                         driver,
                                         button_selector,
@@ -1255,6 +1667,23 @@ class KofiaScraper(BaseScraper):
                                         actual_file_name = comparison_result.get('file_name', file_name)
                                         actual_file_names.append(actual_file_name)
                                         print(f"  ✓ 파일 다운로드 완료: {actual_file_name}")
+                                        
+                                        # 본문이 참조 텍스트인 경우 파일에서 내용 추출
+                                        if content_info.get("_needs_file_extraction"):
+                                            file_path = comparison_result.get('file_path')
+                                            if file_path and os.path.exists(file_path):
+                                                print(f"  → 참조 텍스트 감지: 파일에서 본문 내용 추출 중...")
+                                                extracted_content = self._extract_content_from_file(file_path)
+                                                if extracted_content:
+                                                    # 본문 길이 제한 적용
+                                                    max_length = min(4000, content_limit) if content_limit > 0 else 4000
+                                                    if len(extracted_content) > max_length:
+                                                        extracted_content = extracted_content[:max_length]
+                                                    content_info["content"] = extracted_content
+                                                    item["content"] = extracted_content
+                                                    print(f"  ✓ 파일에서 본문 추출 완료 ({len(extracted_content)}자)")
+                                                else:
+                                                    print(f"  ⚠ 파일에서 본문 추출 실패")
                                     else:
                                         # 다운로드 실패 시 계산된 파일명 사용
                                         actual_file_name = self._calculate_safe_filename(file_name, file_type, regulation_name)
@@ -1264,9 +1693,26 @@ class KofiaScraper(BaseScraper):
                                     # 버튼 선택자가 없으면 계산된 파일명 사용
                                     actual_file_name = self._calculate_safe_filename(file_name, file_type, regulation_name)
                                     actual_file_names.append(actual_file_name)
+                            else:
+                                print(f"  ⚠ 다운로드할 파일을 찾을 수 없음 (PDF/HWP)")
                         else:
                             # 다운로드하지 않는 경우에도 실제 저장될 파일명 계산
+                            # PDF를 우선적으로 선택, 없으면 HWP
+                            pdf_files = []
+                            hwp_files = []
+                            
                             for file_name, file_type in zip(file_names, file_types):
+                                if file_type == "pdf":
+                                    pdf_files.append((file_name, file_type))
+                                elif file_type == "hwp":
+                                    hwp_files.append((file_name, file_type))
+                            
+                            # 우선순위: PDF 먼저, 없으면 HWP
+                            files_to_use = pdf_files if pdf_files else hwp_files
+                            
+                            if files_to_use:
+                                # 첫 번째 파일만 사용 (PDF 우선, 없으면 HWP)
+                                file_name, file_type = files_to_use[0]
                                 actual_file_name = self._calculate_safe_filename(file_name, file_type, regulation_name)
                                 actual_file_names.append(actual_file_name)
                         
@@ -1317,6 +1763,43 @@ class KofiaScraper(BaseScraper):
 
         return all_results
 
+    def _extract_content_from_file(self, file_path: str) -> str:
+        """
+        다운로드된 파일에서 본문 내용 추출
+        
+        Args:
+            file_path: 파일 경로
+            
+        Returns:
+            추출된 본문 내용
+        """
+        if not file_path or not os.path.exists(file_path):
+            return ""
+        
+        try:
+            file_ext = Path(file_path).suffix.lower()
+            
+            # 파일 타입에 따라 내용 추출
+            if file_ext == '.pdf':
+                content = self.file_extractor.extract_pdf_content(file_path)
+            elif file_ext in ['.hwp', '.hwpx']:
+                content = self.file_extractor.extract_hwp_content(file_path)
+            else:
+                # 기타 파일 형식 시도 (HWP로 시도)
+                content = self.file_extractor.extract_hwp_content(file_path)
+            
+            if content:
+                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                # 연속된 개행 정리
+                content = re.sub(r'\n{3,}', '\n\n', content)
+                return content.strip()
+            
+            return ""
+        except Exception as e:
+            print(f"  ⚠ 파일에서 본문 추출 중 오류: {e}")
+            return ""
+    
     def _normalize_date_text(self, date_text: str) -> str:
         """
         날짜 텍스트를 정규화된 형식으로 변환
@@ -1378,6 +1861,7 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         # CSV 순서대로 정렬된 결과 생성
         ordered_records = []
         missing_count = 0
+        missing_names = []
         for target in crawler.target_laws:
             target_name = target["law_name"]
             if target_name in records_dict:
@@ -1385,29 +1869,48 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
             else:
                 # CSV에 있지만 결과에 없는 경우 빈 항목 추가
                 missing_count += 1
+                missing_names.append(target_name)
                 empty_item: Dict[str, str] = {
                     "title": target_name,
                     "regulation_name": target_name,
                     "organization": "금융투자협회",
                     "target_name": target_name,
                     "target_category": target.get("category", ""),
-                    "content": "",  # 빈 본문
+                    "content": "",  # 빈 본문 (트리에서 찾지 못함)
                     "department": "",
                     "file_names": [],
                     "enactment_date": "",
                     "revision_date": "",
+                    "revision_reason": "",
+                    "revision_content": "",
+                    "enforcement_date": "",
+                    "promulgation_date": "",
+                    "_extraction_failed": True,  # 추출 실패 표시
                 }
                 ordered_records.append(empty_item)
-                print(f"디버깅: 찾지 못한 항목 추가 - {target_name}")
         
         if missing_count > 0:
-            print(f"디버깅: 총 {missing_count}개 항목을 빈 본문으로 추가했습니다.")
+            print(f"\n⚠ CSV에 있으나 스크래핑 결과에 없는 항목: {missing_count}개")
+            for name in missing_names[:10]:  # 최대 10개만 출력
+                print(f"   - {name}")
+            if len(missing_names) > 10:
+                print(f"   ... 외 {len(missing_names) - 10}개")
+            print(f"   → 이 항목들은 빈 본문으로 결과에 포함됩니다.")
         
         records = ordered_records
 
     if not records:
         print("저장할 법규정보 데이터가 없습니다.")
         return
+
+    # 길이 제한을 위한 헬퍼 (기본 4000자, 개행 정규화)
+    def _truncate_text(text: str, max_len: int = 4000) -> str:
+        if not text:
+            return ""
+        t = text.replace("\r\n", "\n").replace("\r", "\n")
+        if len(t) > max_len:
+            return t[:max_len]
+        return t
 
     # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
     law_results = []
@@ -1425,15 +1928,26 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         # 날짜 정규화
         scraper = crawler if crawler else KofiaScraper()
         
+        # 추출 실패 여부 확인
+        is_extraction_failed = item.get("_extraction_failed", False)
+        
         law_item = {
             "규정명": item.get("regulation_name", item.get("title", "")),
             "기관명": item.get("organization", "금융투자협회"),
-            "본문": item.get("content", ""),
+            "본문": _truncate_text(item.get("content", ""), 4000),
             "제정일": scraper.normalize_date_format(item.get("enactment_date", "")),
             "최근 개정일": scraper.normalize_date_format(item.get("revision_date", "")),
             "소관부서": item.get("department", ""),
             "첨부파일이름": file_names_str,
+            "개정이유": _truncate_text(item.get("revision_reason", ""), 4000),
+            "개정내용": _truncate_text(item.get("revision_content", ""), 4000),
+            "시행일": scraper.normalize_date_format(item.get("enforcement_date", "")),
+            "공포일": scraper.normalize_date_format(item.get("promulgation_date", "")),
         }
+        
+        # 추출 실패한 항목인 경우 본문에 표시 추가
+        if is_extraction_failed and not law_item["본문"]:
+            law_item["본문"] = "[추출 실패: 트리에서 찾지 못함]"
         law_results.append(law_item)
     
     # JSON 저장 (한글 필드명으로) - output/json 디렉토리에 저장
@@ -1463,6 +1977,10 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         "최근 개정일",
         "소관부서",
         "첨부파일이름",
+        "개정이유",
+        "개정내용",
+        "시행일",
+        "공포일",
     ]
     # CSV 저장 - output/csv 디렉토리에 저장
     csv_dir = os.path.join("output", "csv")
@@ -1472,15 +1990,15 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
         writer = csv.DictWriter(f, fieldnames=csv_headers)
         writer.writeheader()
         for law_item in law_results:
-            # 본문 내용 처리 (개행 유지, 1000자 제한)
-            content = law_item.get("본문", "") or ""
-            # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
-            content = content.replace("\r\n", "\n").replace("\r", "\n")
-            if len(content) > 1000:
-                content = content[:1000]
+            # 본문/개정이유/개정내용 내용 처리 (개행 유지, 4000자 제한)
+            content = _truncate_text(law_item.get("본문", ""), 4000)
+            rev_reason = _truncate_text(law_item.get("개정이유", ""), 4000)
+            rev_content = _truncate_text(law_item.get("개정내용", ""), 4000)
             
             csv_item = law_item.copy()
             csv_item["본문"] = content
+            csv_item["개정이유"] = rev_reason
+            csv_item["개정내용"] = rev_content
             writer.writerow(csv_item)
     print(f"CSV 저장 완료: {csv_path}")
 

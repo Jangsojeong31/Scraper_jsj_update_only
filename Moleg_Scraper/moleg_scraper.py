@@ -405,7 +405,11 @@ class MolegScraper(BaseScraper):
             
             content_text = content_area.get_text(separator='\n', strip=True)
             # 불필요한 텍스트 라인 제거
-            detail['content'] = self._clean_content_text(content_text)
+            cleaned_content = self._clean_content_text(content_text)
+            # 본문은 최대 4000자로 제한
+            if cleaned_content and len(cleaned_content) > 4000:
+                cleaned_content = cleaned_content[:4000]
+            detail['content'] = cleaned_content
         else:
             # 본문 영역을 찾지 못한 경우 경고
             print(f"  ⚠ 본문 영역(#listForm > div > div.tb_contents)을 찾을 수 없습니다.")

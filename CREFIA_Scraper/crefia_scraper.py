@@ -416,8 +416,8 @@ class CrefiaScraper(BaseScraper):
                             full_content = self.file_extractor.extract_hwp_content(filepath)
                             original_length = len(full_content)
                             
-                            # 2단계: 파일 내용에서 데이터 추출
-                            extract_text = full_content[:1000] if full_content else ""
+                            # 2단계: 파일 내용에서 데이터 추출 (앞부분 4000자 사용)
+                            extract_text = full_content[:4000] if full_content else ""
                             
                             if extract_text:
                                 content_enactment, content_revision, content_department = extract_data_from_text(extract_text)
@@ -454,8 +454,8 @@ class CrefiaScraper(BaseScraper):
                                 if filename_revision:
                                     revision_date = filename_revision
                             
-                            # content를 1000자로 제한
-                            content = full_content[:1000]
+                            # content를 4000자로 제한
+                            content = full_content[:4000]
                             print(f"\n📄 {text} 파일 내용 추출 완료 "
                                   f"(원본: {original_length}자, 저장: {len(content)}자)")
                         except Exception as e:

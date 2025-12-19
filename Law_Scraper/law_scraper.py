@@ -1487,6 +1487,27 @@ class LawGoKrScraper(BaseScraper):
         content = re.sub(r'\n{3,}', '\n\n', content)
         return content.strip()
     
+    def normalize_date_format(self, date_str: str) -> str:
+        """
+        날짜 형식을 정규화 (YYYY.MM.DD 또는 YYYY-MM-DD 형식으로 통일)
+        
+        Args:
+            date_str: 날짜 문자열
+            
+        Returns:
+            정규화된 날짜 문자열
+        """
+        if not date_str:
+            return ''
+        
+        import re
+        # 공백 제거
+        date_str = date_str.strip()
+        # 이미 정규화된 형식이면 그대로 반환
+        if re.match(r'^\d{4}[.\-]\d{1,2}[.\-]\d{1,2}', date_str):
+            return date_str
+        return date_str
+    
     def extract_content_from_new_window(self, driver) -> Dict[str, str]:
         """
         상세 페이지에서 #lsRvsDocInfo 버튼을 클릭하여 열리는 새 창에서 내용 추출
@@ -1495,13 +1516,14 @@ class LawGoKrScraper(BaseScraper):
             driver: Selenium WebDriver 인스턴스
             
         Returns:
-            {'revision_reason': str, 'enforcement_date': str, 'promulgation_date': str} 딕셔너리
+            {'revision_reason': str, 'revision_content': str, 'enforcement_date': str, 'promulgation_date': str} 딕셔너리
         """
         if driver is None:
-            return {'revision_reason': '', 'enforcement_date': '', 'promulgation_date': ''}
+            return {'revision_reason': '', 'revision_content': '', 'enforcement_date': '', 'promulgation_date': ''}
         
         original_window = None
         new_window_content = ""
+        revision_content = ""
         enforcement_date = ""
         promulgation_date = ""
         
@@ -1551,7 +1573,7 @@ class LawGoKrScraper(BaseScraper):
             
             if not button_element:
                 print(f"  ⚠ #lsRvsDocInfo 버튼을 찾을 수 없습니다")
-                return ""
+                return {'revision_reason': '', 'revision_content': '', 'enforcement_date': '', 'promulgation_date': ''}
             
             # 버튼 클릭
             if button_clicked:
@@ -1564,7 +1586,7 @@ class LawGoKrScraper(BaseScraper):
                     print(f"  ✓ 버튼 클릭 완료")
                 except Exception as e:
                     print(f"  ⚠ 버튼 클릭 실패: {e}")
-                    return ""
+                    return {'revision_reason': '', 'revision_content': '', 'enforcement_date': '', 'promulgation_date': ''}
             
             # 새 창이 열렸는지 확인
             all_windows_after = set(driver.window_handles)
@@ -1572,7 +1594,7 @@ class LawGoKrScraper(BaseScraper):
             
             if not new_windows:
                 print(f"  ⚠ 새 창이 열리지 않았습니다")
-                return ""
+                return {'revision_reason': '', 'revision_content': '', 'enforcement_date': '', 'promulgation_date': ''}
             
             # 새 창으로 전환
             new_window_handle = new_windows.pop()
@@ -1916,6 +1938,104 @@ class LawGoKrScraper(BaseScraper):
                     import traceback
                     traceback.print_exc()
             
+            # 개정내용 추출 시도
+            try:
+                print("  → 개정내용 추출 시도 중...")
+                revision_content_element = None
+                
+                # 방법 1: CSS 셀렉터로 찾기 (#rvsConBody > div:nth-child(9))
+                try:
+                    revision_content_element = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsConBody > div:nth-child(9)"))
+                    )
+                    if revision_content_element:
+                        print(f"  ✓ 개정내용 영역 발견 (CSS 셀렉터)")
+                except:
+                    pass
+                
+                # 방법 2: XPath로 찾기
+                if not revision_content_element:
+                    try:
+                        revision_content_element = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[2]"))
+                        )
+                        if revision_content_element:
+                            print(f"  ✓ 개정내용 영역 발견 (XPath)")
+                    except:
+                        pass
+                
+                # 방법 3: 【제정·개정문】 타이틀 다음에 오는 엘리먼트 찾기
+                if not revision_content_element:
+                    try:
+                        # 【제정·개정문】 타이틀 찾기
+                        title_elements = driver.find_elements(By.CSS_SELECTOR, "p.sbj02")
+                        for title_element in title_elements:
+                            if title_element and "제정·개정문" in title_element.text:
+                                # 타이틀의 부모 요소에서 다음 형제 요소 찾기
+                                # JavaScript로 다음 형제 요소 가져오기
+                                next_element = driver.execute_script("""
+                                    var title = arguments[0];
+                                    var parent = title.parentElement;
+                                    if (!parent) return null;
+                                    var children = Array.from(parent.children);
+                                    var titleIndex = children.indexOf(title);
+                                    if (titleIndex >= 0 && titleIndex < children.length - 1) {
+                                        return children[titleIndex + 1];
+                                    }
+                                    return null;
+                                """, title_element)
+                                
+                                if next_element:
+                                    revision_content_element = next_element
+                                    print(f"  ✓ 개정내용 영역 발견 (타이틀 다음 요소)")
+                                    break
+                    except Exception as e:
+                        print(f"  ⚠ 타이틀 다음 요소 찾기 실패: {e}")
+                
+                # 방법 4: BeautifulSoup으로 페이지 소스에서 찾기
+                if not revision_content_element:
+                    try:
+                        new_window_soup = BeautifulSoup(driver.page_source, 'lxml')
+                        # #rvsConBody > div:nth-child(9) 찾기
+                        rvs_con_body = new_window_soup.select_one("#rvsConBody")
+                        if rvs_con_body:
+                            divs = rvs_con_body.find_all('div', recursive=False)
+                            if len(divs) >= 9:
+                                revision_content_div = divs[8]  # nth-child(9) = 인덱스 8
+                                if revision_content_div:
+                                    # 스크립트, 스타일 등 제외
+                                    for element in revision_content_div.find_all(['script', 'style']):
+                                        element.decompose()
+                                    # 전체 텍스트 추출
+                                    content_text = revision_content_div.get_text(separator='\n', strip=True)
+                                    if content_text:
+                                        revision_content = content_text
+                                        print(f"  ✓ 개정내용 추출 완료 (BeautifulSoup, {len(revision_content)}자)")
+                    except Exception as e:
+                        print(f"  ⚠ BeautifulSoup으로 개정내용 추출 중 오류: {e}")
+                
+                # 요소를 찾았으면 텍스트 추출
+                if revision_content_element and not revision_content:
+                    try:
+                        revision_content = revision_content_element.text.strip()
+                        # 연속된 개행 정리
+                        import re
+                        revision_content = re.sub(r'\n{3,}', '\n\n', revision_content).strip()
+                        
+                        if revision_content:
+                            print(f"  ✓ 개정내용 추출 완료 ({len(revision_content)}자)")
+                        else:
+                            print(f"  ⚠ 개정내용 영역을 찾았지만 텍스트가 비어있습니다")
+                    except Exception as e:
+                        print(f"  ⚠ 개정내용 텍스트 추출 중 오류: {e}")
+                
+                if not revision_content:
+                    print("  ⚠ 개정내용을 찾을 수 없습니다")
+            except Exception as e:
+                print(f"  ⚠ 개정내용 추출 중 오류: {e}")
+                import traceback
+                traceback.print_exc()
+            
             # 새 창 닫기
             try:
                 driver.close()
@@ -1938,6 +2058,7 @@ class LawGoKrScraper(BaseScraper):
         
         return {
             'revision_reason': new_window_content,
+            'revision_content': revision_content,
             'enforcement_date': enforcement_date,
             'promulgation_date': promulgation_date
         }
@@ -2366,24 +2487,35 @@ class LawGoKrScraper(BaseScraper):
         if not records:
             print(f"저장할 데이터가 없습니다.")
             return
-
+            
         # 헤더 정의 (번호, 파일 다운로드 링크 제거, 구분 추가, 개정이유 추가)
-        headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "시행일", "공포일", "파일 이름"]
-
+        headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "개정내용", "시행일", "공포일", "파일 이름"]
+            
         with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
             
             for law_item in records:
-                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                # 본문 내용 처리 (개행 유지, 4000자 제한)
                 content = law_item.get("본문", "") or ""
                 # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                 content = content.replace("\r\n", "\n").replace("\r", "\n")
-                if len(content) > 1000:
-                    content = content[:1000]
+                if len(content) > 4000:
+                    content = content[:4000]
+
+                # 개정이유/개정내용도 최대 4000자로 제한
+                revision_reason = (law_item.get("개정이유", "") or "").replace("\r\n", "\n").replace("\r", "\n")
+                if len(revision_reason) > 4000:
+                    revision_reason = revision_reason[:4000]
+
+                revision_content = (law_item.get("개정내용", "") or "").replace("\r\n", "\n").replace("\r", "\n")
+                if len(revision_content) > 4000:
+                    revision_content = revision_content[:4000]
                 
                 csv_item = law_item.copy()
                 csv_item["본문"] = content
+                csv_item["개정이유"] = revision_reason
+                csv_item["개정내용"] = revision_content
                 writer.writerow(csv_item)
 
         print(f"\nCSV로 저장되었습니다: {filepath}")
@@ -2834,6 +2966,7 @@ def main():
                                     if new_window_data:
                                         # 새 창에서 추출한 내용 저장
                                         target_item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                        target_item['revision_content'] = new_window_data.get('revision_content', '')
                                         # 새 창에서 추출한 시행일과 공포일이 있으면 우선 사용
                                         if new_window_data.get('enforcement_date'):
                                             target_item['enforcement_date_from_revision'] = new_window_data.get('enforcement_date', '')
@@ -2841,19 +2974,23 @@ def main():
                                             target_item['promulgation_date_from_revision'] = new_window_data.get('promulgation_date', '')
                                         
                                         revision_reason_len = len(target_item.get('revision_reason', ''))
-                                        print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
+                                        revision_content_len = len(target_item.get('revision_content', ''))
+                                        print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 개정내용: {revision_content_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
                                     else:
                                         target_item['revision_reason'] = ''
+                                        target_item['revision_content'] = ''
                                         target_item['enforcement_date_from_revision'] = ''
                                         target_item['promulgation_date_from_revision'] = ''
                                         print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다")
                                 except Exception as e:
                                     target_item['revision_reason'] = ''
+                                    target_item['revision_content'] = ''
                                     target_item['enforcement_date_from_revision'] = ''
                                     target_item['promulgation_date_from_revision'] = ''
                                     print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
                             else:
                                 target_item['revision_reason'] = ''
+                                target_item['revision_content'] = ''
                                 target_item['enforcement_date_from_revision'] = ''
                                 target_item['promulgation_date_from_revision'] = ''
                             
@@ -3091,6 +3228,7 @@ def main():
                             new_window_data = crawler.extract_content_from_new_window(driver)
                             if new_window_data:
                                 item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                item['revision_content'] = new_window_data.get('revision_content', '')
                                 # 새 창에서 추출한 시행일과 공포일이 있으면 우선 사용
                                 if new_window_data.get('enforcement_date'):
                                     item['enforcement_date_from_revision'] = new_window_data.get('enforcement_date', '')
@@ -3098,19 +3236,23 @@ def main():
                                     item['promulgation_date_from_revision'] = new_window_data.get('promulgation_date', '')
                                 
                                 revision_reason_len = len(item.get('revision_reason', ''))
-                                print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
+                                revision_content_len = len(item.get('revision_content', ''))
+                                print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 개정내용: {revision_content_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
                             else:
                                 item['revision_reason'] = ''
+                                item['revision_content'] = ''
                                 item['enforcement_date_from_revision'] = ''
                                 item['promulgation_date_from_revision'] = ''
                                 print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다")
                         except Exception as e:
                             item['revision_reason'] = ''
+                            item['revision_content'] = ''
                             item['enforcement_date_from_revision'] = ''
                             item['promulgation_date_from_revision'] = ''
                             print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
                     else:
                         item['revision_reason'] = ''
+                        item['revision_content'] = ''
                         item['enforcement_date_from_revision'] = ''
                         item['promulgation_date_from_revision'] = ''
                     
@@ -3135,12 +3277,14 @@ def main():
                     item['enactment_date'] = ''
                     item['revision_date'] = ''
                     item['revision_reason'] = ''
+                    item['revision_content'] = ''
                     item['enforcement_date_from_revision'] = ''
                     item['promulgation_date_from_revision'] = ''
             else:
                 print(f"[{idx}/{len(all_results)}] 링크가 없어 건너뜀")
                 item['law_content'] = ""
                 item['revision_reason'] = ''
+                item['revision_content'] = ''
                 item['enforcement_date_from_revision'] = ''
                 item['promulgation_date_from_revision'] = ''
         
@@ -3170,24 +3314,28 @@ def main():
             else:
                 print(f"   내용: 없음")
         
-        def truncate_content(text: str) -> str:
-            """본문 내용 처리 (개행 유지, 1000자 제한)"""
+        def truncate_content(text: str, max_len: int = 4000) -> str:
+            """본문/개정이유/개정내용 처리 (개행 유지, 기본 4000자 제한)"""
             if not text:
                 return ''
             # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
             content = text.replace("\r\n", "\n").replace("\r", "\n")
-            # 1000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 1000자)
-            max_length = min(1000, content_limit) if content_limit > 0 else 1000
-            if len(content) > max_length:
-                content = content[:max_length]
+            # content_limit이 지정된 경우에도 최대값은 max_len을 넘지 않도록 제한
+            effective_max = min(max_len, content_limit) if content_limit > 0 else max_len
+            if len(content) > effective_max:
+                content = content[:effective_max]
             return content
 
         for item in all_results:
             # 원본 법령명 우선 사용 (괄호 포함), 없으면 검색 결과의 법령명 사용
             regulation_name = item.get('original_law_name', '') or item.get('regulation_name', '') or item.get('law_name', '')
             full_content = item.get('content', item.get('law_content', ''))
-            truncated_content = truncate_content(full_content)
+            truncated_content = truncate_content(full_content, 4000)
             
+            # 개정이유/개정내용도 4000자 제한 적용
+            revision_reason = truncate_content(item.get('revision_reason', ''), 4000)
+            revision_content = truncate_content(item.get('revision_content', ''), 4000)
+
             # 시행일과 공포일: 새 창에서 추출한 값이 있으면 우선 사용, 없으면 기존 값 사용
             enforcement_date = item.get('enforcement_date_from_revision', '') or item.get('enforcement_date', '')
             promulgation_date = item.get('promulgation_date_from_revision', '') or item.get('promulgation_date', '')
@@ -3201,7 +3349,8 @@ def main():
                 '제정일': crawler.normalize_date_format(item.get('enactment_date', '')),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
                 '최근 개정일': crawler.normalize_date_format(item.get('revision_date', '')),  # 부칙에서 추출한 날짜만 사용 (대체 없음)
                 '소관부서': item.get('department', item.get('ministry', '')),
-                '개정이유': item.get('revision_reason', ''),  # 새 창에서 추출한 개정이유
+                '개정이유': revision_reason,  # 새 창에서 추출한 개정이유(최대 4000자)
+                '개정내용': revision_content,  # 새 창에서 추출한 개정내용(최대 4000자)
                 '시행일': crawler.normalize_date_format(enforcement_date),  # 새 창에서 추출한 시행일 (우선), 없으면 기존 값
                 '공포일': crawler.normalize_date_format(promulgation_date),  # 새 창에서 추출한 공포일 (우선), 없으면 기존 값
                 '파일 이름': item.get('file_name', '')
@@ -3266,6 +3415,7 @@ def main():
                         '최근 개정일': '',
                         '소관부서': '',
                         '개정이유': '',
+                        '개정내용': '',
                         '시행일': '',
                         '공포일': '',
                         '파일 이름': '',
