@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import csv
+import os
 import platform
 
 # Windows 콘솔 인코딩 설정
@@ -219,8 +220,10 @@ def main():
     print("OCR 후처리 및 품질 개선")
     print("=" * 100)
     
-    # JSON 파일 로드
-    json_filename = 'fss_results.json'
+    # JSON 파일 로드 (output 폴더에서)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, 'output')
+    json_filename = os.path.join(output_dir, 'fss_results.json')
     try:
         with open(json_filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -270,9 +273,9 @@ def main():
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
-        # CSV 재생성
-        csv_filename = 'fss_results.csv'
-        base_fieldnames = ['번호', '구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', 
+        # CSV 재생성 (output 폴더에)
+        csv_filename = os.path.join(output_dir, 'fss_results.csv')
+        base_fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', 
                           '제재조치일', '파일다운로드URL', 'OCR추출여부', '누락필드']
         
         csv_rows = []

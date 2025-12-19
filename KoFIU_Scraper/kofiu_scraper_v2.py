@@ -37,7 +37,7 @@ except ImportError:
 # common 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
-from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents
+from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
 from ocr_extractor import OCRExtractor
 from post_process_ocr import process_ocr_text, clean_content_symbols
 
@@ -567,9 +567,8 @@ class KoFIUScraperV2:
                 print(f"\n목록 수집 제한({limit}개)에 도달하여 수집을 종료합니다.")
                 break
             
-            # 날짜 기준 종료
+            # 날짜 기준 종료 (루프 시작 전에 체크)
             if stop_by_date:
-                print(f"\n날짜 기준({after_date} 이후)에 해당하는 항목이 더 이상 없어 수집을 종료합니다.")
                 break
             
             items = self.scrape_list_page(page)
@@ -582,6 +581,8 @@ class KoFIUScraperV2:
                 empty_pages = 0
 
             new_items = []
+            page_has_valid_items = False  # 이 페이지에 범위 내 항목이 있는지
+            
             for item in items:
                 # limit 체크
                 if limit and len(all_items) + len(new_items) >= limit:
@@ -591,21 +592,25 @@ class KoFIUScraperV2:
                 post_date_str = item.get('_post_date', '')
                 post_datetime = self.parse_date(post_date_str)
                 
-                if post_datetime:
-                    # after_date 필터링
-                    if after_datetime and post_datetime < after_datetime:
-                        # 날짜순 정렬이므로, 이 날짜보다 이전이면 더 이상 수집 불필요
-                        print(f"  날짜 {post_date_str}가 기준일({after_date}) 이전이므로 건너뜀")
-                        stop_by_date = True
-                        break
+                # 날짜 필터링이 필요한 경우
+                if sdate_datetime or edate_datetime or after_datetime:
+                    if not post_datetime:
+                        # 날짜를 파싱할 수 없으면 건너뜀 (안전을 위해)
+                        if post_date_str:
+                            print(f"  날짜 파싱 실패: '{post_date_str}' - 건너뜀")
+                        continue
                     
-                    # sdate, edate 필터링
-                    if sdate_datetime and post_datetime < sdate_datetime:
-                        # 시작일보다 이전이면 건너뜀
+                    # 필터링 조건 확인
+                    is_before_sdate = sdate_datetime and post_datetime < sdate_datetime
+                    is_after_edate = edate_datetime and post_datetime > edate_datetime
+                    is_before_after_date = after_datetime and post_datetime < after_datetime
+                    
+                    # 범위 밖 항목은 건너뜀
+                    if is_before_sdate or is_after_edate or is_before_after_date:
                         continue
-                    if edate_datetime and post_datetime > edate_datetime:
-                        # 종료일보다 이후이면 건너뜀
-                        continue
+                    
+                    # 범위 내 항목 발견
+                    page_has_valid_items = True
                     
                 pdf_url = item.get('상세페이지URL')
                 if pdf_url and pdf_url in seen_urls:
@@ -613,9 +618,33 @@ class KoFIUScraperV2:
                 if pdf_url:
                     seen_urls.add(pdf_url)
                 new_items.append(item)
-
+            
+            # 페이지의 모든 항목을 확인한 후 처리
             if new_items:
                 all_items.extend(new_items)
+            
+            # 날짜 필터링이 있고, 이 페이지에 범위 내 항목이 없고, 목록이 날짜순 정렬되어 있다면 중단 고려
+            # (최신순 정렬 가정: 시작일보다 이전 항목만 있고 범위 내 항목이 없으면 더 이상 읽을 필요 없음)
+            # 하지만 안전을 위해 연속으로 2페이지에서 범위 내 항목이 없을 때만 중단
+            if (sdate_datetime or edate_datetime or after_datetime) and not page_has_valid_items:
+                # 이 페이지에 범위 내 항목이 없음
+                # 연속으로 범위 밖 페이지가 나오는지 추적
+                if not hasattr(self, '_consecutive_empty_pages'):
+                    self._consecutive_empty_pages = 0
+                
+                if items:  # 페이지에 항목은 있지만 모두 범위 밖
+                    self._consecutive_empty_pages += 1
+                    if self._consecutive_empty_pages >= 2:
+                        # 연속 2페이지에서 범위 내 항목이 없으면 중단 (최신순 정렬 가정)
+                        print(f"\n연속 {self._consecutive_empty_pages}페이지에서 범위 내 항목이 없어 수집을 종료합니다.")
+                        stop_by_date = True
+                        break
+                else:  # 빈 페이지
+                    self._consecutive_empty_pages = 0  # 빈 페이지는 카운트 리셋
+            else:
+                # 범위 내 항목이 있으면 카운터 리셋
+                if hasattr(self, '_consecutive_empty_pages'):
+                    self._consecutive_empty_pages = 0
             
             if not items:
                 break
@@ -869,23 +898,34 @@ class KoFIUScraperV2:
         - "기 관" -> "기관"
         - "임 원" -> "임원"
         - "직 원" -> "직원"
-        - "임원", "직원" 앞에 줄바꿈 추가
+        - "임 직 원" -> "임직원" (먼저 처리)
+        - "임직원", "임원", "직원" 앞에 줄바꿈 추가
         """
         if not text:
             return text
         
         result = text
         
-        # 공백 제거: "기 관" -> "기관", "임 원" -> "임원", "직 원" -> "직원"
+        # 공백 제거: "기 관" -> "기관"
         result = re.sub(r'기\s+관', '기관', result)
-        result = re.sub(r'임\s+원', '임원', result)
-        result = re.sub(r'직\s+원', '직원', result)
         
-        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
-        result = re.sub(r'(?<!\n)임원', '\n임원', result)
+        # "임 직 원" -> "임직원" (먼저 처리하여 "임직원"을 하나의 단어로 만듦)
+        result = re.sub(r'임\s+직\s+원', '임직원', result)
         
-        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
-        result = re.sub(r'(?<!\n)직원', '\n직원', result)
+        # "임 원" -> "임원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'임\s+원(?!직)', '임원', result)
+        
+        # "직 원" -> "직원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!임)직\s+원', '직원', result)
+        
+        # "임직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)임직원', '\n임직원', result)
+        
+        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임)임원', '\n임원', result)
+        
+        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임직)직원', '\n직원', result)
         
         return result
 
@@ -902,12 +942,18 @@ class KoFIUScraperV2:
             cleaned_sanction_content = self._clean_content(raw_sanction_content)
             processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
             
+            # 제재조치일 포맷팅 (PDF에서 추출한 값)
+            sanction_date = item.get('제재조치일', '')
+            if sanction_date:
+                # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
+                sanction_date = format_date_to_iso(sanction_date)
+            
             base_data = {
                 '구분': '제재사례',
                 '출처': '금융정보분석원',
                 '금융회사명': item.get('금융회사명', ''),
                 '업종': item.get('업종', '기타'),
-                '제재조치일': item.get('제재조치일', ''),
+                '제재조치일': sanction_date,
                 '제재내용': processed_sanction_content,
                 '상세페이지URL': item.get('상세페이지URL', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
@@ -942,13 +988,17 @@ class KoFIUScraperV2:
         return split_results
 
     def save_results(self, filename='kofiu_results.json'):
-        """결과 저장 (JSON, CSV) - 루트 디렉토리에 저장"""
+        """결과 저장 (JSON, CSV) - output 폴더에 저장"""
         # 스크립트 디렉토리 (루트 디렉토리)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
+        # output 폴더 생성
+        output_dir = os.path.join(script_dir, 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        
         # 파일명만 추출 (경로가 포함된 경우)
         base_filename = os.path.basename(filename)
-        json_filepath = os.path.join(script_dir, base_filename)
+        json_filepath = os.path.join(output_dir, base_filename)
         
         # 사건별로 분리된 결과 생성
         split_results = self._split_incidents()
@@ -962,7 +1012,7 @@ class KoFIUScraperV2:
         try:
             import csv
             csv_filename = base_filename.replace('.json', '.csv')
-            csv_filepath = os.path.join(script_dir, csv_filename)
+            csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
                 # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 상세페이지URL, OCR추출여부
