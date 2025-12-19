@@ -912,7 +912,13 @@ class FsbScraper(BaseScraper):
             'promulgation_date': promulgation_date
         }
     
-    def extract_content_from_new_window(self, driver, has_no_iframe: bool = False) -> Dict[str, str]:
+    def extract_content_from_new_window(
+        self,
+        driver,
+        has_no_iframe: bool = False,
+        regulation_name: str = "",
+        content_limit: int = 0
+    ) -> Dict[str, str]:
         """
         상세 페이지에서 개정이유 버튼을 클릭하여 열리는 새 창에서 내용 추출
         '개정이유', '시행일', '공포일' 정보를 추출
@@ -922,15 +928,26 @@ class FsbScraper(BaseScraper):
             has_no_iframe: iframe이 없는 구조인지 여부
             
         Returns:
-            {'revision_reason': str, 'enforcement_date': str, 'promulgation_date': str} 딕셔너리
+            {
+                'revision_reason': str,
+                'enforcement_date': str,
+                'promulgation_date': str,
+                'revision_content': str
+            } 딕셔너리
         """
         if driver is None:
-            return {'revision_reason': '', 'enforcement_date': '', 'promulgation_date': ''}
+            return {
+                'revision_reason': '',
+                'enforcement_date': '',
+                'promulgation_date': '',
+                'revision_content': '',
+            }
         
         original_window = None
         revision_reason = ""
         enforcement_date = ""
         promulgation_date = ""
+        revision_content = ""
         
         # js_code 변수 초기화 (showPopup 처리용)
         js_code = ""
@@ -939,6 +956,152 @@ class FsbScraper(BaseScraper):
             from selenium.webdriver.common.by import By
             from selenium.webdriver.support.ui import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
+            import time
+            import re
+            import os
+            import shutil
+            from pathlib import Path
+            
+            # 개정문 파일 다운로드 헬퍼
+            def _download_revision_file_from_popup() -> str:
+                """
+                새 창(팝업)에서 개정문(HWP/PDF) 파일을 다운로드하고 내용(개정내용)을 추출한다.
+                """
+                try:
+                    from selenium.webdriver.common.by import By as ByInner
+                except Exception:
+                    return ""
+
+                # 다운로드 전 현재 파일 목록 저장
+                files_before = set(
+                    f.name for f in self.current_dir.glob("*") if f.is_file()
+                )
+
+                link_element = None
+                # 1차: 사용자 제공 CSS 셀렉터
+                selectors = [
+                    "#Popup_content > table > tbody > tr:nth-child(7) > td > a",
+                ]
+                xpaths = [
+                    "/html/body/div/div[2]/table/tbody/tr[7]/td/a",
+                ]
+
+                # CSS selector 시도
+                for selector in selectors:
+                    try:
+                        link_element = driver.find_element(ByInner.CSS_SELECTOR, selector)
+                        if link_element:
+                            break
+                    except Exception:
+                        continue
+
+                # XPath 시도
+                if not link_element:
+                    from selenium.common.exceptions import NoSuchElementException
+                    for xp in xpaths:
+                        try:
+                            link_element = driver.find_element(ByInner.XPATH, xp)
+                            if link_element:
+                                break
+                        except NoSuchElementException:
+                            continue
+
+                if not link_element:
+                    print("  ⚠ 팝업에서 개정문 다운로드 링크를 찾지 못했습니다.")
+                    return ""
+
+                # CDP 다운로드 설정 (실패해도 계속 진행)
+                try:
+                    driver.execute_cdp_cmd('Page.setDownloadBehavior', {
+                        'behavior': 'allow',
+                        'downloadPath': str(self.current_dir)
+                    })
+                except Exception as cdp_error:
+                    print(f"  ⚠ 팝업 개정문 CDP 설정 실패 (계속 진행): {cdp_error}")
+
+                # 링크 클릭으로 다운로드 시작
+                try:
+                    driver.execute_script("arguments[0].click();", link_element)
+                    print("  → 개정문 파일 다운로드 클릭")
+                except Exception as e:
+                    print(f"  ⚠ 개정문 다운로드 클릭 실패: {e}")
+                    return ""
+
+                # 다운로드 완료 대기
+                max_wait = 60
+                waited = 0
+                downloaded_file = None
+
+                while waited < max_wait:
+                    downloaded_files = list(self.current_dir.glob("*"))
+                    crdownload_files = [
+                        f for f in downloaded_files if f.name.endswith('.crdownload')
+                    ]
+
+                    if crdownload_files:
+                        print(f"  → 개정문 다운로드 진행 중... ({waited}초)")
+                    else:
+                        for f in downloaded_files:
+                            if f.is_file() and not f.name.endswith('.crdownload'):
+                                if f.name not in files_before:
+                                    if (not downloaded_file or
+                                            f.stat().st_mtime > downloaded_file.stat().st_mtime):
+                                        downloaded_file = f
+
+                        if downloaded_file:
+                            print(f"  ✓ 개정문 파일 다운로드 완료: {downloaded_file.name}")
+                            break
+
+                    time.sleep(1)
+                    waited += 1
+
+                if not downloaded_file or not downloaded_file.exists():
+                    print("  ⚠ 개정문 파일을 찾을 수 없습니다.")
+                    return ""
+
+                # 파일명 정리 (규정명 기반)
+                ext = downloaded_file.suffix or '.hwp'
+                base_name = regulation_name or "revision"
+                safe_reg_name = re.sub(r'[^\w\s-]', '', base_name)
+                safe_reg_name = safe_reg_name.replace(' ', '_')
+                safe_filename = f"{safe_reg_name}_개정문{ext}"
+                new_file_path = self.current_dir / safe_filename
+
+                try:
+                    if str(downloaded_file) != str(new_file_path):
+                        if new_file_path.exists():
+                            new_file_path.unlink()
+                        shutil.move(downloaded_file, new_file_path)
+                    print(f"  ✓ 개정문 파일 저장: {new_file_path}")
+                except Exception as e:
+                    print(f"  ⚠ 개정문 파일 이동/이름 변경 실패: {e}")
+                    new_file_path = downloaded_file
+
+                # 파일 내용 추출
+                file_ext = new_file_path.suffix.lower()
+                file_content = ""
+                try:
+                    if file_ext == '.hwp':
+                        file_content = self.extract_hwp_content(str(new_file_path))
+                    elif file_ext == '.pdf':
+                        file_content = self.extract_pdf_content(str(new_file_path))
+                    else:
+                        # 기타 확장자는 HWP로 간주
+                        file_content = self.extract_hwp_content(str(new_file_path))
+                except Exception as e:
+                    print(f"  ⚠ 개정문 파일 내용 추출 실패: {e}")
+                    file_content = ""
+
+                if not file_content:
+                    return ""
+
+                # 개정내용 텍스트 정리 및 길이 제한 (전체 파일 내용 사용)
+                content_text = file_content.replace("\r\n", "\n").replace("\r", "\n")
+                max_len = min(4000, content_limit) if content_limit > 0 else 4000
+                if len(content_text) > max_len:
+                    content_text = content_text[:max_len]
+
+                return content_text
             
             # 현재 창 핸들 저장
             original_window = driver.current_window_handle
@@ -1036,7 +1199,12 @@ class FsbScraper(BaseScraper):
             
             if not button_element:
                 print(f"  ⚠ 개정이유/개정정보 버튼을 찾을 수 없습니다")
-                return {'revision_reason': '', 'enforcement_date': '', 'promulgation_date': ''}
+                return {
+                    'revision_reason': '',
+                    'enforcement_date': '',
+                    'promulgation_date': '',
+                    'revision_content': '',
+                }
             
             # href에서 showPopup 함수 추출 (버튼 클릭 전에)
             href = button_element.get_attribute('href') or ''
@@ -1098,6 +1266,14 @@ class FsbScraper(BaseScraper):
                         
                         # 공통 함수로 개정정보 추출
                         result = self._extract_revision_info_from_soup(new_window_soup)
+
+                        # 개정문 파일에서 개정내용 추출
+                        try:
+                            popup_revision_content = _download_revision_file_from_popup()
+                            if popup_revision_content:
+                                result['revision_content'] = popup_revision_content
+                        except Exception as e3:
+                            print(f"  ⚠ 개정문 파일 처리 중 오류: {e3}")
                         
                         # 원래 페이지로 돌아가기
                         driver.back()
@@ -1106,7 +1282,12 @@ class FsbScraper(BaseScraper):
                     except Exception as e2:
                         print(f"  ⚠ 직접 URL 접근 실패: {e2}")
                 
-                return {'revision_reason': '', 'enforcement_date': '', 'promulgation_date': ''}
+                return {
+                    'revision_reason': '',
+                    'enforcement_date': '',
+                    'promulgation_date': '',
+                    'revision_content': '',
+                }
             
             # 새 창이 열렸는지 확인
             all_windows_after = set(driver.window_handles)
@@ -1135,6 +1316,14 @@ class FsbScraper(BaseScraper):
                         
                         # 공통 함수로 개정정보 추출
                         result = self._extract_revision_info_from_soup(new_window_soup)
+
+                        # 개정문 파일에서 개정내용 추출
+                        try:
+                            popup_revision_content = _download_revision_file_from_popup()
+                            if popup_revision_content:
+                                result['revision_content'] = popup_revision_content
+                        except Exception as e3:
+                            print(f"  ⚠ 개정문 파일 처리 중 오류: {e3}")
                         
                         # 원래 페이지로 돌아가기
                         driver.back()
@@ -1143,7 +1332,12 @@ class FsbScraper(BaseScraper):
                     except Exception as e:
                         print(f"  ⚠ 직접 URL 접근 실패: {e}")
                 
-                return {'revision_reason': '', 'enforcement_date': '', 'promulgation_date': ''}
+                return {
+                    'revision_reason': '',
+                    'enforcement_date': '',
+                    'promulgation_date': '',
+                    'revision_content': '',
+                }
             
             # 새 창으로 전환
             new_window_handle = new_windows.pop()
@@ -1171,6 +1365,14 @@ class FsbScraper(BaseScraper):
                 revision_reason = result['revision_reason']
                 enforcement_date = result['enforcement_date']
                 promulgation_date = result['promulgation_date']
+
+                # 개정문 파일에서 개정내용 추출
+                try:
+                    popup_revision_content = _download_revision_file_from_popup()
+                    if popup_revision_content:
+                        revision_content = popup_revision_content
+                except Exception as e3:
+                    print(f"  ⚠ 개정문 파일 처리 중 오류: {e3}")
                 
             except Exception as e:
                 print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
@@ -1200,7 +1402,8 @@ class FsbScraper(BaseScraper):
         return {
             'revision_reason': revision_reason,
             'enforcement_date': enforcement_date,
-            'promulgation_date': promulgation_date
+            'promulgation_date': promulgation_date,
+            'revision_content': revision_content,
         }
     
     def extract_law_info_from_content(self, content: str, title: str = "") -> Dict:
@@ -1701,9 +1904,9 @@ class FsbScraper(BaseScraper):
                                 if law_info.get('revision_date') and not item.get('revision_date'):
                                     item['revision_date'] = law_info.get('revision_date')
                                 
-                                # 본문 설정 (제한 적용)
+                                # 본문 설정 (제한 적용, 최대 4000자)
                                 content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                 if len(content) > max_length:
                                     item['content'] = content[:max_length]
                                 else:
@@ -1716,7 +1919,7 @@ class FsbScraper(BaseScraper):
                             file_content = self.extract_pdf_content(str(new_file_path))
                             if file_content:
                                 content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                 if len(content) > max_length:
                                     item['content'] = content[:max_length]
                                 else:
@@ -2054,9 +2257,9 @@ class FsbScraper(BaseScraper):
                                         # 본문 추출 (#lawDetailContent iframe 내부)
                                         content = detail_soup.get_text(separator='\n', strip=True)
                                         if content and len(content) > 20:
-                                            # 개행 유지, 1000자 제한
+                                            # 개행 유지, 4000자 제한
                                             content = content.replace("\r\n", "\n").replace("\r", "\n")
-                                            max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                            max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                             if len(content) > max_length:
                                                 content = content[:max_length]
                                             item['content'] = content
@@ -2176,10 +2379,15 @@ class FsbScraper(BaseScraper):
                                             
                                             print(f"  ✓ 다운로드 버튼 발견: {item['file_name']} (JS: {js_function[:50] if js_function else 'N/A'})")
                                     
-                                    # 새 창에서 개정이유, 시행일, 공포일 추출
+                                    # 새 창에서 개정이유, 시행일, 공포일, 개정내용 추출
                                     try:
                                         print(f"  → 새 창에서 내용 추출 시도 중...")
-                                        new_window_data = self.extract_content_from_new_window(driver, has_no_iframe=has_no_iframe)
+                                        new_window_data = self.extract_content_from_new_window(
+                                            driver,
+                                            has_no_iframe=has_no_iframe,
+                                            regulation_name=regulation_name,
+                                            content_limit=content_limit,
+                                        )
                                         if new_window_data:
                                             # 새 창에서 추출한 내용 저장
                                             if new_window_data.get('revision_reason'):
@@ -2188,6 +2396,8 @@ class FsbScraper(BaseScraper):
                                                 item['enforcement_date'] = new_window_data.get('enforcement_date', '')
                                             if new_window_data.get('promulgation_date'):
                                                 item['promulgation_date'] = new_window_data.get('promulgation_date', '')
+                                            if new_window_data.get('revision_content'):
+                                                item['revision_content'] = new_window_data.get('revision_content', '')
                                             
                                             revision_reason_len = len(item.get('revision_reason', ''))
                                             print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {item.get('enforcement_date', '없음')}, 공포일: {item.get('promulgation_date', '없음')})")
@@ -2403,9 +2613,9 @@ class FsbScraper(BaseScraper):
                                             if law_info.get('revision_date') and not item.get('revision_date'):
                                                 item['revision_date'] = law_info.get('revision_date')
                                             
-                                            # 본문 설정 (1000자 제한, 개행 유지)
+                                            # 본문 설정 (4000자 제한, 개행 유지)
                                             content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                            max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                            max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                             if len(content) > max_length:
                                                 item['content'] = content[:max_length]
                                             else:
@@ -2448,9 +2658,9 @@ class FsbScraper(BaseScraper):
                                             if law_info.get('revision_date') and not item.get('revision_date'):
                                                 item['revision_date'] = law_info.get('revision_date')
                                             
-                                            # 본문 설정 (1000자 제한, 개행 유지)
+                                            # 본문 설정 (4000자 제한, 개행 유지)
                                             content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                            max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                            max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                             if len(content) > max_length:
                                                 item['content'] = content[:max_length]
                                             else:
@@ -2562,6 +2772,7 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
             '최근 개정일': scraper.normalize_date_format(item.get('revision_date', '')),
             '소관부서': item.get('department', ''),
             '개정이유': item.get('revision_reason', ''),
+            '개정내용': item.get('revision_content', ''),
             '시행일': item.get('enforcement_date', ''),
             '공포일': item.get('promulgation_date', ''),
             '파일 이름': file_name
@@ -2592,18 +2803,18 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
     os.makedirs(csv_dir, exist_ok=True)
     csv_path = os.path.join(csv_dir, 'fsb_scraper.csv')
     
-    headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "시행일", "공포일", "파일 이름"]
+    headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "개정내용", "시행일", "공포일", "파일 이름"]
     
     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
         
         for law_item in law_results:
-            # 본문 내용 처리 (개행 유지, 1000자 제한)
+            # 본문 내용 처리 (개행 유지, 4000자 제한)
             content = law_item.get('본문', '') or ''
             content = content.replace("\r\n", "\n").replace("\r", "\n")
-            if len(content) > 1000:
-                content = content[:1000]
+            if len(content) > 4000:
+                content = content[:4000]
             
             csv_item = law_item.copy()
             csv_item['본문'] = content

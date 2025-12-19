@@ -1328,12 +1328,12 @@ class KfbScraper(BaseScraper):
                 
                 # 상세 페이지에서 본문, 소관부서, 파일명 추출
                 detail_info = self.extract_detail_page_info(detail_soup)
-                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                # 본문 내용 처리 (개행 유지, 4000자 제한)
                 content = detail_info.get('content', '') or ''
                 # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                 content = content.replace("\r\n", "\n").replace("\r", "\n")
-                if len(content) > 1000:
-                    content = content[:1000]
+                if len(content) > 4000:
+                    content = content[:4000]
                 item['content'] = content
                 item['department'] = detail_info.get('department', '')
                 # 상세 페이지에서 추출한 파일명 저장 (다운로드 시 사용)
@@ -1470,12 +1470,12 @@ class KfbScraper(BaseScraper):
                                 if law_info.get('revision_date'):
                                     item['revision_date'] = law_info.get('revision_date')
                                 
-                                # 본문은 파일 내용으로 설정 (1000자 제한, 개행 유지)
+                                # 본문은 파일 내용으로 설정 (4000자 제한, 개행 유지)
                                 original_length = len(hwp_content)
                                 # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                                 hwp_content = hwp_content.replace("\r\n", "\n").replace("\r", "\n")
-                                # 1000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 1000자)
-                                max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                # 4000자 제한 (content_limit이 있으면 그것도 고려하되, 최대 4000자)
+                                max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                 if len(hwp_content) > max_length:
                                     item['content'] = hwp_content[:max_length]
                                     if original_length > max_length:
@@ -1625,12 +1625,12 @@ if __name__ == "__main__":
             writer.writeheader()
             
             for law_item in law_results:
-                # 본문 내용 처리 (개행 유지, 1000자 제한)
+                # 본문 내용 처리 (개행 유지, 4000자 제한)
                 content = law_item.get('본문', '') or ''
                 # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
                 content = content.replace("\r\n", "\n").replace("\r", "\n")
-                if len(content) > 1000:
-                    content = content[:1000]
+                if len(content) > 4000:
+                    content = content[:4000]
                 
                 csv_item = law_item.copy()
                 csv_item['본문'] = content

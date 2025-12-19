@@ -1092,7 +1092,7 @@ class KrxScraper(BaseScraper):
     
     def _save_outputs(self, records: List[Dict], meta: Dict) -> None:
         """JSON / CSV 결과 저장 (KFB_Scraper와 동일한 컬럼 구조)"""
-        # 날짜 필드 정규화 및 본문 길이 제한
+        # 날짜 필드 정규화 및 본문/개정이유/개정내용 길이 제한
         normalized_records = []
         for item in records:
             normalized_item = item.copy()
@@ -1103,10 +1103,21 @@ class KrxScraper(BaseScraper):
             content = normalized_item.get('본문', '') or ''
             # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
             content = content.replace("\r\n", "\n").replace("\r", "\n")
-            # content_all이 False인 경우에만 1000자로 제한
-            if not self.content_all and len(content) > 1000:
-                content = content[:1000]
+            # content_all이 False인 경우에만 4000자로 제한
+            if not self.content_all and len(content) > 4000:
+                content = content[:4000]
             normalized_item['본문'] = content
+
+            # 개정이유/개정내용도 최대 4000자로 제한
+            rev_reason = (normalized_item.get('개정이유', '') or '').replace("\r\n", "\n").replace("\r", "\n")
+            if len(rev_reason) > 4000:
+                rev_reason = rev_reason[:4000]
+            normalized_item['개정이유'] = rev_reason
+
+            rev_content = (normalized_item.get('개정내용', '') or '').replace("\r\n", "\n").replace("\r", "\n")
+            if len(rev_content) > 4000:
+                rev_content = rev_content[:4000]
+            normalized_item['개정내용'] = rev_content
             normalized_records.append(normalized_item)
         
         # JSON 저장
@@ -1134,16 +1145,27 @@ class KrxScraper(BaseScraper):
             writer = csv.DictWriter(cf, fieldnames=headers)
             writer.writeheader()
             for item in normalized_records:
-                # 본문 내용 처리 (content_all 플래그에 따라 길이 제한)
-                content = item.get('본문', '') or ''
-                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
-                content = content.replace("\r\n", "\n").replace("\r", "\n")
-                # content_all이 False인 경우에만 1000자로 제한
-                if not self.content_all and len(content) > 1000:
-                    content = content[:1000]
+                # 본문/개정이유/개정내용 처리 (content_all 플래그에 따라 길이 제한, 최대 4000자)
+                content = (item.get('본문', '') or '').replace("\r\n", "\n").replace("\r", "\n")
+                if not self.content_all and len(content) > 4000:
+                    content = content[:4000]
+
+                rev_reason = (item.get('개정이유', '') or '').replace("\r\n", "\n").replace("\r", "\n")
+                if len(rev_reason) > 4000:
+                    rev_reason = rev_reason[:4000]
+
+                rev_content = (item.get('개정내용', '') or '').replace("\r\n", "\n").replace("\r", "\n")
+                if len(rev_content) > 4000:
+                    rev_content = rev_content[:4000]
                 
                 csv_item = item.copy()
                 csv_item['본문'] = content
+                csv_item['개정이유'] = rev_reason
+                csv_item['개정내용'] = rev_content
+                # None 값을 빈 문자열로 변환
+                for key in headers:
+                    if csv_item.get(key) is None:
+                        csv_item[key] = ''
                 writer.writerow(csv_item)
         print(f"CSV 저장 완료: {csv_path}")
 
@@ -1155,7 +1177,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--content-all",
         action="store_true",
-        help="본문 내용을 전체로 가져옵니다 (기본값: 1000자 제한)"
+        help="본문 내용을 전체로 가져옵니다 (기본값: 4000자 제한)"
     )
     args = parser.parse_args()
     

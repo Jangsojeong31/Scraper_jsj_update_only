@@ -41,11 +41,12 @@ class LawLegNoticeScraper(BaseScraper):
     SEARCH_URL_TEMPLATE = "https://www.law.go.kr/lsSc.do?menuId=1&subMenuId=15&tabMenuId=81&query={}"
     DEFAULT_CSV_PATH = "Law_LegNotice_Scraper/input/list.csv"
     
-    def __init__(self, delay: float = 1.0, csv_path: str = None):
+    def __init__(self, delay: float = 1.0, csv_path: str = None, content_all: bool = False):
         """
         Args:
             delay: 요청 간 대기 시간 (초)
             csv_path: 법령명 목록이 있는 CSV 파일 경로
+            content_all: 본문 전체 가져오기 플래그 (기본값: False, 4000자 제한)
         """
         super().__init__(delay)
         
@@ -62,6 +63,9 @@ class LawLegNoticeScraper(BaseScraper):
         # CSV 파일에서 법령명 읽기
         self.law_items = self._load_target_laws_from_csv(csv_path or self.DEFAULT_CSV_PATH)
         print(f"✓ 법령 목록 로드: {len(self.law_items)}개")
+        
+        # 본문 전체 가져오기 플래그
+        self.content_all = content_all
     
     def _remove_parentheses(self, text: str) -> str:
         """
@@ -78,6 +82,145 @@ class LawLegNoticeScraper(BaseScraper):
         # 예: "법률(2026.1.1부터)" -> "법률"
         cleaned = re.sub(r'[\(（].*?[\)）]', '', text)
         return cleaned.strip()
+    
+    def extract_law_detail(self, soup: BeautifulSoup) -> str:
+        """
+        법령 상세 페이지에서 법령 내용 추출 (Law_Scraper의 extract_law_detail 참고)
+        
+        Args:
+            soup: BeautifulSoup 객체 (법령 상세 페이지)
+            
+        Returns:
+            추출된 법령 내용 (텍스트)
+        """
+        if soup is None:
+            return ""
+        
+        content = ""
+        
+        # 법령 본문 영역 찾기 (다양한 선택자 시도)
+        content_selectors = [
+            ('div', {'id': 'pDetail'}),
+            ('div', {'id': 'lawContent'}),
+            ('div', {'class': 'lawContent'}),
+            ('div', {'id': 'conts'}),
+            ('div', {'class': 'conts'}),
+            ('div', {'id': 'content'}),
+            ('div', {'class': 'content'}),
+        ]
+        
+        content_div = None
+        for tag, attrs in content_selectors:
+            content_div = soup.find(tag, attrs) or soup.select_one(f"{tag}[id*='content'], {tag}[class*='content']")
+            if content_div:
+                break
+        
+        if content_div:
+            # 법령 조문 내용 추출
+            # 화면에서 보이는 것처럼 자연스럽게 추출 (개행 유지)
+            # 스크립트, 스타일 등 제외
+            for element in content_div.find_all(['script', 'style', 'nav', 'header', 'footer']):
+                element.decompose()
+            # 전체 텍스트 추출 (개행 유지)
+            content = content_div.get_text(separator='\n', strip=True)
+        
+        # 내용이 없으면 본문 영역 전체에서 추출
+        if not content:
+            body = soup.find('body')
+            if body:
+                # 스크립트, 스타일, 네비게이션 등 제외
+                for element in body.find_all(['script', 'style', 'nav', 'header', 'footer']):
+                    element.decompose()
+                content = body.get_text(separator='\n', strip=True)
+        
+        # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+        import re
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        
+        # 메뉴 항목 제거 (판례, 연혁, 위임행정규칙, 규제, 생활법령, 한눈보기 등)
+        # 이런 메뉴 항목들은 본문 앞부분에 나타나므로 제거
+        menu_patterns = [
+            r'^판례\s*\n',
+            r'^연혁\s*\n',
+            r'^위임행정규칙\s*\n',
+            r'^규제\s*\n',
+            r'^생활법령\s*\n',
+            r'^한눈보기\s*\n',
+        ]
+        
+        # 메뉴 항목들이 연속으로 나오는 패턴 제거
+        # 예: "판례\n연혁\n위임행정규칙\n규제\n생활법령\n한눈보기\n"
+        menu_block_pattern = r'^(판례|연혁|위임행정규칙|규제|생활법령|한눈보기)(\s*\n(판례|연혁|위임행정규칙|규제|생활법령|한눈보기))*\s*\n'
+        content = re.sub(menu_block_pattern, '', content, flags=re.MULTILINE)
+        
+        # 개별 메뉴 항목 제거 (남아있는 경우)
+        for pattern in menu_patterns:
+            content = re.sub(pattern, '', content, flags=re.MULTILINE)
+        
+        # 연속된 개행을 최대 2개로 제한 (너무 많은 빈 줄 방지)
+        content = re.sub(r'\n{3,}', '\n\n', content)
+        return content.strip()
+    
+    def _clean_content_text(self, content: str) -> str:
+        """
+        본문 텍스트에서 불필요한 부분 제거
+        
+        Args:
+            content: 원본 본문 텍스트
+            
+        Returns:
+            정제된 본문 텍스트
+        """
+        if not content:
+            return ''
+        
+        lines = content.split('\n')
+        cleaned_lines = []
+        
+        # 제거할 키워드 목록
+        remove_keywords = [
+            '본문으로 바로가기',
+            '주메뉴 바로가기',
+            '이 누리집은 대한민국 공식 전자정부 누리집입니다',
+            '공식 전자정부 누리집',
+            '100%',
+            '뉴스·소식',
+            '입법예고',
+            '홈',
+            '법제처 법령정보',
+        ]
+        
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            
+            # 불필요한 키워드가 라인 시작 부분에 포함된 경우 제거
+            should_remove = False
+            for keyword in remove_keywords:
+                # 라인이 키워드로 시작하거나 라인 전체가 키워드와 일치하는 경우 제거
+                if line_stripped.startswith(keyword) or line_stripped == keyword:
+                    should_remove = True
+                    break
+            
+            if should_remove:
+                continue
+            
+            cleaned_lines.append(line_stripped)
+        
+        # 빈 라인 정리 (연속된 빈 라인을 하나로)
+        result_lines = []
+        prev_empty = False
+        for line in cleaned_lines:
+            if not line:
+                if not prev_empty:
+                    result_lines.append('')
+                    prev_empty = True
+            else:
+                result_lines.append(line)
+                prev_empty = False
+        
+        return '\n'.join(result_lines).strip()
     
     def _load_target_laws_from_csv(self, csv_path: str) -> List[Dict]:
         """
@@ -131,22 +274,31 @@ class LawLegNoticeScraper(BaseScraper):
         encoded_name = quote_plus(law_name)
         return self.SEARCH_URL_TEMPLATE.format(encoded_name)
     
-    def search_legnotice(self, law_name: str) -> Optional[BeautifulSoup]:
+    def search_legnotice(self, law_name: str, driver=None) -> tuple[Optional[BeautifulSoup], Optional]:
         """
         법령명으로 시행예정법령 검색
         
         Args:
             law_name: 법령명
+            driver: Selenium WebDriver (재사용 가능)
             
         Returns:
-            검색 결과 페이지 BeautifulSoup 객체 또는 None
+            (검색 결과 페이지 BeautifulSoup 객체, Selenium driver) 튜플 또는 (None, None)
         """
         search_url = self.build_search_url(law_name)
         print(f"  검색 URL: {search_url}")
         
         # 검색 결과가 JavaScript로 동적 로드되므로 Selenium 사용
-        soup = self.fetch_page(search_url, use_selenium=True)
-        return soup
+        if driver is None:
+            # driver가 없으면 새로 생성
+            soup = self.fetch_page(search_url, use_selenium=True)
+            return soup, None
+        else:
+            # 기존 driver 재사용
+            driver.get(search_url)
+            time.sleep(2)  # 페이지 로드 대기
+            soup = BeautifulSoup(driver.page_source, 'lxml')
+            return soup, driver
     
     def normalize_law_name(self, name: str) -> str:
         """
@@ -247,7 +399,7 @@ class LawLegNoticeScraper(BaseScraper):
         
         return False
     
-    def extract_legnotice_items(self, soup: BeautifulSoup, law_name: str, save_debug: bool = False) -> List[Dict]:
+    def extract_legnotice_items(self, soup: BeautifulSoup, law_name: str, save_debug: bool = False, driver=None) -> List[Dict]:
         """
         검색 결과 페이지에서 시행예정법령 항목 추출
         "앞으로 시행될 법령" 이미지가 있는 항목만 추출
@@ -256,6 +408,7 @@ class LawLegNoticeScraper(BaseScraper):
             soup: BeautifulSoup 객체
             law_name: 검색한 법령명
             save_debug: 디버그 HTML 저장 여부
+            driver: Selenium WebDriver (본문 추출용)
             
         Returns:
             시행예정법령 정보 리스트
@@ -450,6 +603,8 @@ class LawLegNoticeScraper(BaseScraper):
                 # 검색 키워드와 추출된 법령명이 일치하는지 확인
                 extracted_law_name = item.get('법령명', '')
                 if self.is_same_law(law_name, extracted_law_name):
+                    # driver가 없으면 빈 본문으로 설정
+                    item['본문'] = ''
                     items.append(item)
                 else:
                     # 일치하지 않으면 건너뛰기
@@ -537,50 +692,180 @@ class LawLegNoticeScraper(BaseScraper):
             추출된 시행예정법령 정보 리스트
         """
         all_results = []
+        driver = None
         
-        print(f"\n=== 시행예정법령 검색 시작 (총 {len(self.law_items)}개 법령) ===\n")
-        
-        for idx, law_item in enumerate(self.law_items, 1):
-            if max_items and len(all_results) >= max_items:
-                print(f"\n최대 항목 수({max_items})에 도달했습니다.")
-                break
+        try:
+            # Selenium driver 생성 (본문 추출용)
+            from selenium.webdriver.chrome.options import Options
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--lang=ko-KR')
+            driver = self._create_webdriver(chrome_options)
+            print("✓ Selenium 드라이버 생성 완료 (본문 추출용)")
             
-            law_name = law_item.get('법령명', '')  # 괄호 제거된 검색용 법령명
-            original_law_name = law_item.get('원본법령명', law_name)  # 원본 법령명
-            division = law_item.get('구분', '')
+            print(f"\n=== 시행예정법령 검색 시작 (총 {len(self.law_items)}개 법령) ===\n")
             
-            print(f"\n[{idx}/{len(self.law_items)}] {original_law_name} ({division})")
-            
-            # 검색 실행
-            soup = self.search_legnotice(law_name)
-            if soup is None:
-                print(f"  ⚠ 검색 실패")
-                continue
-            
-            # 검색 결과 추출 (첫 번째 검색만 디버그 저장)
-            save_debug = (idx == 1)
-            items = self.extract_legnotice_items(soup, law_name, save_debug=save_debug)
-            
-            if not items:
-                print(f"  ✓ 시행예정법령 없음")
-                continue
-            
-            print(f"  ✓ {len(items)}개 시행예정법령 발견")
-            
-            # 각 항목의 상세 정보 추출
-            for item in items:
-                # 원본법령명 추가
-                item['원본법령명'] = original_law_name
+            for idx, law_item in enumerate(self.law_items, 1):
+                if max_items and len(all_results) >= max_items:
+                    print(f"\n최대 항목 수({max_items})에 도달했습니다.")
+                    break
                 
-                if extract_detail and item.get('detail_url'):
-                    detail = self.extract_detail_page(item['detail_url'])
-                    # 기존 정보와 상세 정보 병합
-                    item.update(detail)
-                    time.sleep(self.delay)
+                law_name = law_item.get('법령명', '')  # 괄호 제거된 검색용 법령명
+                original_law_name = law_item.get('원본법령명', law_name)  # 원본 법령명
+                division = law_item.get('구분', '')
                 
-                all_results.append(item)
-            
-            time.sleep(self.delay)
+                print(f"\n[{idx}/{len(self.law_items)}] {original_law_name} ({division})")
+                
+                # 검색 URL 생성
+                search_url = self.build_search_url(law_name)
+                
+                # 검색 실행 (driver 재사용)
+                soup, _ = self.search_legnotice(law_name, driver=driver)
+                if soup is None:
+                    print(f"  ⚠ 검색 실패")
+                    continue
+                
+                # 검색 결과 추출 (첫 번째 검색만 디버그 저장)
+                save_debug = (idx == 1)
+                items = self.extract_legnotice_items(soup, law_name, save_debug=save_debug)
+                
+                if not items:
+                    print(f"  ✓ 시행예정법령 없음")
+                    continue
+                
+                print(f"  ✓ {len(items)}개 시행예정법령 발견")
+                
+                # 각 항목의 본문 추출 (Selenium으로 링크 클릭)
+                if extract_detail and driver:
+                    from selenium.webdriver.common.by import By
+                    from selenium.webdriver.support.ui import WebDriverWait
+                    from selenium.webdriver.support import expected_conditions as EC
+                    
+                    for item_idx, item in enumerate(items, 1):
+                        print(f"    [{item_idx}/{len(items)}] 본문 추출 중: {item.get('법령명', 'N/A')[:50]}...")
+                        
+                        # 원본법령명 추가
+                        item['원본법령명'] = original_law_name
+                        
+                        # Selenium에서 해당 링크 찾기 및 클릭
+                        try:
+                            # 검색 결과 페이지에서 해당 법령명을 가진 링크 찾기
+                            # span.tx에 법령명이 포함된 링크 찾기
+                            law_name_text = item.get('법령명', '')
+                            if law_name_text:
+                                # 법령명에서 앞의 번호 제거 (예: "2.공인회계사법" -> "공인회계사법")
+                                import re
+                                clean_law_name = re.sub(r'^\d+\.\s*', '', law_name_text).strip()
+                                
+                                # Selenium에서 링크 찾기 (여러 방법 시도)
+                                link_element = None
+                                
+                                # 방법 1: span.tx에 법령명이 포함된 링크 찾기
+                                try:
+                                    # 모든 링크를 찾아서 텍스트 확인
+                                    all_links = driver.find_elements(By.TAG_NAME, "a")
+                                    for link in all_links:
+                                        try:
+                                            # span.tx 찾기
+                                            span_tx = link.find_element(By.CSS_SELECTOR, "span.tx")
+                                            link_text = span_tx.text.strip()
+                                            # 이미지 제거를 위해 텍스트만 비교
+                                            if clean_law_name in link_text or link_text in clean_law_name:
+                                                # "앞으로 시행될 법령" 이미지가 있는지 확인
+                                                try:
+                                                    img = link.find_element(By.CSS_SELECTOR, "img[alt='앞으로 시행될 법령'], img[src*='bul_list1.gif']")
+                                                    link_element = link
+                                                    break
+                                                except:
+                                                    continue
+                                        except:
+                                            continue
+                                except:
+                                    pass
+                                
+                                # 방법 2: title 속성으로 찾기
+                                if not link_element:
+                                    try:
+                                        all_links = driver.find_elements(By.TAG_NAME, "a")
+                                        for link in all_links:
+                                            title = link.get_attribute('title') or ''
+                                            if clean_law_name in title or title and clean_law_name in title:
+                                                link_element = link
+                                                break
+                                    except:
+                                        pass
+                                
+                                if link_element:
+                                    # 링크 클릭
+                                    print(f"      → 링크 클릭 중...")
+                                    driver.execute_script("arguments[0].scrollIntoView(true);", link_element)
+                                    time.sleep(0.5)
+                                    driver.execute_script("arguments[0].click();", link_element)
+                                    time.sleep(2)  # 페이지 로드 대기
+                                    
+                                    # 상세 페이지 로드 대기
+                                    try:
+                                        WebDriverWait(driver, 10).until(
+                                            EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view"))
+                                        )
+                                        time.sleep(1)
+                                    except:
+                                        time.sleep(2)  # fallback 대기
+                                    
+                                    # 현재 페이지 URL을 detail_url로 저장
+                                    current_url = driver.current_url
+                                    if current_url and current_url != search_url:
+                                        item['detail_url'] = current_url
+                                        print(f"      ✓ 상세 페이지 URL 저장: {current_url}")
+                                    
+                                    # 현재 페이지에서 본문 추출 (Law_Scraper의 extract_law_detail 사용)
+                                    detail_soup = BeautifulSoup(driver.page_source, 'lxml')
+                                    law_content = self.extract_law_detail(detail_soup)
+                                    
+                                    if law_content and len(law_content.strip()) > 0:
+                                        item['본문'] = law_content
+                                        print(f"      ✓ 본문 추출 완료 ({len(law_content)}자)")
+                                    else:
+                                        print(f"      ⚠ 본문 추출 실패 또는 빈 내용")
+                                        item['본문'] = ''
+                                    
+                                    # 뒤로 가기
+                                    driver.back()
+                                    time.sleep(1)
+                                else:
+                                    print(f"      ⚠ 링크를 찾을 수 없음")
+                                    item['본문'] = ''
+                        except Exception as e:
+                            print(f"      ⚠ 본문 추출 중 오류: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            item['본문'] = ''
+                            # 오류 발생 시 뒤로 가기 시도
+                            try:
+                                driver.back()
+                                time.sleep(1)
+                            except:
+                                pass
+                        
+                        all_results.append(item)
+                        time.sleep(self.delay)
+                else:
+                    # driver가 없거나 extract_detail이 False이면 본문 없이 추가
+                    for item in items:
+                        item['원본법령명'] = original_law_name
+                        if '본문' not in item:
+                            item['본문'] = ''
+                        all_results.append(item)
+                
+                time.sleep(self.delay)
+        finally:
+            # Selenium driver 종료
+            if driver:
+                driver.quit()
+                print("✓ Selenium 드라이버 종료 완료")
         
         return all_results
 
@@ -596,12 +881,14 @@ def main():
                        help='최대 항목 수')
     parser.add_argument('--no-detail', action='store_true',
                        help='상세 페이지 추출 안 함')
+    parser.add_argument('--content-all', action='store_true',
+                       help='본문 내용을 전체로 가져옵니다 (기본값: 4000자 제한)')
     
     args = parser.parse_args()
     
     print("=== 법제처 시행예정법령 스크래퍼 시작 ===\n")
     
-    scraper = LawLegNoticeScraper(delay=1.0, csv_path=args.csv_path)
+    scraper = LawLegNoticeScraper(delay=1.0, csv_path=args.csv_path, content_all=args.content_all)
     
     # 스크래핑 실행
     results = scraper.scrape_all(
@@ -611,13 +898,22 @@ def main():
     
     print(f"\n=== 스크래핑 완료: {len(results)}개 항목 ===")
     
-    # 날짜 필드 정규화
+    # 날짜 필드 정규화 및 본문 길이 제한
     for item in results:
         # 날짜 필드 정규화
         if '시행일' in item:
             item['시행일'] = scraper.normalize_date_format(item.get('시행일', ''))
         if '공포일' in item:
             item['공포일'] = scraper.normalize_date_format(item.get('공포일', ''))
+        
+        # 본문 내용 처리 (content_all 플래그에 따라 길이 제한)
+        content = item.get('본문', '') or ''
+        # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        # content_all이 False인 경우에만 4000자로 제한
+        if not scraper.content_all and len(content) > 4000:
+            content = content[:4000]
+        item['본문'] = content
     
     # 결과 저장
     output_data = {
