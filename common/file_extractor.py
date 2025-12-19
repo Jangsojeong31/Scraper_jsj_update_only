@@ -258,12 +258,13 @@ class FileExtractor:
             traceback.print_exc()
             return None
     
-    def extract_pdf_content(self, filepath: str) -> str:
+    def extract_pdf_content(self, filepath: str, max_pages: int = 0) -> str:
         """
         PDF 파일에서 텍스트 내용 추출
         
         Args:
             filepath: PDF 파일 경로
+            max_pages: 최대 추출 페이지 수 (0=전체, 큰 파일 처리 시 성능 향상을 위해 제한)
             
         Returns:
             추출된 텍스트 내용
@@ -275,18 +276,36 @@ class FileExtractor:
             return ""
         
         file_size = os.path.getsize(filepath)
-        print(f"  PDF 파일 크기: {file_size} bytes")
+        file_size_mb = file_size / (1024 * 1024)
+        print(f"  PDF 파일 크기: {file_size} bytes ({file_size_mb:.2f} MB)")
+        
+        # 큰 파일(5MB 이상)인 경우 자동으로 페이지 제한 적용
+        if max_pages == 0 and file_size > 5 * 1024 * 1024:  # 5MB
+            max_pages = 20
+            print(f"  ⚠ 큰 파일 감지: 처음 {max_pages}페이지만 추출 (성능 최적화)")
         
         # pdfplumber 우선 시도 (더 정확함)
         if PDFPLUMBER_AVAILABLE and pdfplumber:
             try:
                 print(f"  pdfplumber 사용 가능, 추출 시도 중...")
                 with pdfplumber.open(filepath) as pdf:
+                    total_pages = len(pdf.pages)
+                    pages_to_extract = min(max_pages, total_pages) if max_pages > 0 else total_pages
+                    
+                    if max_pages > 0 and total_pages > max_pages:
+                        print(f"  → 총 {total_pages}페이지 중 처음 {pages_to_extract}페이지만 추출")
+                    
                     pages_text = []
-                    for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            pages_text.append(page_text)
+                    for i, page in enumerate(pdf.pages):
+                        if max_pages > 0 and i >= max_pages:
+                            break
+                        try:
+                            page_text = page.extract_text()
+                            if page_text:
+                                pages_text.append(page_text)
+                        except Exception as e:
+                            print(f"  ⚠ 페이지 {i+1} 추출 중 오류 (건너뜀): {e}")
+                            continue
                     content = '\n\n'.join(pages_text)
                 if content and content.strip():
                     print(f"  ✓ pdfplumber로 {len(content)}자 추출 완료")
@@ -303,11 +322,23 @@ class FileExtractor:
                 print(f"  PyPDF2 사용 가능, 추출 시도 중...")
                 with open(filepath, 'rb') as f:
                     pdf_reader = PyPDF2.PdfReader(f)
+                    total_pages = len(pdf_reader.pages)
+                    pages_to_extract = min(max_pages, total_pages) if max_pages > 0 else total_pages
+                    
+                    if max_pages > 0 and total_pages > max_pages:
+                        print(f"  → 총 {total_pages}페이지 중 처음 {pages_to_extract}페이지만 추출")
+                    
                     pages_text = []
-                    for page in pdf_reader.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            pages_text.append(page_text)
+                    for i, page in enumerate(pdf_reader.pages):
+                        if max_pages > 0 and i >= max_pages:
+                            break
+                        try:
+                            page_text = page.extract_text()
+                            if page_text:
+                                pages_text.append(page_text)
+                        except Exception as e:
+                            print(f"  ⚠ 페이지 {i+1} 추출 중 오류 (건너뜀): {e}")
+                            continue
                     content = '\n\n'.join(pages_text)
                 if content and content.strip():
                     print(f"  ✓ PyPDF2로 {len(content)}자 추출 완료")
@@ -333,13 +364,14 @@ class FileExtractor:
         
         return content.strip()
     
-    def extract_hwp_content(self, filepath: str) -> str:
+    def extract_hwp_content(self, filepath: str, max_pages: int = 0) -> str:
         """
         HWP 또는 PDF 파일에서 텍스트 내용 추출
         ZIP 파일인 경우 자동으로 압축 해제 후 파일 추출
         
         Args:
             filepath: HWP/PDF 파일 경로 또는 ZIP 파일 경로
+            max_pages: PDF의 경우 최대 추출 페이지 수 (0=전체, 큰 파일 처리 시 성능 향상을 위해 제한)
             
         Returns:
             추출된 텍스트 내용 (제어 문자 제거됨)
@@ -353,7 +385,7 @@ class FileExtractor:
         
         # PDF 파일인지 확인
         if filepath.lower().endswith('.pdf'):
-            return self.extract_pdf_content(filepath)
+            return self.extract_pdf_content(filepath, max_pages=max_pages)
         
         # ZIP 파일인지 확인 (HWPX가 아닌 일반 ZIP)
         if zipfile.is_zipfile(filepath):
@@ -369,7 +401,7 @@ class FileExtractor:
                         if extracted_file:
                             # 추출된 파일 타입에 따라 처리
                             if extracted_file.lower().endswith('.pdf'):
-                                content = self.extract_pdf_content(extracted_file)
+                                content = self.extract_pdf_content(extracted_file, max_pages=max_pages)
                             else:
                                 content = self._extract_hwp_content_internal(extracted_file)
                             # 임시 파일 삭제
@@ -402,7 +434,14 @@ class FileExtractor:
         content = ""
         
         file_size = os.path.getsize(filepath)
-        print(f"  파일 크기: {file_size} bytes")
+        file_size_mb = file_size / (1024 * 1024)
+        print(f"  파일 크기: {file_size} bytes ({file_size_mb:.2f} MB)")
+        
+        # 큰 파일(2MB 이상)인 경우 HTML 변환(표 변환) 스킵 (성능 최적화)
+        # HTML 변환은 시간이 오래 걸리므로 보수적으로 처리
+        skip_html_conversion = file_size > 2 * 1024 * 1024  # 2MB
+        if skip_html_conversion:
+            print(f"  ⚠ 큰 파일 감지: HTML 변환(표 변환) 스킵 (성능 최적화)")
         
         try:
             # pyhwp를 사용하여 텍스트 추출 (우선 시도)
@@ -437,12 +476,21 @@ class FileExtractor:
                                     pass
 
                         # 2) HTML 변환 후 <table> 파싱 → Markdown으로 병합 (텍스트 추출 성공한 경우에만)
-                        if text_extraction_success and content:
+                        # 큰 파일인 경우 HTML 변환 스킵 (성능 최적화)
+                        if text_extraction_success and content and not skip_html_conversion:
                             try:
+                                # HTML 변환은 시간이 오래 걸릴 수 있으므로 안전하게 처리
+                                print(f"  → HTML 변환 시작 (표 추출용)...")
+                                
                                 # HTMLTransform을 사용하여 HTML 변환 (새로운 Hwp5File 인스턴스 필요)
                                 with closing(Hwp5File(filepath)) as hwp5file_html:
                                     with tempfile.TemporaryDirectory() as tmp_dir:
-                                        html_transform.transform_hwp5_to_dir(hwp5file_html, tmp_dir)
+                                        try:
+                                            html_transform.transform_hwp5_to_dir(hwp5file_html, tmp_dir)
+                                        except Exception as html_conv_error:
+                                            print(f"  ⚠ HTML 변환 중 오류 발생 (표 추출 생략): {html_conv_error}")
+                                            raise  # 예외를 다시 발생시켜 외부 except로 이동
+                                        
                                         # 변환된 HTML 파일 찾기 (tmp_dir이 닫히기 전에 처리)
                                         html_files = [f for f in os.listdir(tmp_dir) if f.endswith('.html') or f.endswith('.xhtml')]
                                         if html_files:
@@ -505,9 +553,15 @@ class FileExtractor:
                                                 else:
                                                     print(f"  HTML에서 표를 찾지 못함")
 
-                            except Exception as e:
+                            except (Exception, KeyboardInterrupt) as e:
                                 # HTML 변환 실패 시 표 병합 생략 (본문은 이미 추출됨)
-                                print(f"  ⚠ HTML 변환 실패 (본문은 이미 추출됨): {e}")
+                                print(f"  ⚠ HTML 변환 실패 또는 중단 (본문은 이미 추출됨): {type(e).__name__}")
+                                # KeyboardInterrupt인 경우 다시 발생시켜 상위로 전달
+                                if isinstance(e, KeyboardInterrupt):
+                                    raise
+                        elif skip_html_conversion:
+                            # 큰 파일인 경우 HTML 변환 스킵 메시지
+                            print(f"  → HTML 변환 스킵 (큰 파일 최적화)")
 
                     if content and content.strip():
                         print(f"  ✓ pyhwp로 {len(content)}자 추출 완료")
