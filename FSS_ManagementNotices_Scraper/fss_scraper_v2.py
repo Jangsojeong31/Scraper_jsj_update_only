@@ -355,7 +355,8 @@ class FSSManagementNoticesScraperV2:
         """
         금융회사명으로 업종 조회
         - 정확한 매칭 우선
-        - 부분 매칭 시도 (회사명에 포함되어 있는 경우)
+        - 법인 형태 정규화 후 매칭
+        - 부분 매칭 시도 (최소 3자 이상, 회사명에 포함되어 있는 경우)
         - 매칭되지 않으면 '기타' 반환
         """
         if not institution_name:
@@ -366,21 +367,35 @@ class FSSManagementNoticesScraperV2:
         if clean_name in self.industry_map:
             return self.industry_map[clean_name]
         
-        # 특수문자 제거 후 매칭 (예: * 제거)
-        clean_name_no_special = re.sub(r'[*\s]', '', clean_name)
+        # 법인 형태 정규화 함수
+        def normalize_company_name(name):
+            """법인 형태 제거 후 정규화"""
+            # (주), ㈜, 주식회사 등 제거
+            name = re.sub(r'\(주\)|㈜|주식회사', '', name)
+            # 특수문자 및 공백 제거
+            name = re.sub(r'[*\s]', '', name)
+            return name
+        
+        # 법인 형태 제거 후 매칭
+        clean_name_normalized = normalize_company_name(clean_name)
         for company, industry in self.industry_map.items():
-            company_clean = re.sub(r'[*\s]', '', company)
-            if clean_name_no_special == company_clean:
+            company_normalized = normalize_company_name(company)
+            if clean_name_normalized == company_normalized:
                 return industry
         
-        # 부분 매칭 시도 (금융회사명이 매핑 테이블의 회사명에 포함되거나 그 반대)
-        for company, industry in self.industry_map.items():
-            # 금융회사명이 회사명을 포함하는 경우
-            if company in clean_name:
-                return industry
-            # 회사명이 금융회사명을 포함하는 경우
-            if clean_name in company:
-                return industry
+        # 부분 매칭 시도 (최소 3자 이상인 경우만)
+        # 금융회사명이 3자 미만이면 부분 매칭 시도하지 않음
+        if len(clean_name_normalized) >= 3:
+            for company, industry in self.industry_map.items():
+                company_normalized = normalize_company_name(company)
+                # 회사명도 3자 이상인 경우만 매칭 시도
+                if len(company_normalized) >= 3:
+                    # 금융회사명이 회사명을 포함하는 경우
+                    if company_normalized in clean_name_normalized:
+                        return industry
+                    # 회사명이 금융회사명을 포함하는 경우
+                    if clean_name_normalized in company_normalized:
+                        return industry
         
         return '기타'
     
@@ -962,7 +977,8 @@ class FSSManagementNoticesScraperV2:
     def _post_process_content(self, text):
         """
         '내용' 필드 후처리
-        - <관련법규>, <관련규정> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        - <관련법규>, <관련규정>, <조치할사항> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        - (가), (나), (다) 등 앞에 줄바꿈 추가
         """
         if not text:
             return text
@@ -978,6 +994,24 @@ class FSSManagementNoticesScraperV2:
         # <관련규정> 또는 < 관련규정 > 형태 모두 처리
         # 줄바꿈이 없는 경우에만 줄바꿈 추가
         result = re.sub(r'(?<![\n\r])\s*<(\s*)관련규정(\s*)>', r'\n<\1관련규정\2>', result)
+        
+        # <조치할사항> 또는 <조시할사항> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)조치할사항(\s*)>', r'\n<\1조치할사항\2>', result)
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)조시할사항(\s*)>', r'\n<\1조시할사항\2>', result)
+        
+        # (가), (나), (다) 등 한글 괄호 패턴 앞에 줄바꿈 추가
+        # 반각 괄호: (가), ( 가 ), (나) 등
+        # 전각 괄호: （가）, （ 가 ）, （나） 등
+        # 원문자: ㈎(가), ㈏(나), ㈐(다) 등
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가 (이미 줄바꿈이 있으면 중복 방지)
+        # 반각 괄호 패턴 (공백 포함 가능)
+        result = re.sub(r'(?<![\n\r])\s*\(\s*([가-하])\s*\)', r'\n(\1)', result)
+        # 전각 괄호 패턴 (공백 포함 가능)
+        result = re.sub(r'(?<![\n\r])\s*（\s*([가-하])\s*）', r'\n(\1)', result)
+        # 원문자 패턴 (㈎=가, ㈏=나, ㈐=다, ... ㈛=하)
+        # 유니코드 범위: ㈎(U+320E) ~ ㈛(U+321B)
+        result = re.sub(r'(?<![\n\r])\s*([㈎-㈛])', r'\n\1', result)
         
         return result
     

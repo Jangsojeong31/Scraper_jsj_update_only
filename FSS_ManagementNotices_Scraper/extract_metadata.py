@@ -25,7 +25,8 @@ def collapse_split_syllables(text):
 def remove_page_numbers(text):
     """
     텍스트에서 페이지 번호 패턴 제거
-    예: "- 1 -", "- 2 -", "- 10 -" 등
+    예: "- 1 -", "- 2 -", "- 10 -", "-1-", "-2-" 등
+    페이지 번호는 \n으로 대체됨
     
     Args:
         text: 원본 텍스트
@@ -37,10 +38,21 @@ def remove_page_numbers(text):
         return text
     
     # 페이지 번호 패턴: "- 숫자 -" (앞뒤 공백 포함)
-    # 줄 전체가 페이지 번호인 경우 해당 줄 제거
+    # 줄 전체가 페이지 번호인 경우 해당 줄을 \n으로 대체
     text = re.sub(r'\n\s*-\s*\d+\s*-\s*\n', '\n', text)
-    # 문장 중간에 있는 페이지 번호도 제거
-    text = re.sub(r'\s*-\s*\d+\s*-\s*', ' ', text)
+    # 줄 시작에 페이지 번호가 있는 경우 (줄 끝까지)
+    text = re.sub(r'\n\s*-\s*\d+\s*-\s*', '\n', text)
+    # 줄 끝에 페이지 번호가 있는 경우 (줄 시작부터)
+    text = re.sub(r'\s*-\s*\d+\s*-\s*\n', '\n', text)
+    
+    # 문장 중간에 있는 페이지 번호도 \n으로 대체
+    text = re.sub(r'\s*-\s*\d+\s*-\s*', '\n', text)  # "- 1 -" 형식
+    text = re.sub(r'\s*-\d+-\s*', '\n', text)  # "-1-" 형식 (공백 없음)
+    text = re.sub(r'\s*-\s*\d+-\s*', '\n', text)  # "- 1-" 형식
+    text = re.sub(r'\s*-\d+\s*-\s*', '\n', text)  # "-1 -" 형식
+    
+    # 연속된 빈 줄 정리 (페이지 번호 제거 후 생길 수 있는 빈 줄 정리)
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # 3개 이상 연속된 줄바꿈을 2개로
     
     return text.strip()
 
@@ -84,13 +96,22 @@ def extract_sanction_details(content):
         else:
             rejaechae_section = remaining_after_rejaechae
         
-        # "재조치 대상자 및 제재종류", "대상자 및 재조치내용", "재조치내용" 패턴 찾기
-        rejaechae_sanction_patterns = [
+        # "재조치 대상자 및 제재종류", "대상자 및 재조치내용" 패턴은 추출에서 제외
+        exclude_patterns = [
             r'재\s*조\s*치\s*대\s*상\s*자\s*및\s*제\s*재\s*종\s*류',
             r'재조치\s*대상자\s*및\s*제재종류',
             r'대\s*상\s*자\s*및\s*재\s*조\s*치\s*내\s*용',
             r'대상자\s*및\s*재조치내용',
             r'대상자\s*및\s*재\s*조\s*치\s*내\s*용',
+        ]
+        
+        # 제외할 패턴이 있으면 바로 빈 문자열 반환
+        for pattern in exclude_patterns:
+            if re.search(pattern, rejaechae_section):
+                return ""
+        
+        # "재조치내용" 패턴 찾기 (제외 패턴이 아닌 경우만)
+        rejaechae_sanction_patterns = [
             r'2\.\s*재\s*조\s*치\s*내\s*용',
             r'2\.\s*재조치\s*내용',
             r'2\.\s*재조치내용',
@@ -297,12 +318,16 @@ def extract_incidents(content):
             remaining_content = rejaechae_section[start_pos:]
             
             # 다음 번호 항목(3., 4. 등) 또는 문서 끝까지의 내용 추출
-            next_section_match = re.search(r'\n\s*[3-9]\.\s*[가-힣]', remaining_content)
+            # 개선: 다양한 섹션 종료 패턴 지원 (로마숫자, 제재조치내용, 결론, 참고사항 등)
+            next_section_pattern = r'(?:\n\s*[3-9]\.\s*[가-힣]|\n\s*[Ⅲ-Ⅸ]\s*[\.．]\s*[가-힣]|제\s*재\s*조\s*치\s*내\s*용|결\s*론|참\s*고\s*사\s*항|참고사항)'
+            next_section_match = re.search(next_section_pattern, remaining_content, re.IGNORECASE)
             if next_section_match:
                 section_text = remaining_content[:next_section_match.start()]
             else:
                 section_text = remaining_content
             
+            # 페이지 번호 제거 후 사건 분리 (사건 분리 전에 제거해야 패턴 매칭이 정상 작동)
+            section_text = remove_page_numbers(section_text)
             # 기존 extract_incidents 로직 재사용
             return _extract_incidents_from_section(section_text)
     
@@ -389,13 +414,17 @@ def extract_incidents(content):
     # 다음 항목(5. 로 시작) 또는 문서 끝까지의 내용 추출
     remaining_content = content[start_pos:]
     
-    # 다음 번호 항목(5., 6. 등) 찾기
-    next_section_match = re.search(r'\n\s*[5-9]\.\s*[가-힣]', remaining_content)
+    # 다음 섹션까지 추출 (5. 또는 다음 주요 섹션)
+    # 개선: 다양한 섹션 종료 패턴 지원 (Ⅴ., V., 제재조치내용, 결론, 참고사항 등)
+    next_section_pattern = r'(?:\n\s*[5-9]\.\s*[가-힣]|\n\s*[ⅤV]\s*[\.．]\s*[가-힣]|\n\s*5\s*\.\s*[가-힣]|제\s*재\s*조\s*치\s*내\s*용|결\s*론|참\s*고\s*사\s*항|참고사항)'
+    next_section_match = re.search(next_section_pattern, remaining_content, re.IGNORECASE)
     if next_section_match:
         section_text = remaining_content[:next_section_match.start()]
     else:
         section_text = remaining_content
     
+    # 페이지 번호 제거 후 사건 분리 (사건 분리 전에 제거해야 패턴 매칭이 정상 작동)
+    section_text = remove_page_numbers(section_text)
     # 기존 extract_incidents 로직 재사용
     return _extract_incidents_from_section(section_text)
 
@@ -587,8 +616,18 @@ def _extract_incidents_from_section(section_text):
             
             # 새 사건 시작
             # parent_title이 있으면 "상위제목 - 하위제목" 형식으로, 없으면 하위제목만
+            # 단, "문책사항", "책임사항", "자율처리 필요사항", "경영유의", "개선사항" 등 특수 키워드는 접두사로 사용하지 않음
             if parent_title:
-                current_title = f"{parent_title} - {sub_title}"
+                # 특수 키워드 체크 (공백 제거 후 비교)
+                parent_title_normalized = re.sub(r'\s+', '', parent_title)
+                special_keywords = ['문책사항', '책임사항', '자율처리필요사항', '경영유의', '경영유의사항', '개선사항']
+                is_special_keyword = any(keyword in parent_title_normalized for keyword in special_keywords)
+                
+                if is_special_keyword:
+                    # 특수 키워드는 접두사로 사용하지 않고 하위 제목만 사용
+                    current_title = sub_title
+                else:
+                    current_title = f"{parent_title} - {sub_title}"
             else:
                 current_title = sub_title
             current_content = []
@@ -666,10 +705,13 @@ def _extract_incidents_from_section(section_text):
                 i += 1
                 continue  # 위에서 처리됨
             # "(1)", "(2)" 등이 줄 시작에 나오면 중단 (새 사건) - 통합 사건 모드가 아닐 때만
+            # 561번째 줄의 numbered_pattern이 다음 반복에서 처리하도록 continue
             if not is_unified_incident:
-                if re.match(r'^[\(（]\d+[\)）]\s*', line) or re.match(r'^[\u2474-\u247C]', line):
+                # line.strip() 후 매칭 (공백 제거 후 패턴 매칭)
+                stripped_line = line.strip()
+                if re.match(r'^[\(（]\d+[\)）]', stripped_line) or re.match(r'^[\u2474-\u247C]', stripped_line):
                     i += 1
-                    continue  # 위에서 처리됨
+                    continue  # 다음 반복에서 561번째 줄의 numbered_pattern이 처리함
             # "□" 패턴은 내용으로 포함 (모든 경우)
             
             current_content.append(line)
@@ -696,13 +738,29 @@ def format_date_to_iso(date_str):
     날짜 문자열을 YYYY-MM-DD 형식으로 변환
     
     Args:
-        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일")
+        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일", "20251217")
         
     Returns:
         str: YYYY-MM-DD 형식의 날짜 문자열 (변환 실패 시 원본 반환)
     """
     if not date_str:
         return date_str
+    
+    # 8자리 숫자 형식 (YYYYMMDD) 처리: "20251217" -> "2025-12-17"
+    if re.match(r'^\d{8}$', date_str):
+        try:
+            year = date_str[:4]
+            month = date_str[4:6]
+            day = date_str[6:8]
+            year_int = int(year)
+            month_int = int(month)
+            day_int = int(day)
+            
+            # 기본적인 유효성 검사
+            if 1900 <= year_int <= 2100 and 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                return f"{year}-{month}-{day}"
+        except ValueError:
+            pass
     
     # 숫자만 추출 (년, 월, 일)
     numbers = re.findall(r'\d+', date_str)
@@ -852,125 +910,4 @@ def extract_metadata_from_content(content):
                 break
     
     return institution, sanction_date
-
-
-if __name__ == "__main__":
-    # 테스트용 예시 1: 기본 형태 (가. 나. 다.)
-    test_content1 = """
-    1. 금융기관명: 테스트은행
-    2. 제재조치일: 2024. 5. 15.
-    3. 제재조치내용
-    대상자    조치내용    근거법령
-    홍길동    경고    자금세탁방지법 제5조
-    김철수    주의    자금세탁방지법 제7조
-    4. 제재조치사유
-    가. 자금세탁방지의무 위반
-    고객확인의무를 이행하지 않고 거래를 진행함
-    나. 의심거래보고의무 위반
-    의심거래를 보고하지 않음
-    다. 내부통제 미흡
-    내부통제시스템을 제대로 운영하지 않음
-    5. 기타사항: 없음
-    """
-    
-    # 테스트용 예시 2: 중첩 형태 (가. (1) (2) 나. (1) (2))
-    test_content2 = """
-    1. 금융기관명: 현대차증권
-    2. 제재조치일: 2025. 10.15.
-    3. 제재조치내용
-    기 관 과태료 220,200,000 원 부과
-    4. 제재대상사실
-    가. 고객확인 의무 위반
-    (1) 국적 및 실제 소유자 미확인
-    □ 금융회사등은 계좌를 신규 개설하는 경우 외국인 고객에 대하여는 국적을 확인하여야 함에도
-    ㅇ 현대차증권은 외국인 고객 1명의 국적을 확인하지 않았음
-    (2) 고위험 고객에 대한 추가정보 미확인
-    □ 금융회사등은 고객이 자금세탁행위를 할 우려가 있는 경우 거래자금의 원천 등을 확인하여야 함에도
-    ㅇ 현대차증권은 11건의 계좌개설에 대해 추가적인 정보를 확인하지 않았음
-    나. 고액 현금거래 보고의무 위반
-    □ 금융회사등은 1천만원 이상의 현금을 지급하거나 영수한 경우 30일 이내에 보고하여야 함에도
-    ㅇ 현대차증권은 고액 현금거래 총 4건을 보고기한 내에 보고하지 아니하였음
-    <관련법규>
-    특정금융정보법 제4조의 2
-    5. 기타사항: 없음
-    """
-    
-    # 테스트용 예시 3: 3단계 중첩 형태 (가. (1) (가) (나) (2) (가) (나))
-    test_content3 = """
-    1. 금융기관명: 삼성증권
-    2. 제재조치일: 2025. 10.20.
-    3. 제재조치내용
-    기 관 과태료 500,000,000 원 부과
-    4. 제재대상사실
-    가. 문책사항
-    (1) 투자자 보호의무 위반
-    (가) 고객 정보 미확인
-    □ 금융회사는 고객의 투자성향을 반드시 확인해야 함에도
-    ㅇ 삼성증권은 100명의 고객 정보를 확인하지 않았음
-    < 관련법규 >
-    1. 자본시장법 제47조
-    (나) 부적합 상품 판매
-    □ 금융회사는 고객 투자성향에 맞는 상품만 판매해야 함에도
-    ㅇ 삼성증권은 50건의 부적합 상품을 판매하였음
-    < 관련법규 >
-    1. 자본시장법 제46조
-    (2) 내부통제 미흡
-    (가) 준법감시 체계 부실
-    □ 금융회사는 적절한 준법감시 체계를 갖추어야 함에도
-    ㅇ 삼성증권은 준법감시 인력이 부족하였음
-    (나) 위험관리 체계 미비
-    □ 금융회사는 위험관리 체계를 구축해야 함에도
-    ㅇ 삼성증권은 위험관리 시스템이 미비하였음
-    나. 주의사항
-    단순 절차 위반으로 주의 조치함
-    5. 기타사항: 없음
-    """
-    
-    print("=" * 60)
-    print("테스트 1: 기본 형태 (가. 나. 다.)")
-    print("=" * 60)
-    
-    institution, sanction_date = extract_metadata_from_content(test_content1)
-    print(f"금융회사명: {institution}")
-    print(f"제재조치일: {sanction_date}")
-    
-    sanction_details = extract_sanction_details(test_content1)
-    print(f"\n제재내용:\n{sanction_details}")
-    
-    incidents = extract_incidents(test_content1)
-    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
-    for key, value in sorted(incidents.items()):
-        print(f"  {key}: {value[:50]}..." if len(value) > 50 else f"  {key}: {value}")
-    
-    print("\n" + "=" * 60)
-    print("테스트 2: 중첩 형태 (가. (1) (2) 나.)")
-    print("=" * 60)
-    
-    institution, sanction_date = extract_metadata_from_content(test_content2)
-    print(f"금융회사명: {institution}")
-    print(f"제재조치일: {sanction_date}")
-    
-    sanction_details = extract_sanction_details(test_content2)
-    print(f"\n제재내용:\n{sanction_details}")
-    
-    incidents = extract_incidents(test_content2)
-    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
-    for key, value in sorted(incidents.items()):
-        print(f"  {key}: {value[:80]}..." if len(value) > 80 else f"  {key}: {value}")
-    
-    print("\n" + "=" * 60)
-    print("테스트 3: 3단계 중첩 형태 (가. (1) (가) (나) (2) (가) (나))")
-    print("=" * 60)
-    
-    institution, sanction_date = extract_metadata_from_content(test_content3)
-    print(f"금융회사명: {institution}")
-    print(f"제재조치일: {sanction_date}")
-    
-    sanction_details = extract_sanction_details(test_content3)
-    print(f"\n제재내용:\n{sanction_details}")
-    
-    incidents = extract_incidents(test_content3)
-    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
-    for key, value in sorted(incidents.items()):
-        print(f"  {key}: {value[:100]}..." if len(value) > 100 else f"  {key}: {value}")
 
