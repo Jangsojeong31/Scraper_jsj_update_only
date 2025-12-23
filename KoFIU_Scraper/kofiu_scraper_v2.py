@@ -71,6 +71,11 @@ class KoFIUScraperV2:
         })
         
         # FileExtractor 초기화
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = Path(script_dir) / "output" / "downloads"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.download_dir = str(output_dir)  # 파일 다운로드 디렉토리
         self.temp_dir = Path("temp_downloads")
         self.temp_dir.mkdir(exist_ok=True)
         self.file_extractor = FileExtractor(
@@ -175,6 +180,16 @@ class KoFIUScraperV2:
             chrome_options.add_argument('--log-level=3')  # INFO 레벨 이상만 출력
             chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
             chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # 다운로드 디렉토리 설정
+            prefs = {
+                'download.default_directory': str(os.path.abspath(self.download_dir)),
+                'download.prompt_for_download': False,
+                'download.directory_upgrade': True,
+                'safebrowsing.enabled': True
+            }
+            chrome_options.add_experimental_option('prefs', prefs)
+            
             self.driver = webdriver.Chrome(options=chrome_options)
             print("  ✓ Selenium 드라이버 초기화 완료")
         except Exception as e:
@@ -261,6 +276,246 @@ class KoFIUScraperV2:
 
         return f"attachment_{int(time.time()*1000)}.pdf"
 
+    def download_file_from_list(self, file_id, file_list_id, filename='', page_index=1):
+        """
+        리스트 페이지에서 첨부파일 버튼 클릭하여 리스트 확장 후 전체다운로드 버튼 클릭하여 파일 다운로드
+        
+        Args:
+            file_id: fileId 파라미터
+            file_list_id: file_list ID
+            filename: 파일명
+            page_index: 페이지 인덱스
+        
+        Returns:
+            tuple: (다운로드 성공 여부, 저장된 파일 경로)
+        """
+        try:
+            if not SELENIUM_AVAILABLE or not self.driver:
+                return False, None
+            
+            if not file_id:
+                return False, None
+            
+            # 파일명 추출 또는 생성
+            if not filename or len(filename.strip()) < 3:
+                filename = f"attachment_{int(time.time()*1000)}.pdf"
+            
+            if not filename.lower().endswith('.pdf'):
+                filename += '.pdf'
+            
+            # 파일명 정리 (특수문자 제거)
+            safe_filename = filename
+            invalid_chars = '<>:"/\\|?*'
+            for char in invalid_chars:
+                safe_filename = safe_filename.replace(char, '_')
+            
+            # 파일 저장 경로
+            file_path = os.path.join(self.download_dir, safe_filename)
+            
+            # 이미 파일이 있으면 재다운로드하지 않음
+            if os.path.exists(file_path):
+                print(f"  기존 파일 발견: {safe_filename}")
+                return True, file_path
+            
+            print(f"  파일 다운로드 시도: {filename}")
+            
+            # 현재 페이지에 있지 않으면 목록 페이지로 이동
+            current_url = self.driver.current_url
+            if self.list_url not in current_url:
+                if page_index and page_index > 1:
+                    try:
+                        self.driver.get(self.list_url)
+                        time.sleep(2)
+                        self.driver.execute_script(f"goPaging_PagingView('{page_index}');")
+                        time.sleep(2)
+                    except:
+                        self.driver.get(self.list_url)
+                        time.sleep(2)
+                else:
+                    self.driver.get(self.list_url)
+                    time.sleep(2)
+            
+            # 다운로드 전 파일 수 확인
+            before_files = set(os.listdir(self.download_dir)) if os.path.exists(self.download_dir) else set()
+            
+            # file_list_id로 직접 찾기 (가장 정확하고 빠름)
+            download_success = False
+            if file_list_id:
+                try:
+                    # file_list 요소 찾기
+                    file_list_element = self.driver.find_element(By.ID, file_list_id)
+                    parent_div = file_list_element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'hidden_file_g')]")
+                    
+                    # 부모 li 요소 찾기
+                    parent_li = parent_div.find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
+                    
+                    # 먼저 "첨부파일" 버튼 찾아서 클릭 (리스트 확장)
+                    attach_btn = None
+                    try:
+                        # 여러 패턴으로 첨부파일 버튼 찾기
+                        attach_buttons = parent_li.find_elements(By.XPATH, 
+                            ".//a[contains(text(), '첨부파일')] | "
+                            ".//button[contains(text(), '첨부파일')] | "
+                            ".//span[contains(text(), '첨부파일')]/parent::* | "
+                            ".//*[contains(@class, 'attach')] | "
+                            ".//*[contains(@onclick, 'file')]")
+                        
+                        if attach_buttons:
+                            attach_btn = attach_buttons[0]
+                    except:
+                        pass
+                    
+                    # 첨부파일 버튼을 찾지 못한 경우, 더 넓은 범위에서 찾기
+                    if not attach_btn:
+                        try:
+                            all_links = parent_li.find_elements(By.TAG_NAME, "a")
+                            for link in all_links:
+                                link_text = link.text.strip()
+                                if '첨부' in link_text or '파일' in link_text:
+                                    attach_btn = link
+                                    break
+                        except:
+                            pass
+                    
+                    # 첨부파일 버튼 클릭 (리스트 확장)
+                    if attach_btn:
+                        try:
+                            self.driver.execute_script("arguments[0].click();", attach_btn)
+                            time.sleep(1.5)  # 리스트 확장 대기
+                            print(f"  ✓ 첨부파일 버튼 클릭 (리스트 확장)")
+                        except Exception as e:
+                            print(f"  ⚠ 첨부파일 버튼 클릭 실패: {e}")
+                    
+                    # 전체다운로드 버튼 찾기 및 클릭
+                    all_download = parent_div.find_elements(By.XPATH, ".//a[contains(@class, 'all_download')]")
+                    if all_download:
+                        self.driver.execute_script("arguments[0].click();", all_download[0])
+                        download_success = True
+                        print(f"  ✓ 전체다운로드 버튼 클릭")
+                    else:
+                        print(f"  ⚠ 전체다운로드 버튼을 찾을 수 없습니다")
+                except Exception as e:
+                    print(f"  ⚠ file_list_id로 찾기 실패: {e}")
+            
+            # file_list_id로 못 찾은 경우, data-fileid로 찾기
+            if not download_success:
+                try:
+                    candidates = self.driver.find_elements(By.XPATH, "//li[@data-fileid]")
+                    target_li = None
+                    for li in candidates:
+                        data_id = li.get_attribute('data-fileid') or ""
+                        if file_id == data_id:
+                            target_li = li
+                            break
+                    
+                    if target_li:
+                        try:
+                            parent_div = target_li.find_element(By.XPATH, "./ancestor::div[contains(@class, 'hidden_file_g')]")
+                            parent_li = target_li.find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
+                            
+                            # 먼저 "첨부파일" 버튼 찾아서 클릭 (리스트 확장)
+                            attach_btn = None
+                            try:
+                                attach_buttons = parent_li.find_elements(By.XPATH,
+                                    ".//a[contains(text(), '첨부파일')] | "
+                                    ".//button[contains(text(), '첨부파일')] | "
+                                    ".//span[contains(text(), '첨부파일')]/parent::*")
+                                if attach_buttons:
+                                    attach_btn = attach_buttons[0]
+                            except:
+                                pass
+                            
+                            if not attach_btn:
+                                try:
+                                    all_links = parent_li.find_elements(By.TAG_NAME, "a")
+                                    for link in all_links:
+                                        link_text = link.text.strip()
+                                        if '첨부' in link_text or '파일' in link_text:
+                                            attach_btn = link
+                                            break
+                                except:
+                                    pass
+                            
+                            # 첨부파일 버튼 클릭 (리스트 확장)
+                            if attach_btn:
+                                try:
+                                    self.driver.execute_script("arguments[0].click();", attach_btn)
+                                    time.sleep(1.5)  # 리스트 확장 대기
+                                    print(f"  ✓ 첨부파일 버튼 클릭 (리스트 확장)")
+                                except Exception as e:
+                                    print(f"  ⚠ 첨부파일 버튼 클릭 실패: {e}")
+                            
+                            # 전체다운로드 버튼 찾기 및 클릭
+                            all_download = parent_div.find_elements(By.XPATH, ".//a[contains(@class, 'all_download')]")
+                            if all_download:
+                                self.driver.execute_script("arguments[0].click();", all_download[0])
+                                download_success = True
+                                print(f"  ✓ 전체다운로드 버튼 클릭")
+                        except Exception as e:
+                            print(f"  ⚠ data-fileid로 찾기 실패: {e}")
+                except Exception as e:
+                    print(f"  ⚠ data-fileid 검색 실패: {e}")
+            
+            if not download_success:
+                return False, None
+            
+            # 다운로드 대기 (30초)
+            for i in range(30):
+                time.sleep(1)
+                after_files = set(os.listdir(self.download_dir)) if os.path.exists(self.download_dir) else set()
+                new_files = after_files - before_files
+                if new_files:
+                    break
+                # .crdownload 파일 확인
+                if i == 29 and os.path.exists(self.download_dir):
+                    all_files = os.listdir(self.download_dir)
+                    crdownload_files = [f for f in all_files if f.endswith('.crdownload')]
+                    if crdownload_files:
+                        for j in range(20):
+                            time.sleep(1)
+                            current_files = os.listdir(self.download_dir)
+                            if not any(f.endswith('.crdownload') for f in current_files):
+                                after_files = set(current_files)
+                                new_files = after_files - before_files
+                                break
+            
+            # 다운로드된 파일 찾기
+            after_files = set(os.listdir(self.download_dir)) if os.path.exists(self.download_dir) else set()
+            new_files = after_files - before_files
+            
+            if new_files:
+                # 가장 최근 파일 찾기
+                latest_file_path = None
+                latest_time = 0
+                for new_file in new_files:
+                    file_path_full = os.path.join(self.download_dir, new_file)
+                    if os.path.exists(file_path_full):
+                        file_time = os.path.getctime(file_path_full)
+                        if file_time > latest_time:
+                            latest_time = file_time
+                            latest_file_path = file_path_full
+                
+                if latest_file_path:
+                    # 파일명이 다르면 원하는 이름으로 변경
+                    if latest_file_path != file_path:
+                        try:
+                            os.rename(latest_file_path, file_path)
+                        except:
+                            file_path = latest_file_path
+                    
+                    if os.path.exists(file_path):
+                        file_size = os.path.getsize(file_path)
+                        print(f"  ✓ 파일 다운로드 완료: {safe_filename} ({file_size} bytes)")
+                        return True, file_path
+            
+            return False, None
+            
+        except Exception as e:
+            print(f"  파일 다운로드 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, None
+
     def extract_attachment_content(self, detail_url, link_text='', force_ocr=False):
         """
         첨부파일 내용 추출 (FileExtractor 사용)
@@ -279,12 +534,36 @@ class KoFIUScraperV2:
                 filename = self.derive_filename(detail_url, link_text)
                 print(f"  PDF 다운로드 시도: {filename}")
                 
-                # FileExtractor로 파일 다운로드
-                file_path, actual_filename = self.file_extractor.download_file(
-                    url=detail_url,
-                    filename=filename,
-                    referer=self.list_url
-                )
+                # 파일명 정리 (특수문자 제거)
+                safe_filename = filename
+                invalid_chars = '<>:"/\\|?*'
+                for char in invalid_chars:
+                    safe_filename = safe_filename.replace(char, '_')
+                
+                # output/downloads에 저장할 경로
+                final_file_path = os.path.join(self.download_dir, safe_filename)
+                
+                # 이미 파일이 있으면 재다운로드하지 않음
+                if os.path.exists(final_file_path):
+                    print(f"  기존 파일 발견: {safe_filename}")
+                    file_path = final_file_path
+                else:
+                    # FileExtractor로 파일 다운로드 (임시로 temp_dir에 다운로드)
+                    file_path, actual_filename = self.file_extractor.download_file(
+                        url=detail_url,
+                        filename=filename,
+                        referer=self.list_url
+                    )
+                    
+                    # 다운로드된 파일을 output/downloads로 이동
+                    if file_path and os.path.exists(file_path):
+                        try:
+                            import shutil
+                            shutil.move(file_path, final_file_path)
+                            file_path = final_file_path
+                            print(f"  ✓ 파일 저장: {safe_filename}")
+                        except Exception as e:
+                            print(f"  ⚠ 파일 이동 실패: {e}, 원본 위치 유지")
                 
                 if file_path and os.path.exists(file_path):
                     # FileExtractor로 PDF 내용 추출
@@ -305,17 +584,12 @@ class KoFIUScraperV2:
                         else:
                             print(f"  ✗ OCR 사용 불가")
                     
-                    # 임시 파일 삭제
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
-                    
+                    # 파일 삭제하지 않고 유지
                     if content and content.strip():
-                        print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                        return content, doc_type, detail_url
+                        print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자), 파일 저장: {file_path}")
+                        return content, doc_type, file_path
                     else:
-                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', detail_url
+                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', file_path
                 else:
                     return "[파일 다운로드 실패]", '오류', detail_url
             
@@ -348,12 +622,36 @@ class KoFIUScraperV2:
 
                     print(f"  첨부파일 발견: {filename}")
 
-                    # FileExtractor로 파일 다운로드
-                    file_path, actual_filename = self.file_extractor.download_file(
-                        url=file_url,
-                        filename=filename,
-                        referer=detail_url
-                    )
+                    # 파일명 정리 (특수문자 제거)
+                    safe_filename = filename
+                    invalid_chars = '<>:"/\\|?*'
+                    for char in invalid_chars:
+                        safe_filename = safe_filename.replace(char, '_')
+                    
+                    # output/downloads에 저장할 경로
+                    final_file_path = os.path.join(self.download_dir, safe_filename)
+                    
+                    # 이미 파일이 있으면 재다운로드하지 않음
+                    if os.path.exists(final_file_path):
+                        print(f"  기존 파일 발견: {safe_filename}")
+                        file_path = final_file_path
+                    else:
+                        # FileExtractor로 파일 다운로드 (임시로 temp_dir에 다운로드)
+                        file_path, actual_filename = self.file_extractor.download_file(
+                            url=file_url,
+                            filename=filename,
+                            referer=detail_url
+                        )
+                        
+                        # 다운로드된 파일을 output/downloads로 이동
+                        if file_path and os.path.exists(file_path):
+                            try:
+                                import shutil
+                                shutil.move(file_path, final_file_path)
+                                file_path = final_file_path
+                                print(f"  ✓ 파일 저장: {safe_filename}")
+                            except Exception as e:
+                                print(f"  ⚠ 파일 이동 실패: {e}, 원본 위치 유지")
                     
                     if file_path and os.path.exists(file_path):
                         if file_path.lower().endswith('.pdf'):
@@ -374,24 +672,15 @@ class KoFIUScraperV2:
                                 else:
                                     print(f"  ✗ OCR 사용 불가")
                             
-                            # 임시 파일 삭제
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
-                            
+                            # 파일 삭제하지 않고 유지
                             if content and content.strip():
-                                print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                                return content, doc_type, file_url
+                                print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자), 파일 저장: {file_path}")
+                                return content, doc_type, file_path
                             else:
-                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url
+                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_path
                         else:
-                            # 임시 파일 삭제
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
-                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일'
+                            # PDF가 아닌 파일도 저장
+                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_path
                     break
 
             return "[첨부파일을 찾을 수 없습니다]", '첨부없음', ''
@@ -460,30 +749,56 @@ class KoFIUScraperV2:
                     if date_spans:
                         post_date = date_spans[0].get_text(strip=True)
                     
-                    # 첨부파일 링크 찾기
+                    # 첨부파일 링크 찾기 - href와 fileId 추출
                     hidden_file_div = li.find('div', class_='hidden_file_g')
                     pdf_url = None
                     pdf_filename = None
+                    file_id = None  # fileId 저장 (다운로드용)
+                    file_list_id = None  # file_list ID 저장 (다운로드용)
+                    
                     if hidden_file_div:
                         file_list = hidden_file_div.find('ul', class_='file_list')
                         if file_list:
+                            # file_list ID 추출
+                            file_list_id = file_list.get('id')
+                            
+                            # li 태그에서 data-fileid 속성 추출
+                            li_item = file_list.find('li')
+                            if li_item and li_item.get('data-fileid'):
+                                file_id = li_item.get('data-fileid')
+                            
                             pdf_link = file_list.find('a', class_='pdf')
                             if pdf_link:
-                                href = pdf_link.get('href', '')
-                                if href.startswith('/'):
-                                    pdf_url = urljoin(self.base_url, href)
-                                elif href.startswith('http'):
-                                    pdf_url = href
-                                else:
-                                    pdf_url = urljoin(self.base_url, '/' + href.lstrip('/'))
                                 pdf_filename = pdf_link.get_text(strip=True)
+                                # href 추출 (다운로드 URL)
+                                href = pdf_link.get('href', '')
+                                if href:
+                                    # 상대 경로인 경우 base_url과 결합
+                                    if href.startswith('/'):
+                                        pdf_url = f"{self.base_url}{href}"
+                                    elif href.startswith('http'):
+                                        pdf_url = href
+                                    else:
+                                        pdf_url = f"{self.base_url}/{href}"
+                                
+                                # href에서 fileId 추출 (data-fileid가 없는 경우)
+                                if not file_id and href:
+                                    if 'fileId=' in href:
+                                        parsed = urlparse(href)
+                                        query_params = parse_qs(parsed.query)
+                                        if 'fileId' in query_params:
+                                            file_id = query_params['fileId'][0]
                     
                     items.append({
-                        '첨부파일URL': pdf_url,
+                        '_file_id': file_id,  # fileId 저장
                         '_pdf_filename': pdf_filename,
+                        '_pdf_download_url': pdf_url,  # 다운로드 URL 저장
+                        '_file_list_id': file_list_id,  # file_list ID 저장
                         '_link_text': title,
                         '_post_date': post_date,
-                        '_institution_from_title': institution_from_title  # 목록에서 추출한 금융회사명
+                        '_institution_from_title': institution_from_title,  # 목록에서 추출한 금융회사명
+                        '_page_index': page_index,  # 페이지 인덱스 저장 (다운로드용)
+                        '첨부파일URL': pdf_url  # 기존 호환성 유지
                     })
                     
                 except Exception as e:
@@ -700,22 +1015,76 @@ class KoFIUScraperV2:
 
         print(f"\n총 {len(all_items)}개 항목 수집 완료")
 
-        print("\n상세 정보 및 첨부파일 추출 시작...")
+        print("\n파일 다운로드 및 상세 정보 추출 시작...")
         
         for idx, item in enumerate(all_items, 1):
             link_text = item.pop('_link_text', '')
             pdf_filename = item.pop('_pdf_filename', '')
             item.pop('_post_date', None)  # 임시 필드 제거
             institution_from_title = item.pop('_institution_from_title', '')  # 목록에서 추출한 금융회사명
+            file_id = item.pop('_file_id', None)  # fileId 추출
+            file_list_id = item.pop('_file_list_id', None)  # file_list_id 추출
+            page_index = item.pop('_page_index', 1)  # 페이지 인덱스 추출
+            pdf_download_url = item.pop('_pdf_download_url', None)  # 다운로드 URL 추출
             
             print(f"\n[{idx}/{len(all_items)}] {pdf_filename or link_text or 'N/A'} 처리 중...")
             
-            if item.get('첨부파일URL'):
+            # 파일 다운로드 (별도 처리)
+            saved_file_path = None
+            if file_id:
+                print(f"  파일 다운로드 중...")
+                download_success, saved_file_path = self.download_file_from_list(
+                    file_id=file_id,
+                    file_list_id=file_list_id,
+                    filename=pdf_filename or link_text,
+                    page_index=page_index
+                )
+                if download_success and saved_file_path:
+                    item['저장된파일경로'] = saved_file_path
+                    print(f"  ✓ 파일 다운로드 완료: {os.path.basename(saved_file_path)}")
+                else:
+                    print(f"  ⚠ 파일 다운로드 실패")
+            
+            # 첨부파일 내용 추출
+            # 다운로드된 파일이 있으면 그 파일에서 내용 추출, 없으면 기존 로직 사용
+            attachment_content = None
+            doc_type = None
+            file_download_url = None
+            
+            if saved_file_path and os.path.exists(saved_file_path):
+                # 다운로드된 파일에서 내용 추출
+                print(f"  다운로드된 파일에서 내용 추출 중...")
+                content = self.file_extractor.extract_pdf_content(saved_file_path)
+                doc_type = 'PDF-텍스트'
+                
+                # 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
+                if not content or len(content.strip()) < self.min_text_length:
+                    if self.ocr_extractor.is_available():
+                        ocr_text = self.ocr_extractor.extract_text(saved_file_path, mode='auto')
+                        if ocr_text:
+                            content = process_ocr_text(ocr_text, preserve_spacing=True)
+                            doc_type = 'PDF-OCR'
+                            print(f"  ✓ OCR 추출 및 후처리 완료 ({len(content)}자)")
+                
+                attachment_content = content if content and content.strip() else "[PDF 파일이지만 텍스트 추출 실패]"
+                file_download_url = item.get('첨부파일URL', '')
+            elif item.get('첨부파일URL'):
+                # 기존 로직: URL에서 다운로드하여 내용 추출
                 attachment_content, doc_type, file_download_url = self.extract_attachment_content(
                     item['첨부파일URL'], 
                     pdf_filename or link_text
                 )
-                item['파일다운로드URL'] = file_download_url
+                # extract_attachment_content가 파일 경로를 반환하는 경우 저장
+                if file_download_url and os.path.exists(file_download_url):
+                    saved_file_path = file_download_url
+                    item['저장된파일경로'] = saved_file_path
+            
+            if attachment_content:
+                # file_download_url이 파일 경로인 경우 그대로 사용, URL인 경우 URL 사용
+                if file_download_url and os.path.exists(file_download_url):
+                    item['파일다운로드URL'] = file_download_url
+                else:
+                    item['파일다운로드URL'] = file_download_url if file_download_url else item.get('첨부파일URL', '')
                 item['제재조치내용'] = attachment_content
                 
                 # OCR 추출 여부 설정
