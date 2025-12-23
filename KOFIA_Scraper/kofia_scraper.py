@@ -672,7 +672,11 @@ class KofiaScraper(BaseScraper):
                 dates_info = self._extract_dates_from_iframe01(iframe01_soup)
                 
                 # 개정문 버튼 클릭 및 파일 다운로드 (개정이유, 개정내용, 시행일, 공포일 추출)
-                revision_info = self._extract_revision_info_from_button(driver, iframe01_soup)
+                # 파일 다운로드 후 비교 결과를 확인하여 변경이 감지된 경우에만 추출
+                # comparison_result는 _download_file_by_clicking_button에서 반환됨
+                # item에 저장된 comparison 결과를 확인하여 조건부로 추출
+                item_comparison = item.get('comparison')
+                revision_info = self._extract_revision_info_from_button(driver, iframe01_soup, comparison_result=item_comparison)
                 
                 # #lawFullContent는 iframe 태그 자체이므로 iframe으로 찾기
                 try:
@@ -1201,7 +1205,7 @@ class KofiaScraper(BaseScraper):
     # 개정문 버튼 클릭 및 개정정보 추출
     # ------------------------------------------------------------------
     def _extract_revision_info_from_button(
-        self, driver: webdriver.Chrome, iframe01_soup: BeautifulSoup
+        self, driver: webdriver.Chrome, iframe01_soup: BeautifulSoup, comparison_result: Optional[Dict] = None
     ) -> Optional[Dict]:
         """
         개정문 버튼을 클릭하여 파일을 다운로드하고 개정정보를 추출한다.
@@ -1262,26 +1266,59 @@ class KofiaScraper(BaseScraper):
                     if downloaded_file.is_file():
                         print(f"  → 다운로드된 파일 발견: {downloaded_file.name}")
                         
-                        # 파일 내용 추출
-                        file_ext = downloaded_file.suffix.lower()
-                        if file_ext == '.pdf':
-                            file_content = self.file_extractor.extract_pdf_content(str(downloaded_file))
-                        elif file_ext in ['.hwp', '.hwpx']:
-                            file_content = self.file_extractor.extract_hwp_content(str(downloaded_file))
-                        else:
-                            # 기타 파일 형식 시도 (HWP로 시도)
-                            file_content = self.file_extractor.extract_hwp_content(str(downloaded_file))
+                        # 파일 다운로드 후 비교 수행
+                        previous_file_path = self.previous_dir / downloaded_file.name
+                        comparison_result_revision = None
+                        should_extract_revision = True  # 기본값은 True (새 파일이거나 변경 감지)
                         
-                        if file_content:
-                            print(f"  → 파일 내용 추출 완료 ({len(file_content)}자)")
+                        if previous_file_path.exists():
+                            print(f"  → 이전 파일과 비교 중...")
+                            comparison_result_revision = self.file_comparator.compare_and_report(
+                                str(downloaded_file),
+                                str(previous_file_path),
+                                save_diff=True
+                            )
                             
-                            # 개정이유, 공포일, 시행일, 개정내용 추출
-                            extracted_info = self._extract_revision_info_from_content(file_content)
-                            revision_info.update(extracted_info)
-                            
-                            print(f"  ✓ 개정정보 추출: 개정이유={len(revision_info.get('revision_reason', ''))}자, 개정내용={len(revision_info.get('revision_content', ''))}자, 시행일={revision_info.get('enforcement_date', '')}, 공포일={revision_info.get('promulgation_date', '')}")
+                            if comparison_result_revision['changed']:
+                                print(f"  ✓ 파일 변경 감지: {comparison_result_revision['diff_summary']}")
+                                should_extract_revision = True
+                            else:
+                                print(f"  ✓ 파일 동일 (변경 없음)")
+                                should_extract_revision = False
                         else:
-                            print(f"  ⚠ 파일 내용 추출 실패")
+                            print(f"  ✓ 새 파일 (이전 파일 없음)")
+                            should_extract_revision = True  # 새 파일은 변경으로 간주
+                        
+                        # 전달받은 comparison_result가 있으면 우선 사용
+                        if comparison_result:
+                            should_extract_revision = comparison_result.get('changed', should_extract_revision)
+                        
+                        if should_extract_revision:
+                            # 파일 내용 추출
+                            file_ext = downloaded_file.suffix.lower()
+                            if file_ext == '.pdf':
+                                file_content = self.file_extractor.extract_pdf_content(str(downloaded_file))
+                            elif file_ext in ['.hwp', '.hwpx']:
+                                file_content = self.file_extractor.extract_hwp_content(str(downloaded_file))
+                            else:
+                                # 기타 파일 형식 시도 (HWP로 시도)
+                                file_content = self.file_extractor.extract_hwp_content(str(downloaded_file))
+                            
+                            if file_content:
+                                print(f"  → 파일 내용 추출 완료 ({len(file_content)}자)")
+                                
+                                # 개정이유, 공포일, 시행일, 개정내용 추출
+                                extracted_info = self._extract_revision_info_from_content(file_content)
+                                revision_info.update(extracted_info)
+                                
+                                print(f"  ✓ 개정정보 추출: 개정이유={len(revision_info.get('revision_reason', ''))}자, 개정내용={len(revision_info.get('revision_content', ''))}자, 시행일={revision_info.get('enforcement_date', '')}, 공포일={revision_info.get('promulgation_date', '')}")
+                            else:
+                                print(f"  ⚠ 파일 내용 추출 실패")
+                        else:
+                            print(f"  → 파일 변경 없음, 개정이유/개정내용 추출 스킵")
+                            # 빈 값으로 설정
+                            revision_info["revision_reason"] = ""
+                            revision_info["revision_content"] = ""
                 else:
                     print(f"  ⚠ 다운로드된 파일을 찾을 수 없음")
                     
@@ -1662,6 +1699,11 @@ class KofiaScraper(BaseScraper):
                                         file_type,
                                         regulation_name=regulation_name
                                     )
+                                    
+                                    # 비교 결과를 item에 저장 (나중에 개정이유 추출 시 사용)
+                                    if comparison_result:
+                                        item['comparison'] = comparison_result.get('comparison')
+                                    
                                     if comparison_result:
                                         # 실제 저장된 파일명으로 업데이트
                                         actual_file_name = comparison_result.get('file_name', file_name)

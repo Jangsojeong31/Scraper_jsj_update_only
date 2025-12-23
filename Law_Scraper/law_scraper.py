@@ -323,152 +323,6 @@ class LawGoKrScraper(BaseScraper):
         
         return info
     
-    def _extract_file_links(self, soup: BeautifulSoup, base_url: str = "") -> Dict:
-        """상세 페이지에서 파일 다운로드 링크 추출
-        Args:
-            soup: BeautifulSoup 객체
-            base_url: 기본 URL
-        Returns:
-            {'file_names': [], 'download_links': []} 딕셔너리
-        """
-        file_info = {
-            'file_names': [],
-            'download_links': []
-        }
-        
-        if soup is None:
-            return file_info
-        
-        # 방법 1: 국가법령정보센터의 다운로드 버튼 (#bdySaveBtn) 우선 검색
-        download_btn = soup.find('a', id='bdySaveBtn') or soup.select_one('#bdySaveBtn')
-        if download_btn:
-            href = download_btn.get('href', '')
-            onclick = download_btn.get('onclick', '')
-            
-            # onclick에서 URL 추출 시도
-            if not href or href == '#' or href.startswith('javascript:'):
-                if onclick:
-                    import re
-                    # onclick에서 URL 패턴 찾기
-                    url_patterns = [
-                        r"['\"]([^'\"]*download[^'\"]*)['\"]",
-                        r"['\"]([^'\"]*fileDown[^'\"]*)['\"]",
-                        r"['\"]([^'\"]*\.pdf[^'\"]*)['\"]",
-                        r"['\"]([^'\"]*\.hwp[^'\"]*)['\"]",
-                        r"location\.href\s*=\s*['\"]([^'\"]+)['\"]",
-                        r"window\.open\s*\(\s*['\"]([^'\"]+)['\"]",
-                    ]
-                    for pattern in url_patterns:
-                        match = re.search(pattern, onclick, re.IGNORECASE)
-                        if match:
-                            href = match.group(1)
-                            break
-            
-            if href and not href.startswith('javascript:'):
-                # 파일명 추출
-                file_name = download_btn.get_text(strip=True)
-                if not file_name or len(file_name) < 3:
-                    # href에서 파일명 추출 시도
-                    if href:
-                        file_name = href.split('/')[-1].split('?')[0]
-                        if not file_name or '.' not in file_name:
-                            file_name = download_btn.get('title', '') or '파일'
-                
-                # URL 완성
-                if base_url and not href.startswith('http'):
-                    file_url = urljoin(base_url, href)
-                else:
-                    file_url = href
-                
-                if file_url:
-                    file_info['file_names'].append(file_name)
-                    file_info['download_links'].append(file_url)
-                    print(f"  ✓ 파일 링크 발견 (#bdySaveBtn): {file_name} ({file_url[:80]})")
-                    return file_info  # 찾았으면 바로 반환
-        
-        # 방법 2: 일반적인 파일 다운로드 링크 선택자
-        file_selectors = [
-            'a[href*="download"]',
-            'a[href*="fileDown"]',
-            'a[href*=".pdf"]',
-            'a[href*=".hwp"]',
-            'a[href*=".doc"]',
-            'a[href*=".docx"]',
-            '.file_download a',
-            '.attach_file a',
-            '#fileList a',
-            '.file_list a',
-            'a[onclick*="download"]',
-            'a[onclick*="fileDown"]',
-        ]
-        
-        for selector in file_selectors:
-            file_links = soup.select(selector)
-            if file_links:
-                for link in file_links:
-                    href = link.get('href', '')
-                    onclick = link.get('onclick', '')
-                    
-                    # onclick에서 URL 추출 시도
-                    if not href or href == '#' or href.startswith('javascript:'):
-                        if onclick:
-                            import re
-                            # onclick에서 URL 패턴 찾기
-                            url_patterns = [
-                                r"['\"]([^'\"]*download[^'\"]*)['\"]",
-                                r"['\"]([^'\"]*fileDown[^'\"]*)['\"]",
-                                r"['\"]([^'\"]*\.pdf[^'\"]*)['\"]",
-                                r"['\"]([^'\"]*\.hwp[^'\"]*)['\"]",
-                            ]
-                            for pattern in url_patterns:
-                                match = re.search(pattern, onclick, re.IGNORECASE)
-                                if match:
-                                    href = match.group(1)
-                                    break
-                    
-                    if not href or href.startswith('javascript:'):
-                        continue
-                    
-                    # 파일명 추출
-                    file_name = link.get_text(strip=True)
-                    if not file_name or len(file_name) < 3:
-                        # href에서 파일명 추출 시도
-                        if href:
-                            file_name = href.split('/')[-1].split('?')[0]
-                            if not file_name or '.' not in file_name:
-                                file_name = link.get('title', '') or link.get('alt', '') or '파일'
-                    
-                    # URL 완성
-                    if base_url and not href.startswith('http'):
-                        file_url = urljoin(base_url, href)
-                    else:
-                        file_url = href
-                    
-                    if file_url and file_url not in file_info['download_links']:
-                        file_info['file_names'].append(file_name)
-                        file_info['download_links'].append(file_url)
-                        print(f"  ✓ 파일 링크 발견: {file_name} ({file_url[:80]})")
-        
-        # 방법 3: 국가법령정보센터 특정 구조 찾기
-        # 파일 다운로드 버튼이나 링크가 있는 영역 찾기
-        download_areas = soup.find_all(['div', 'span', 'td'], class_=lambda x: x and ('file' in str(x).lower() or 'download' in str(x).lower() or 'attach' in str(x).lower()))
-        for area in download_areas:
-            links = area.find_all('a', href=True)
-            for link in links:
-                href = link.get('href', '')
-                if href and ('.pdf' in href.lower() or '.hwp' in href.lower() or 'download' in href.lower() or 'fileDown' in href.lower()):
-                    if href not in file_info['download_links']:
-                        file_name = link.get_text(strip=True) or href.split('/')[-1].split('?')[0] or '파일'
-                        if base_url and not href.startswith('http'):
-                            file_url = urljoin(base_url, href)
-                        else:
-                            file_url = href
-                        file_info['file_names'].append(file_name)
-                        file_info['download_links'].append(file_url)
-                        print(f"  ✓ 파일 링크 발견 (영역 검색): {file_name} ({file_url[:80]})")
-        
-        return file_info
-    
     def _download_file_with_selenium(self, driver, regulation_name: str = "") -> Optional[Dict]:
         """Selenium을 사용하여 팝업을 통해 파일 다운로드
         Args:
@@ -849,88 +703,6 @@ class LawGoKrScraper(BaseScraper):
             
         except Exception as e:
             print(f"  ⚠ Selenium 파일 다운로드 중 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def _download_and_compare_file(self, file_url: str, file_name: str, regulation_name: str = "") -> Optional[Dict]:
-        """파일 다운로드 및 이전 파일과 비교
-        Args:
-            file_url: 다운로드 URL
-            file_name: 파일명
-            regulation_name: 규정명 (이전 파일 매칭용)
-        Returns:
-            비교 결과 딕셔너리 또는 None
-        """
-        try:
-            import re
-            import os
-            # 안전한 파일명 생성
-            if regulation_name:
-                safe_reg_name = re.sub(r'[^\w\s-]', '', regulation_name)
-                safe_reg_name = safe_reg_name.replace(' ', '_')
-                ext = Path(file_name).suffix if file_name else '.pdf'
-                safe_filename = f"{safe_reg_name}{ext}"
-            else:
-                safe_filename = re.sub(r'[^\w\s.-]', '', file_name).replace(' ', '_')
-            
-            # 새 파일 다운로드 경로 (current 디렉토리)
-            new_file_path = self.current_dir / safe_filename
-            
-            # 이전 파일 경로 (previous 디렉토리)
-            previous_file_path = self.previous_dir / safe_filename
-            
-            # 파일 다운로드
-            print(f"  → 파일 다운로드 중: {file_name}")
-            downloaded_result = self.file_extractor.download_file(
-                file_url,
-                safe_filename,
-                use_selenium=False,
-                driver=None
-            )
-            
-            if downloaded_result:
-                downloaded_path, actual_filename = downloaded_result
-            else:
-                downloaded_path, actual_filename = None, None
-            
-            if not downloaded_path or not os.path.exists(downloaded_path):
-                print(f"  ⚠ 파일 다운로드 실패")
-                return None
-            
-            # 다운로드한 파일을 새 파일 경로로 이동/복사
-            if str(downloaded_path) != str(new_file_path):
-                import shutil
-                if new_file_path.exists():
-                    new_file_path.unlink()
-                shutil.move(downloaded_path, new_file_path)
-                print(f"  ✓ 파일 저장: {new_file_path}")
-            
-            # 이전 파일과 비교
-            comparison_result = None
-            if previous_file_path.exists():
-                print(f"  → 이전 파일과 비교 중...")
-                comparison_result = self.file_comparator.compare_and_report(
-                    str(new_file_path),
-                    str(previous_file_path),
-                    save_diff=True
-                )
-                
-                if comparison_result['changed']:
-                    print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
-                else:
-                    print(f"  ✓ 파일 동일 (변경 없음)")
-            else:
-                print(f"  ✓ 새 파일 (이전 파일 없음)")
-            
-            return {
-                'file_path': str(new_file_path),
-                'previous_file_path': str(previous_file_path) if previous_file_path.exists() else None,
-                'comparison': comparison_result,
-            }
-            
-        except Exception as e:
-            print(f"  ⚠ 파일 다운로드/비교 중 오류: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -2969,43 +2741,6 @@ def main():
                             else:
                                 print(f"  ⚠ 본문 추출 실패 또는 빈 내용")
                             
-                            # 새 창에서 내용 추출 (#lsRvsDocInfo 버튼 클릭) - '개정이유', '시행일', '공포일' 필드로 저장
-                            # 상세 페이지가 Selenium으로 열려있을 때만 실행
-                            if driver and driver.current_url:
-                                try:
-                                    print(f"  → 새 창에서 내용 추출 시도 중...")
-                                    new_window_data = crawler.extract_content_from_new_window(driver)
-                                    if new_window_data:
-                                        # 새 창에서 추출한 내용 저장
-                                        target_item['revision_reason'] = new_window_data.get('revision_reason', '')
-                                        target_item['revision_content'] = new_window_data.get('revision_content', '')
-                                        # 새 창에서 추출한 시행일과 공포일이 있으면 우선 사용
-                                        if new_window_data.get('enforcement_date'):
-                                            target_item['enforcement_date_from_revision'] = new_window_data.get('enforcement_date', '')
-                                        if new_window_data.get('promulgation_date'):
-                                            target_item['promulgation_date_from_revision'] = new_window_data.get('promulgation_date', '')
-                                        
-                                        revision_reason_len = len(target_item.get('revision_reason', ''))
-                                        revision_content_len = len(target_item.get('revision_content', ''))
-                                        print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 개정내용: {revision_content_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
-                                    else:
-                                        target_item['revision_reason'] = ''
-                                        target_item['revision_content'] = ''
-                                        target_item['enforcement_date_from_revision'] = ''
-                                        target_item['promulgation_date_from_revision'] = ''
-                                        print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다")
-                                except Exception as e:
-                                    target_item['revision_reason'] = ''
-                                    target_item['revision_content'] = ''
-                                    target_item['enforcement_date_from_revision'] = ''
-                                    target_item['promulgation_date_from_revision'] = ''
-                                    print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
-                            else:
-                                target_item['revision_reason'] = ''
-                                target_item['revision_content'] = ''
-                                target_item['enforcement_date_from_revision'] = ''
-                                target_item['promulgation_date_from_revision'] = ''
-                            
                             # 부칙 영역에서 제정일과 최근 개정일 추출
                             # 방법 1: 검색 결과 목록에서 부칙 버튼 클릭하여 추출 (테스트)
                             date_info = {'enactment_date': '', 'revision_date': ''}
@@ -3067,6 +2802,7 @@ def main():
                             
                             # 파일 다운로드 (Selenium을 사용하여 팝업 처리)
                             # --no-download 플래그가 있으면 파일 다운로드 스킵
+                            downloaded_file_path = None
                             if no_download:
                                 print(f"  → 파일 다운로드 스킵 (--no-download 플래그 활성화)")
                                 target_item['file_download_link'] = ''
@@ -3091,32 +2827,68 @@ def main():
                                             target_item['law_content'] = pdf_content
                                             print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
                                 else:
-                                    # Selenium 다운로드 실패 시 기존 방법 시도
-                                    file_info = crawler._extract_file_links(detail_soup, law_link)
-                                    if file_info['download_links']:
-                                        target_item['file_download_link'] = file_info['download_links'][0]
-                                        target_item['file_name'] = file_info['file_names'][0] if file_info['file_names'] else ''
-                                        
-                                        # 파일 다운로드 및 비교
-                                        downloaded_file_path = crawler._download_and_compare_file(
-                                            file_info['download_links'][0],
-                                            file_info['file_names'][0] if file_info['file_names'] else '파일.pdf',
-                                            regulation_name=original_law_name
-                                        )
-                                        
-                                        # PDF 파일이면 내용 추출
-                                        if downloaded_file_path and downloaded_file_path.get('file_path'):
-                                            file_path = downloaded_file_path['file_path']
-                                            if file_path.lower().endswith('.pdf'):
-                                                print(f"  → PDF 내용 추출 중...")
-                                                pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
-                                                if pdf_content:
-                                                    # PDF 내용이 있으면 본문으로 사용
-                                                    target_item['law_content'] = pdf_content
-                                                    print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
-                                    else:
-                                        target_item['file_download_link'] = ''
-                                        target_item['file_name'] = ''
+                                    # Selenium 다운로드 실패
+                                    target_item['file_download_link'] = ''
+                                    target_item['file_name'] = ''
+                                    print(f"  ⚠ 파일 다운로드 실패 (Selenium 다운로드 실패)")
+                            
+                            # 새 창에서 내용 추출 (#lsRvsDocInfo 버튼 클릭) - '개정이유', '시행일', '공포일' 필드로 저장
+                            # 파일 변경이 감지된 경우에만 추출
+                            # 상세 페이지가 Selenium으로 열려있을 때만 실행
+                            if driver and driver.current_url:
+                                # 파일 다운로드 결과에서 비교 결과 확인
+                                comparison_result = None
+                                if downloaded_file_path:
+                                    comparison_result = downloaded_file_path.get('comparison')
+                                
+                                # 비교 결과에 따라 개정이유 추출 여부 결정
+                                should_extract_revision = False
+                                if comparison_result:
+                                    should_extract_revision = comparison_result.get('changed', False)
+                                else:
+                                    # 비교 결과가 없으면 새 파일로 간주하여 추출
+                                    should_extract_revision = True
+                                
+                                if should_extract_revision:
+                                    try:
+                                        print(f"  → 파일 변경 감지됨, 새 창에서 개정이유/개정내용 추출 시도 중...")
+                                        new_window_data = crawler.extract_content_from_new_window(driver)
+                                        if new_window_data:
+                                            # 새 창에서 추출한 내용 저장
+                                            target_item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                            target_item['revision_content'] = new_window_data.get('revision_content', '')
+                                            # 새 창에서 추출한 시행일과 공포일이 있으면 우선 사용
+                                            if new_window_data.get('enforcement_date'):
+                                                target_item['enforcement_date_from_revision'] = new_window_data.get('enforcement_date', '')
+                                            if new_window_data.get('promulgation_date'):
+                                                target_item['promulgation_date_from_revision'] = new_window_data.get('promulgation_date', '')
+                                            
+                                            revision_reason_len = len(target_item.get('revision_reason', ''))
+                                            revision_content_len = len(target_item.get('revision_content', ''))
+                                            print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 개정내용: {revision_content_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
+                                        else:
+                                            target_item['revision_reason'] = ''
+                                            target_item['revision_content'] = ''
+                                            target_item['enforcement_date_from_revision'] = ''
+                                            target_item['promulgation_date_from_revision'] = ''
+                                            print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다")
+                                    except Exception as e:
+                                        target_item['revision_reason'] = ''
+                                        target_item['revision_content'] = ''
+                                        target_item['enforcement_date_from_revision'] = ''
+                                        target_item['promulgation_date_from_revision'] = ''
+                                        print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                                else:
+                                    print(f"  → 파일 변경 없음, 개정이유/개정내용 추출 스킵")
+                                    target_item['revision_reason'] = ''
+                                    target_item['revision_content'] = ''
+                                    target_item['enforcement_date_from_revision'] = ''
+                                    target_item['promulgation_date_from_revision'] = ''
+                            else:
+                                target_item['revision_reason'] = ''
+                                target_item['revision_content'] = ''
+                                target_item['enforcement_date_from_revision'] = ''
+                                target_item['promulgation_date_from_revision'] = ''
                         else:
                             print(f"  ✗ 상세 페이지 가져오기 실패")
                             target_item['law_content'] = ""
@@ -3232,6 +3004,9 @@ def main():
                         print(f"  ⚠ 내용 추출 실패 또는 빈 내용")
                     
                     # 새 창에서 내용 추출 (#lsRvsDocInfo 버튼 클릭) - '개정이유', '시행일', '공포일' 필드로 저장
+                    # 주의: 이 부분은 키워드 검색을 사용하는 경우로, 파일 다운로드를 수행하지 않음
+                    # 따라서 파일 비교 결과를 확인할 수 없으므로 항상 추출 (기존 동작 유지)
+                    # 파일 다운로드가 있는 경우는 위의 CSV 목록 처리 부분에서 이미 조건부로 처리됨
                     if driver and driver.current_url:
                         try:
                             print(f"  → 새 창에서 내용 추출 시도 중...")

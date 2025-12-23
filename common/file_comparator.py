@@ -5,6 +5,7 @@
 import os
 import hashlib
 import difflib
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -23,12 +24,13 @@ class FileComparator:
         # PDF 텍스트 추출 결과 캐싱 (중복 추출 방지)
         self._pdf_text_cache: Dict[str, str] = {}
     
-    def get_file_hash(self, filepath: str) -> Optional[str]:
+    def get_file_hash(self, filepath: str, normalize_html: bool = True) -> Optional[str]:
         """
         파일의 해시값 계산 (MD5)
         
         Args:
             filepath: 파일 경로
+            normalize_html: HTML 파일인 경우 타임스탬프 정규화 여부
             
         Returns:
             MD5 해시값 또는 None
@@ -38,6 +40,20 @@ class FileComparator:
         
         try:
             hash_md5 = hashlib.md5()
+            
+            # HTML 파일인 경우 타임스탬프 정규화 후 해시 계산
+            if normalize_html and self._is_html_file(filepath):
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        normalized_content = self._normalize_html_content(content)
+                        hash_md5.update(normalized_content.encode('utf-8'))
+                    return hash_md5.hexdigest()
+                except Exception as e:
+                    # 정규화 실패 시 원본 파일로 fallback
+                    print(f"  ⚠ HTML 정규화 실패, 원본 파일로 해시 계산: {e}")
+            
+            # 일반 파일 또는 정규화 실패 시 원본 파일로 해시 계산
             with open(filepath, "rb") as f:
                 for chunk in iter(lambda: f.read(4096), b""):
                     hash_md5.update(chunk)
@@ -192,6 +208,46 @@ class FileComparator:
         except:
             return False
     
+    def _is_html_file(self, filepath: str) -> bool:
+        """파일이 HTML 파일인지 확인"""
+        try:
+            ext = Path(filepath).suffix.lower()
+            if ext in ['.html', '.htm']:
+                return True
+            # 확장자가 없거나 다른 경우 내용으로 확인
+            with open(filepath, 'rb') as f:
+                first_bytes = f.read(512)
+                try:
+                    content = first_bytes.decode('utf-8', errors='ignore')
+                    # HTML 태그가 있으면 HTML 파일로 간주
+                    if '<html' in content.lower() or '<!doctype html' in content.lower():
+                        return True
+                except:
+                    pass
+            return False
+        except:
+            return False
+    
+    def _normalize_html_content(self, content: str) -> str:
+        """
+        HTML 내용에서 타임스탬프 파라미터 제거 (캐시 버스팅 파라미터 무시)
+        
+        Args:
+            content: HTML 내용
+            
+        Returns:
+            정규화된 HTML 내용 (타임스탬프 파라미터 제거)
+        """
+        # ?Time=숫자 패턴 제거 (예: ?Time=1766363858)
+        # URL 쿼리 파라미터로 사용되는 타임스탬프 제거
+        content = re.sub(r'\?Time=\d+', '?Time=', content)
+        
+        # 다른 일반적인 캐시 버스팅 파라미터도 제거 (선택사항)
+        # content = re.sub(r'[?&]v=\d+', '', content)  # version 파라미터
+        # content = re.sub(r'[?&]cache=\d+', '', content)  # cache 파라미터
+        
+        return content
+    
     def _get_pdf_diff_summary(self, old_file: str, new_file: str) -> str:
         """
         PDF 파일의 diff 요약 생성 (텍스트 추출 후 비교)
@@ -295,9 +351,17 @@ class FileComparator:
         """
         try:
             with open(old_file, 'r', encoding='utf-8', errors='ignore') as f:
-                old_lines = f.readlines()
+                old_content = f.read()
             with open(new_file, 'r', encoding='utf-8', errors='ignore') as f:
-                new_lines = f.readlines()
+                new_content = f.read()
+            
+            # HTML 파일인 경우 타임스탬프 정규화
+            if self._is_html_file(old_file) and self._is_html_file(new_file):
+                old_content = self._normalize_html_content(old_content)
+                new_content = self._normalize_html_content(new_content)
+            
+            old_lines = old_content.splitlines(keepends=True)
+            new_lines = new_content.splitlines(keepends=True)
             
             # 통계 계산
             diff = list(difflib.unified_diff(
@@ -312,6 +376,10 @@ class FileComparator:
             removed = sum(1 for line in diff if line.startswith('-') and not line.startswith('---'))
             
             summary = f'텍스트 변경: {removed}줄 삭제, {added}줄 추가'
+            
+            # HTML 파일인 경우 정규화 정보 추가
+            if self._is_html_file(old_file) and self._is_html_file(new_file):
+                summary += ' (타임스탬프 파라미터 정규화 적용)'
             
             # 변경된 줄 수가 적으면 상세 정보 추가
             if len(diff) < 50:
@@ -340,9 +408,17 @@ class FileComparator:
             # 텍스트 파일인 경우
             if self._is_text_file(old_file) and self._is_text_file(new_file):
                 with open(old_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    old_lines = f.readlines()
+                    old_content = f.read()
                 with open(new_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    new_lines = f.readlines()
+                    new_content = f.read()
+                
+                # HTML 파일인 경우 타임스탬프 정규화
+                if self._is_html_file(old_file) and self._is_html_file(new_file):
+                    old_content = self._normalize_html_content(old_content)
+                    new_content = self._normalize_html_content(new_content)
+                
+                old_lines = old_content.splitlines(keepends=True)
+                new_lines = new_content.splitlines(keepends=True)
                 
                 diff = list(difflib.unified_diff(
                     old_lines, new_lines,
