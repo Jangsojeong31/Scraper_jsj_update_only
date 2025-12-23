@@ -45,7 +45,8 @@ from post_process_ocr import process_ocr_text
 from extract_metadata import (
     extract_metadata_from_content,
     extract_sanction_details,
-    extract_incidents
+    extract_incidents,
+    format_date_to_iso
 )
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -111,7 +112,8 @@ class FSSScraperV2:
         """
         금융회사명으로 업종 조회
         - 정확한 매칭 우선
-        - 부분 매칭 시도 (회사명에 포함되어 있는 경우)
+        - 법인 형태 정규화 후 매칭
+        - 부분 매칭 시도 (최소 3자 이상, 회사명에 포함되어 있는 경우)
         - 매칭되지 않으면 '기타' 반환
         """
         if not institution_name:
@@ -122,21 +124,35 @@ class FSSScraperV2:
         if clean_name in self.industry_map:
             return self.industry_map[clean_name]
         
-        # 특수문자 제거 후 매칭 (예: * 제거)
-        clean_name_no_special = re.sub(r'[*\s]', '', clean_name)
+        # 법인 형태 정규화 함수
+        def normalize_company_name(name):
+            """법인 형태 제거 후 정규화"""
+            # (주), ㈜, 주식회사 등 제거
+            name = re.sub(r'\(주\)|㈜|주식회사', '', name)
+            # 특수문자 및 공백 제거
+            name = re.sub(r'[*\s]', '', name)
+            return name
+        
+        # 법인 형태 제거 후 매칭
+        clean_name_normalized = normalize_company_name(clean_name)
         for company, industry in self.industry_map.items():
-            company_clean = re.sub(r'[*\s]', '', company)
-            if clean_name_no_special == company_clean:
+            company_normalized = normalize_company_name(company)
+            if clean_name_normalized == company_normalized:
                 return industry
         
-        # 부분 매칭 시도 (금융회사명이 매핑 테이블의 회사명에 포함되거나 그 반대)
-        for company, industry in self.industry_map.items():
-            # 금융회사명이 회사명을 포함하는 경우
-            if company in clean_name:
-                return industry
-            # 회사명이 금융회사명을 포함하는 경우
-            if clean_name in company:
-                return industry
+        # 부분 매칭 시도 (최소 3자 이상인 경우만)
+        # 금융회사명이 3자 미만이면 부분 매칭 시도하지 않음
+        if len(clean_name_normalized) >= 3:
+            for company, industry in self.industry_map.items():
+                company_normalized = normalize_company_name(company)
+                # 회사명도 3자 이상인 경우만 매칭 시도
+                if len(company_normalized) >= 3:
+                    # 금융회사명이 회사명을 포함하는 경우
+                    if company_normalized in clean_name_normalized:
+                        return industry
+                    # 회사명이 금융회사명을 포함하는 경우
+                    if clean_name_normalized in company_normalized:
+                        return industry
         
         return '기타'
     
@@ -371,17 +387,16 @@ class FSSScraperV2:
         
         for row in rows:
             cells = row.find_all(['td', 'th'])
-            if len(cells) < 6:  # 6개 셀: 번호, 기관, 일자, 내용, 부서, 조회수
+            if len(cells) < 5:  # 5개 셀: 번호, 기관, 일자, 내용, 조회수
                 continue
             
             try:
-                # 번호, 제재대상기관, 제재조치요구일, 제재조치요구내용(링크), 관련부서, 조회수
+                # 번호, 제재대상기관, 제재조치요구일, 제재조치요구내용(링크), 조회수
                 number = cells[0].get_text(strip=True)
                 institution = cells[1].get_text(strip=True)
                 date = cells[2].get_text(strip=True)
                 content_cell = cells[3]
-                department = cells[4].get_text(strip=True)
-                view_count = cells[5].get_text(strip=True) if len(cells) > 5 else ""
+                view_count = cells[4].get_text(strip=True) if len(cells) > 4 else ""
                 
                 # 링크 찾기
                 link = content_cell.find('a', href=True)
@@ -392,7 +407,6 @@ class FSSScraperV2:
                     link_text = link.get_text(strip=True)
                 
                 items.append({
-                    '번호': number,
                     '제재대상기관': institution,
                     '제재조치요구일': date,
                     '조회수': view_count,
@@ -573,11 +587,11 @@ class FSSScraperV2:
                     
                     institution, sanction_date = extract_metadata_from_content(attachment_content)
                     
-                    # 금융회사명: PDF에서 추출 실패 시 목록에서 가져온 값 사용
-                    if institution:
-                        item['금융회사명'] = institution
-                    elif institution_from_list:
+                    # 금융회사명: 목록에서 추출한 값 우선, 없으면 PDF에서 추출한 값 사용
+                    if institution_from_list:
                         item['금융회사명'] = institution_from_list
+                    elif institution:
+                        item['금융회사명'] = institution
                     
                     # 업종 매핑
                     final_institution = item.get('금융회사명', institution_from_list)
@@ -585,9 +599,14 @@ class FSSScraperV2:
                     item['업종'] = industry
                     print(f"  금융회사명: {final_institution} (업종: {industry})")
                     
-                    if sanction_date:
+                    # 제재조치일: 목록에서 추출한 값(제재조치요구일) 우선, 없으면 PDF에서 추출한 값 사용
+                    date_from_list = item.get('제재조치요구일', '')
+                    if date_from_list:
+                        item['제재조치일'] = date_from_list
+                        print(f"  제재조치일 (목록): {date_from_list}")
+                    elif sanction_date:
                         item['제재조치일'] = sanction_date
-                        print(f"  제재조치일 추출: {sanction_date}")
+                        print(f"  제재조치일 (PDF): {sanction_date}")
                     
                     # 제재내용 (표 데이터) 추출
                     try:
@@ -697,6 +716,84 @@ class FSSScraperV2:
         result = result.strip()
         
         return result
+    
+    def _post_process_content(self, text):
+        """
+        '내용' 필드 후처리
+        - <관련법규>, <관련규정>, <조치할사항> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        - (가), (나), (다) 등 앞에 줄바꿈 추가
+        """
+        if not text:
+            return text
+        
+        result = text
+        
+        # <관련법규> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # <관련법규> 또는 < 관련법규 > 형태 모두 처리
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)관련법규(\s*)>', r'\n<\1관련법규\2>', result)
+        
+        # <관련규정> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # <관련규정> 또는 < 관련규정 > 형태 모두 처리
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)관련규정(\s*)>', r'\n<\1관련규정\2>', result)
+        
+        # <조치할사항> 또는 <조시할사항> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)조치할사항(\s*)>', r'\n<\1조치할사항\2>', result)
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)조시할사항(\s*)>', r'\n<\1조시할사항\2>', result)
+        
+        # (가), (나), (다) 등 한글 괄호 패턴 앞에 줄바꿈 추가
+        # 반각 괄호: (가), ( 가 ), (나) 등
+        # 전각 괄호: （가）, （ 가 ）, （나） 등
+        # 원문자: ㈎(가), ㈏(나), ㈐(다) 등
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가 (이미 줄바꿈이 있으면 중복 방지)
+        # 반각 괄호 패턴 (공백 포함 가능)
+        result = re.sub(r'(?<![\n\r])\s*\(\s*([가-하])\s*\)', r'\n(\1)', result)
+        # 전각 괄호 패턴 (공백 포함 가능)
+        result = re.sub(r'(?<![\n\r])\s*（\s*([가-하])\s*）', r'\n(\1)', result)
+        # 원문자 패턴 (㈎=가, ㈏=나, ㈐=다, ... ㈛=하)
+        # 유니코드 범위: ㈎(U+320E) ~ ㈛(U+321B)
+        result = re.sub(r'(?<![\n\r])\s*([㈎-㈛])', r'\n\1', result)
+        
+        return result
+    
+    def _post_process_sanction_content(self, text):
+        """
+        '제재내용' 필드 후처리
+        - "기 관" -> "기관"
+        - "임 원" -> "임원"
+        - "직 원" -> "직원"
+        - "임 직 원" -> "임직원" (먼저 처리)
+        - "임직원", "임원", "직원" 앞에 줄바꿈 추가
+        """
+        if not text:
+            return text
+        
+        result = text
+        
+        # 공백 제거: "기 관" -> "기관"
+        result = re.sub(r'기\s+관', '기관', result)
+        
+        # "임 직 원" -> "임직원" (먼저 처리하여 "임직원"을 하나의 단어로 만듦)
+        result = re.sub(r'임\s+직\s+원', '임직원', result)
+        
+        # "임 원" -> "임원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'임\s+원(?!직)', '임원', result)
+        
+        # "직 원" -> "직원" (단, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!임)직\s+원', '직원', result)
+        
+        # "임직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없을 경우)
+        result = re.sub(r'(?<!\n)임직원', '\n임직원', result)
+        
+        # "임원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임)임원', '\n임원', result)
+        
+        # "직원" 앞에 줄바꿈 추가 (이미 줄바꿈이 없고, "임직원"이 아닌 경우만)
+        result = re.sub(r'(?<!\n)(?<!임직)직원', '\n직원', result)
+        
+        return result
 
     def _split_incidents(self):
         """
@@ -707,15 +804,27 @@ class FSSScraperV2:
         
         for item in self.results:
             # 기본 필드 추출 (줄바꿈 정리 적용)
+            # 제재조치일 포맷팅 (목록에서 추출한 값이 우선, 없으면 PDF에서 추출한 값)
+            sanction_date = item.get('제재조치일', item.get('제재조치요구일', ''))
+            if sanction_date:
+                # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
+                sanction_date = format_date_to_iso(sanction_date)
+            
+            # 제재내용: 후처리 적용
+            raw_sanction_content = item.get('제재내용', '')
+            if raw_sanction_content:
+                cleaned_sanction_content = self._clean_content(raw_sanction_content)
+                processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
+            else:
+                processed_sanction_content = ''
+            
             base_data = {
                 '구분': '제재사례',
                 '출처': '금융감독원',
-                '번호': item.get('번호', ''),  # 번호 필드 추가
                 '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
                 '업종': item.get('업종', '기타'),
-                '제재조치일': item.get('제재조치일', item.get('제재조치요구일', '')),
-                '제재내용': item.get('제재내용', ''),  # 띄어쓰기 보존
-                '제재조치내용': item.get('제재조치내용', ''),  # 전체 내용 필드 추가
+                '제재조치일': sanction_date,
+                '제재내용': processed_sanction_content,  # 후처리 적용
                 '파일다운로드URL': item.get('파일다운로드URL', ''),
                 '상세페이지URL': item.get('상세페이지URL', ''),  # 상세페이지URL 추가
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
@@ -737,24 +846,32 @@ class FSSScraperV2:
                     title = item.get(f'제목{i}', '')
                     raw_content = item.get(f'내용{i}', '')
                     
-                    # 내용은 원본 그대로 보존 (띄어쓰기 보존)
-                    content = raw_content
+                    # 내용: 후처리 적용
+                    if raw_content:
+                        cleaned_content = self._clean_content(raw_content)
+                        processed_content = self._post_process_content(cleaned_content)
+                    else:
+                        processed_content = ''
                     
                     split_results.append({
                         **base_data,
                         '제목': title,
-                        '내용': content
+                        '내용': processed_content  # 후처리 적용
                     })
         
         return split_results
 
     def save_results(self, filename='fss_results.json'):
-        """결과 저장 (JSON, CSV) - 루트 디렉토리에 저장"""
+        """결과 저장 (JSON, CSV) - output 폴더에 저장"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # output 폴더 생성
+        output_dir = os.path.join(script_dir, 'output')
+        os.makedirs(output_dir, exist_ok=True)
         
         # 파일명만 추출 (경로가 포함된 경우)
         base_filename = os.path.basename(filename)
-        json_filepath = os.path.join(script_dir, base_filename)
+        json_filepath = os.path.join(output_dir, base_filename)
         
         # 사건별로 분리된 결과 생성
         split_results = self._split_incidents()
@@ -767,11 +884,11 @@ class FSSScraperV2:
 
         try:
             csv_filename = base_filename.replace('.json', '.csv')
-            csv_filepath = os.path.join(script_dir, csv_filename)
+            csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 번호, 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
-                fieldnames = ['번호', '구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
+                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
+                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
 
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')

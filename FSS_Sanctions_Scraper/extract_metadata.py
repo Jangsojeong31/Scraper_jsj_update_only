@@ -25,7 +25,8 @@ def collapse_split_syllables(text):
 def remove_page_numbers(text):
     """
     텍스트에서 페이지 번호 패턴 제거
-    예: "- 1 -", "- 2 -", "- 10 -" 등
+    예: "- 1 -", "- 2 -", "- 10 -", "-1-", "-2-" 등
+    페이지 번호는 \n으로 대체됨
     
     Args:
         text: 원본 텍스트
@@ -37,10 +38,21 @@ def remove_page_numbers(text):
         return text
     
     # 페이지 번호 패턴: "- 숫자 -" (앞뒤 공백 포함)
-    # 줄 전체가 페이지 번호인 경우 해당 줄 제거
+    # 줄 전체가 페이지 번호인 경우 해당 줄을 \n으로 대체
     text = re.sub(r'\n\s*-\s*\d+\s*-\s*\n', '\n', text)
-    # 문장 중간에 있는 페이지 번호도 제거
-    text = re.sub(r'\s*-\s*\d+\s*-\s*', ' ', text)
+    # 줄 시작에 페이지 번호가 있는 경우 (줄 끝까지)
+    text = re.sub(r'\n\s*-\s*\d+\s*-\s*', '\n', text)
+    # 줄 끝에 페이지 번호가 있는 경우 (줄 시작부터)
+    text = re.sub(r'\s*-\s*\d+\s*-\s*\n', '\n', text)
+    
+    # 문장 중간에 있는 페이지 번호도 \n으로 대체
+    text = re.sub(r'\s*-\s*\d+\s*-\s*', '\n', text)  # "- 1 -" 형식
+    text = re.sub(r'\s*-\d+-\s*', '\n', text)  # "-1-" 형식 (공백 없음)
+    text = re.sub(r'\s*-\s*\d+-\s*', '\n', text)  # "- 1-" 형식
+    text = re.sub(r'\s*-\d+\s*-\s*', '\n', text)  # "-1 -" 형식
+    
+    # 연속된 빈 줄 정리 (페이지 번호 제거 후 생길 수 있는 빈 줄 정리)
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # 3개 이상 연속된 줄바꿈을 2개로
     
     return text.strip()
 
@@ -167,11 +179,6 @@ def extract_sanction_details(content):
         # "3. 제재조치 세부내용" 형식
         r'3\.\s*제재조치\s*세부\s*내용',
         r'3\.\s*제재\s*조치\s*세부\s*내용',
-        # 숫자 없이 "제재조치내용"만 있는 형식
-        r'^제\s*재\s*조\s*치\s*내\s*용\s*[:：]?',
-        r'^제재조치내용\s*[:：]?',
-        r'\n제\s*재\s*조\s*치\s*내\s*용\s*[:：]?',
-        r'\n제재조치내용\s*[:：]?',
     ]
     
     start_pos = None
@@ -232,7 +239,7 @@ def extract_sanction_details(content):
 def extract_incidents(content):
     """
     PDF 내용에서 4번 항목의 사건 제목/내용 추출
-    (extract_sanctions.py의 줄 단위 처리 방식 참고)
+    (줄 단위 처리 방식 사용)
     
     지원하는 형식:
     1. 가. 제목1 / 내용1, 나. 제목2 / 내용2 형태
@@ -248,6 +255,10 @@ def extract_incidents(content):
     """
     if not content or content.startswith('['):
         return {}
+    
+    # 일반 텍스트 추출용이므로 collapse_split_syllables() 호출 제거
+    # (OCR 텍스트는 V3 post_process_ocr.py에서 후처리됨)
+    # content = collapse_split_syllables(content)  # 제거됨
     
     # 먼저 "Ⅲ. 재조치 내용" 패턴 체크 (재조치 패턴 우선)
     rejaechae_section_patterns = [
@@ -335,16 +346,6 @@ def extract_incidents(content):
         # "4. 사유" 형식
         r'4\.\s*사\s*유',
         r'4\.\s*사유',
-        # 숫자 없이 "제재대상사실"만 있는 형식 (앞뒤 공백 허용, OCR 변형 고려)
-        # re.search()를 사용하므로 어디서든 매칭 가능하도록 유연한 패턴 사용
-        r'(?:^|\n|\s+)제\s*재\s*대\s*상\s*사\s*실\s*[:：]?(?:\s*\n|$)',
-        r'(?:^|\n|\s+)제재대상사실\s*[:：]?(?:\s*\n|$)',
-        # 줄바꿈 뒤에 오는 경우 (더 명확한 패턴)
-        r'\n\s*제\s*재\s*대\s*상\s*사\s*실\s*[:：]?\s*\n',
-        r'\n\s*제재대상사실\s*[:：]?\s*\n',
-        # 줄 시작에서 오는 경우
-        r'^제\s*재\s*대\s*상\s*사\s*실\s*[:：]?',
-        r'^제재대상사실\s*[:：]?',
     ]
     
     start_pos = None
@@ -420,7 +421,7 @@ def _extract_incidents_from_section(section_text):
     Returns:
         dict: {'제목1': '...', '내용1': '...', '제목2': '...', ...}
     """
-    # 줄 단위로 처리 (extract_sanctions.py 방식)
+    # 줄 단위로 처리
     lines = section_text.split('\n')
     
     # "가." 패턴이 있는지 먼저 확인
@@ -431,6 +432,16 @@ def _extract_incidents_from_section(section_text):
             has_ga_pattern = True
             break
     
+    # "가." 패턴 없이 바로 "(1)"로 시작하는 경우 체크
+    has_direct_numbered_pattern = False
+    if not has_ga_pattern:
+        for line in lines:
+            stripped = line.strip()
+            # 바로 "(1)"로 시작하는 패턴 확인
+            if re.match(r'^[\(（]1[\)）]\s*', stripped):
+                has_direct_numbered_pattern = True
+                break
+    
     incidents = {}
     incident_num = 1
     
@@ -439,6 +450,7 @@ def _extract_incidents_from_section(section_text):
     in_incident = False
     parent_title = ""  # 상위 제목 (가. 문책사항 등)
     is_unified_incident = False  # 통합 사건 모드 (가. 일반제목 -> 모든 (1), (2)를 하나의 사건으로)
+    treat_numbered_as_incidents = has_direct_numbered_pattern  # "(1)"을 별도 사건으로 처리할지 여부
     
     i = 0
     while i < len(lines):
@@ -449,7 +461,8 @@ def _extract_incidents_from_section(section_text):
         
         # "가. 문책사항" 또는 "가 . 문 책 사 항" 패턴 체크 (상위 제목)
         # OCR 텍스트를 위해 점 앞뒤 공백 허용, 또한 "가_" 같은 패턴도 허용
-        header_pattern = r'^[가-하]\s*[._]\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항)(.*)$'
+        # '경영유의', '개선사항' 패턴도 포함
+        header_pattern = r'^[가-하]\s*[._]\s*(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항|경\s*영\s*유\s*의|경영유의사항|개\s*선\s*사\s*항|개선사항)(.*)$'
         header_match = re.match(header_pattern, line)
         
         if header_match:
@@ -480,8 +493,8 @@ def _extract_incidents_from_section(section_text):
         if first_match:
             title_text = first_match.group(1).strip()
             
-            # 문책사항/자율처리 등이 아닌 경우
-            if not re.match(r'^(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리)', title_text):
+            # 문책사항/자율처리/경영유의/개선사항 등이 아닌 경우
+            if not re.match(r'^(?:문\s*책\s*사\s*항|문책사항|책\s*임\s*사\s*항|책임사항|자율처리\s*필요사항|경\s*영\s*유\s*의|경영유의사항|개\s*선\s*사\s*항|개선사항)', title_text):
                 # 이전 사건 저장
                 if current_title and current_content:
                     content_text = '\n'.join(current_content).strip()
@@ -494,9 +507,9 @@ def _extract_incidents_from_section(section_text):
                     incidents[f'내용{incident_num}'] = ''
                     incident_num += 1
                 
-                # "문책", "책임", "자율처리", "주의" 같은 특정 키워드가 있으면 기존 패턴 (각 (1), (2)를 별도 사건)
+                # "문책", "책임", "자율처리", "주의", "경영유의", "개선사항" 같은 특정 키워드가 있으면 기존 패턴 (각 (1), (2)를 별도 사건)
                 # 그렇지 않으면 새로운 패턴 (모든 (1), (2)를 하나의 사건으로)
-                has_special_keyword = re.search(r'(문책|책임|자율처리|주의)', title_text)
+                has_special_keyword = re.search(r'(문책|책임|자율처리|주의|경영유의사항|경영유의|개선사항)', title_text)
                 
                 if has_special_keyword:
                     # 기존 패턴: "나. 주의사항" -> 각 (1), (2)를 별도 사건으로
@@ -549,6 +562,27 @@ def _extract_incidents_from_section(section_text):
                 i += 1
                 continue
             
+            # "가." 패턴 없이 바로 "(1)"로 시작하는 경우: 각 (1), (2)를 별도 사건으로 처리
+            if treat_numbered_as_incidents and not parent_title:
+                # 이전 사건 저장
+                if current_title and current_content:
+                    content_text = '\n'.join(current_content).strip()
+                    content_text = remove_page_numbers(content_text)
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = content_text
+                    incident_num += 1
+                elif current_title:
+                    incidents[f'제목{incident_num}'] = current_title
+                    incidents[f'내용{incident_num}'] = ''
+                    incident_num += 1
+                
+                # 새 사건 시작
+                current_title = sub_title
+                current_content = []
+                in_incident = True
+                i += 1
+                continue
+            
             # 기존 패턴: 각 "(1)", "(2)"를 별도 사건으로 처리
             # 이전 사건 저장
             if current_title and current_content:
@@ -564,8 +598,18 @@ def _extract_incidents_from_section(section_text):
             
             # 새 사건 시작
             # parent_title이 있으면 "상위제목 - 하위제목" 형식으로, 없으면 하위제목만
+            # 단, "문책사항", "책임사항", "자율처리 필요사항", "경영유의", "개선사항" 등 특수 키워드는 접두사로 사용하지 않음
             if parent_title:
-                current_title = f"{parent_title} - {sub_title}"
+                # 특수 키워드 체크 (공백 제거 후 비교)
+                parent_title_normalized = re.sub(r'\s+', '', parent_title)
+                special_keywords = ['문책사항', '책임사항', '자율처리필요사항', '경영유의', '경영유의사항', '개선사항']
+                is_special_keyword = any(keyword in parent_title_normalized for keyword in special_keywords)
+                
+                if is_special_keyword:
+                    # 특수 키워드는 접두사로 사용하지 않고 하위 제목만 사용
+                    current_title = sub_title
+                else:
+                    current_title = f"{parent_title} - {sub_title}"
             else:
                 current_title = sub_title
             current_content = []
@@ -673,13 +717,29 @@ def format_date_to_iso(date_str):
     날짜 문자열을 YYYY-MM-DD 형식으로 변환
     
     Args:
-        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일")
+        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일", "20251217")
         
     Returns:
         str: YYYY-MM-DD 형식의 날짜 문자열 (변환 실패 시 원본 반환)
     """
     if not date_str:
         return date_str
+    
+    # 8자리 숫자 형식 (YYYYMMDD) 처리: "20251217" -> "2025-12-17"
+    if re.match(r'^\d{8}$', date_str):
+        try:
+            year = date_str[:4]
+            month = date_str[4:6]
+            day = date_str[6:8]
+            year_int = int(year)
+            month_int = int(month)
+            day_int = int(day)
+            
+            # 기본적인 유효성 검사
+            if 1900 <= year_int <= 2100 and 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                return f"{year}-{month}-{day}"
+        except ValueError:
+            pass
     
     # 숫자만 추출 (년, 월, 일)
     numbers = re.findall(r'\d+', date_str)
@@ -721,7 +781,7 @@ def extract_metadata_from_content(content):
     if not content or content.startswith('['):
         return institution, sanction_date
     
-    # 금융회사명 추출 패턴
+    # 금융회사명 추출 패턴 (숫자 포함만)
     institution_patterns = [
         # "1. 금융기관명" 형식
         r'1\.\s*금\s*융\s*기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
@@ -732,11 +792,6 @@ def extract_metadata_from_content(content):
         r'1\.\s*금융회사등\s*명\s*[:：]\s*([^\n\r]+)',
         # "1. 기관명 :" 형식
         r'1\.\s*기\s*관\s*명\s*[:：]\s*([^\n\r]+)',
-        # 숫자 없이 "기관명"만 있는 형식
-        r'^기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
-        r'^기관명\s*[:：]?\s*([^\n\r]+)',
-        r'\n기\s*관\s*명\s*[:：]?\s*([^\n\r]+)',
-        r'\n기관명\s*[:：]?\s*([^\n\r]+)',
     ]
     
     for pattern in institution_patterns:
@@ -746,8 +801,6 @@ def extract_metadata_from_content(content):
             institution = institution.split('\n')[0].strip()
             institution = re.sub(r'^[:\-\.\s]+', '', institution)
             institution = re.sub(r'[\-\.\s]+$', '', institution)
-            # 마지막 '*', '@' 제거
-            institution = institution.rstrip('*@')
             if institution:
                 break
     
@@ -821,11 +874,6 @@ def extract_metadata_from_content(content):
         r'2\s*\.\s*제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
         # "2. 조치일 :" 형식
         r'2\.\s*조\s*치\s*일\s*[:：]\s*([^\n\r]+)',
-        # 숫자 없이 "제재조치일"만 있는 형식
-        r'^제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
-        r'^제재조치일\s*[:：]?\s*([^\n\r]+)',
-        r'\n제\s*재\s*조\s*치\s*일\s*[:：]?\s*([^\n\r]+)',
-        r'\n제재조치일\s*[:：]?\s*([^\n\r]+)',
     ]
     
     for pattern in date_patterns:
@@ -962,145 +1010,3 @@ if __name__ == "__main__":
     print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
     for key, value in sorted(incidents.items()):
         print(f"  {key}: {value[:100]}..." if len(value) > 100 else f"  {key}: {value}")
-    
-    # 테스트용 예시 4: 재조치 내용 패턴
-    test_content4 = """
-    Ⅰ. 재심취지
-    
-    □ (대구)해성신용협동조합 前임원 甲이 '동일인 대출한도 초과 취급 등' 관련'개선(改選)' 처분에 불복하여 제기(2022.6.23.)한 행정소송에서
-    ◦ 법원이 조치양정의 재량권 일탈‧남용 등을 이유로 동 처분을 취소함에 따라법원판결의 취지를 감안하여 前임원 甲에 대한 양정을 조정한 후 재조치하려는것임
-    
-    Ⅱ. 당초 조치내용
-    
-    1. 조치개요
-    □ 제재일자 : 2020. 7. 24.
-    □ 제재대상자 및 제재종류
-    ◦ 임원 甲[개선(改選)]
-    
-    2. 조치대상사실
-    가. 문책사항
-    (1) 동일인 대출한도 초과 취급
-    □ 관련 내용...
-    
-    Ⅲ. 재조치 내용
-    
-    1. 조치개요
-    □ 재조치 일자 : 2024. 12. 26.
-    □ 재조치 대상자 및 제재종류
-    ◦ 前임원 甲[개선(改選)] → 퇴직자 위법·부당사항(직무정지3월 상당)
-    
-    2. 재조치대상사실
-    가. 문책사항
-    (1) 동일인 대출한도 초과 취급
-    □ ｢신용협동조합법｣ 제42조 및 ｢동법 시행령｣ 제16조의4 등에 의하면 조합은 동일인에대하여 자기자본의 100분의 20 또는 자산총액의 100분의 1 중 큰 금액의범위에서 금융위원회가 정하는 한도를 초과하여 대출을 할 수 없으며, 본인의계산으로 다른 사람의 명의에 의하여 하는 대출등은 이를 그 본인의 대출등으로보아야 하는데도
-    (대구)해성신용협동조합은 2005.3.30.～2018.7.2. 기간 중 乙 등 8명의 차주에대하여본인 또는 제3자 명의를 이용하는 방법으로 보통대출금 등 95건, 151억 25백만원을취급하여 2014.12.31. 현재 동일인 대출한도(5억원)를 최고 21억 34백만원(총자산의3.8%) 초과한 사실이 있음
-    
-    < 관련규정 >
-    1. ｢신용협동조합법｣ 제42조, 제84조
-    2. ｢신용협동조합법시행령｣ 제16조의4
-    3. ｢상호금융업감독규정｣ 제6조
-    
-    나. 주의사항
-    (1) 직원대출 취급 불철저
-    □ ｢신용협동조합법｣ 제39조, ｢상호금융업감독규정｣ 제4조, ｢신용협동조합여수신업무방법기준｣ 제14조에 의하면 조합은 임직원에 대하여 생활안정자금, 주택관련자금, 사고금정리자금 및 임직원 소유 주택담보대출등 제한된 범위내에서취급하여야 하고, 임직원 본인 소유 주택 이외에는 다른 부동산 등을담보로하는 대출을 취급할 수 없는데도
-    (대구)해성신용협동조합은 2009.11.27., 2018.7.24. ○○(직급) 丙 등 2명의직원에대하여 제3자 명의(모친, 배우자)를 이용하는 방법으로 토지를 담보로 보통대출금2건, 50백만원(검사착수일 현재 대출잔액 40백만원)의 대출을 부당하게취급한사실이 있음
-    
-    < 관련규정 >
-    1. ｢신용협동조합법｣ 제39조, 제84조
-    2. ｢상호금융업감독규정｣ 제4조
-    
-    (2) 예금잔액증명서 발급 불철저
-    □ ｢신용협동조합법｣ 제39조, ｢상호금융업감독규정｣ 제4조 및 ｢신용협동조합수신업무방법서｣ 제1편 제3장 제1절 등에 의하면 조합 임직원은 변칙적·비정상적인업무처리를 통해 거래처의 자금력 위장 등에 직·간접적으로 관여하여서는아니되고, 예금주에게 예금잔액증명서 발급시 잔액증명대상예금에 관련 대출이있을경우 그 내용을 표시하여 발급하여야 하는데도
-    (대구)해성신용협동조합 前임원 甲, ○○(직급) 丙, ◎◎(직급) 丁은 2012.1.26.∼2017.2.3. 기간 중 제3자에게 담보로 제공되어 질권설정계약이 체결되어있는A㈜ 등 4개 거래처의 정기예금에 대하여 거래처(예금주)의 요청에 따라 질권설정등 예금인출제한 내용 기재를 누락하여 총 13건(36억원)의 예금잔액증명서를부당 발급한 사실이 있음
-    
-    < 관련규정 >
-    1. ｢신용협동조합법｣ 제39조, 제84조
-    2. ｢상호금융업감독규정｣ 제4조
-    """
-    
-    print("\n" + "=" * 60)
-    print("테스트 4: 재조치 내용 패턴 (Ⅲ. 재조치 내용)")
-    print("=" * 60)
-    
-    institution, sanction_date = extract_metadata_from_content(test_content4)
-    print(f"금융회사명: {institution}")
-    print(f"제재조치일: {sanction_date}")
-    
-    sanction_details = extract_sanction_details(test_content4)
-    print(f"\n제재내용:\n{sanction_details}")
-    
-    incidents = extract_incidents(test_content4)
-    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
-    for key, value in sorted(incidents.items()):
-        print(f"  {key}: {value[:100]}..." if len(value) > 100 else f"  {key}: {value}")
-    
-    # 테스트용 예시 5: 재조치 내용 패턴 (대상자 및 재조치내용)
-    test_content5 = """
-    Ⅲ. 재조치 내용
-    
-    1. 재조치 일자: 2025.2.26.(수)
-    
-    2. 대상자 및 재조치내용
-    
-    □ 하나은행에 대한 조치사유 변경
-    
-    □ 전･현직 임직원 ⊗⊗⊗, 甲甲甲, 乙乙乙, 丙丙丙, ◕◕◕, ◒◒◒, ◧◧◧,
-    ♣♣♣에 대한 조치를 취소하고, "자율처리 필요사항"으로 통보한 조치대상자중'신상품 도입 관련 내부통제기준 준수여부 점검을 위한 내부통제기준 미마련 관련'
-    보조자에 대한 통보 취소
-    
-    □ 前 은행장 ◍◍◍에 대한 '퇴직자 위법･부당사항(문책경고 상당)' 조치를'퇴직자 위법･부당사항(주의적경고 상당)'으로 조치
-    
-    □ 前 부행장 ◯◯◯에 대한 '퇴직자 위법･부당사항(정직3월 상당)' 조치를'퇴직자 위법･부당사항(감봉 3월 상당)'으로 조치
-    
-    □ 前 부장 甲甲甲에 대한 '퇴직자 위법･부당사항(정직1월 상당)' 조치를'퇴직자 위법･부당사항(감봉 3월 상당)'으로 조치 변경
-    
-    □ 전･현직 임직원 ●●●, ◉◉◉, 甲甲甲, ◎◎◎, ◪◪◪, ◓◓◓에 대한조치사유 변경
-    
-    ※ 차장 甲甲甲의 경우, 법원이 기존 조치사유를 모두 인정함에 따라 변경사항 없음
-    """
-    
-    print("\n" + "=" * 60)
-    print("테스트 5: 재조치 내용 패턴 (대상자 및 재조치내용)")
-    print("=" * 60)
-    
-    institution, sanction_date = extract_metadata_from_content(test_content5)
-    print(f"금융회사명: {institution}")
-    print(f"제재조치일: {sanction_date}")
-    
-    sanction_details = extract_sanction_details(test_content5)
-    print(f"\n제재내용:\n{sanction_details}")
-    
-    incidents = extract_incidents(test_content5)
-    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
-    for key, value in sorted(incidents.items()):
-        print(f"  {key}: {value[:100]}..." if len(value) > 100 else f"  {key}: {value}")
-    
-    # 테스트용 예시 6: 재조치 내용 패턴 (재조치일자, 재조치내용)
-    test_content6 = """
-    Ⅲ. 재조치 내용
-    
-    1. 재조치일자 : 2025.10.23.(목)
-    
-    2. 재조치내용
-    
-    □ ◎◎◎에 대한 조치사유 중 일부( 펀드 환매주문 취소에 따른 전자적 침해행위금지 위반 등'과 관련한 감독책임)를 취소*하고, 자율처리 필요사항으로 통보한조치대상자 중 '펀드 환매주문 취소에 따른 전자적 침해행위 금지 위반 등'과관련한 직원에 대한 통보를 취소
-    
-     ※ ◎◎◎은 재심사유 외에 '설명자료 작성 부적정'에 대한 감독책임(견책)도 있으므로 직권재심을 하더라도 최종 제재조치에는 변동 없음
-    """
-    
-    print("\n" + "=" * 60)
-    print("테스트 6: 재조치 내용 패턴 (재조치일자, 재조치내용)")
-    print("=" * 60)
-    
-    institution, sanction_date = extract_metadata_from_content(test_content6)
-    print(f"금융회사명: {institution}")
-    print(f"제재조치일: {sanction_date}")
-    
-    sanction_details = extract_sanction_details(test_content6)
-    print(f"\n제재내용:\n{sanction_details}")
-    
-    incidents = extract_incidents(test_content6)
-    print(f"\n사건 추출 결과 ({len([k for k in incidents if k.startswith('제목')])}건):")
-    for key, value in sorted(incidents.items()):
-        print(f"  {key}: {value[:100]}..." if len(value) > 100 else f"  {key}: {value}")
-

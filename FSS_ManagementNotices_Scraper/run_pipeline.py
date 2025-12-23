@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import os
+import io
 import re
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -39,6 +40,9 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
     env['PYTHONIOENCODING'] = 'utf-8'
     env['PYTHONUTF8'] = '1'  # Python 3.7+ UTF-8 모드
     
+    # subprocess를 실행할 때 인코딩 오류를 방지하기 위해
+    # stdout을 직접 읽지 않고 communicate() 사용하거나
+    # 더 안전한 방법으로 처리
     try:
         process = subprocess.Popen(
             cmd,
@@ -51,6 +55,7 @@ def run_step(script_name: str, description: str, extra_args: list = None) -> Non
         )
         
         # 실시간으로 출력 읽기 (bytes를 직접 읽어서 안전하게 디코딩)
+        # _readerthread 오류를 방지하기 위해 직접 읽기
         buffer = b''
         while True:
             chunk = process.stdout.read(8192)  # 8KB씩 읽기
@@ -261,34 +266,15 @@ def print_stats(json_path: Path) -> None:
     def has_value(value: str) -> bool:
         return bool(value and value.strip() and value.strip() != '-')
 
-    # v2는 이미 사건별로 분리되어 저장되므로, 제목 필드가 있는 항목을 카운트
-    items_with_incidents = sum(
-        1 for item in data if item.get('제목', '').strip()
-    )
+    # fss_scraper_v2.py 구조에 맞게 필드명 확인
+    # 제재내용 필드 확인
+    sanction_ok = sum(1 for item in data if has_value(item.get('제재내용', '')))
 
     def to_pct(count: int) -> str:
         return f"{count} / {total} ({count / total * 100:.1f}%)"
 
-    log("\n[통계] 사건제목/사건내용 추출 현황")
-    log(f" - 총 사건 수: {total} "
-        f"(이미 사건별로 분리되어 저장됨)")
-    pct = items_with_incidents / total * 100 if total > 0 else 0
-    log(f" - 제목이 있는 사건: {items_with_incidents} ({pct:.1f}%)")
-
-    # 업종별 통계
-    industry_counts = {}
-    for item in data:
-        industry = item.get('업종', '기타')
-        industry_counts[industry] = industry_counts.get(industry, 0) + 1
-
-    if industry_counts:
-        log("\n[통계] 업종별 분포")
-        sorted_industries = sorted(
-            industry_counts.items(), key=lambda x: x[1], reverse=True
-        )
-        for industry, count in sorted_industries:
-            pct = count / total * 100 if total > 0 else 0
-            log(f" - {industry}: {count}건 ({pct:.1f}%)")
+    log("\n[통계] 제재내용 추출 현황")
+    log(f" - 제재내용 추출 성공: {to_pct(sanction_ok)}")
 
 
 def main() -> None:
@@ -297,52 +283,20 @@ def main() -> None:
     default_edate = today.strftime('%Y-%m-%d')
     
     # archive 경로
-    archive_path = ROOT_DIR / 'archive' / 'kofiu_results.json'
+    archive_path = ROOT_DIR / 'archive' / 'fss_results.json'
     
-    parser = argparse.ArgumentParser(
-        description="금융정보분석원 제재공시 스크래핑 전체 파이프라인"
-    )
-    parser.add_argument(
-        '--skip-scrape',
-        action='store_true',
-        help='기존 스크래핑 결과를 유지하고 분석 단계만 실행'
-    )
-    parser.add_argument(
-        '--stats-only',
-        action='store_true',
-        help='통계만 출력 (스크래핑/추출 미실행)'
-    )
-    parser.add_argument(
-        '--log-file',
-        type=str,
-        help='실행 로그를 저장할 파일 경로 (기록은 append 모드)'
-    )
-    parser.add_argument(
-        '--sdate',
-        type=str,
-        default=None,
-        help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: archive 기준 자동 계산)'
-    )
-    parser.add_argument(
-        '--edate',
-        type=str,
-        default=None,
-        help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})'
-    )
-    parser.add_argument(
-        '--after',
-        type=str,
-        default=None,
-        help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)'
-    )
-    parser.add_argument(
-        '--no-merge',
-        action='store_true',
-        help='archive와 병합하지 않고 새 데이터만 저장'
-    )
+    parser = argparse.ArgumentParser(description="금감원 제재조치 현황 스크래핑 전체 파이프라인")
+    parser.add_argument('--skip-scrape', action='store_true', help='기존 스크래핑 결과를 유지하고 분석 단계만 실행')
+    parser.add_argument('--stats-only', action='store_true', help='통계만 출력 (스크래핑/추출 미실행)')
+    parser.add_argument('--log-file', type=str, help='실행 로그를 저장할 파일 경로 (기록은 append 모드)')
+    parser.add_argument('--limit', type=int, default=None, help='수집할 최대 항목 수 (기본: 전체)')
+    parser.add_argument('--sdate', type=str, default=None, help='검색 시작일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: archive 기준 자동 계산)')
+    parser.add_argument('--edate', type=str, default=None, help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
+    parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
+    parser.add_argument('--no-merge', action='store_true', help='archive와 병합하지 않고 새 데이터만 저장')
     args = parser.parse_args()
 
-    json_path = ROOT_DIR / 'output' / 'kofiu_results.json'
+    json_path = ROOT_DIR / 'output' / 'fss_results.json'
 
     log_file_handle = None
 
@@ -386,16 +340,13 @@ def main() -> None:
             edate = args.edate if args.edate else default_edate
             
             scraper_args = []
+            if args.limit:
+                scraper_args.extend(['--limit', str(args.limit)])
             scraper_args.extend(['--sdate', sdate])
             scraper_args.extend(['--edate', edate])
             if args.after:
                 scraper_args.extend(['--after', args.after])
-            
-            run_step(
-                'kofiu_scraper_v2.py',
-                '1. 목록 및 PDF 스크래핑 (사건 추출 포함)',
-                scraper_args if scraper_args else None
-            )
+            run_step('fss_scraper_v2.py', '1. 목록 및 PDF 스크래핑', scraper_args if scraper_args else None)
             
             # 새로 크롤링한 데이터와 archive 병합
             if not args.no_merge and json_path.exists():
@@ -444,33 +395,33 @@ def main() -> None:
                                 for title, content in zip(titles, contents):
                                     split_results.append({
                                         '구분': item.get('구분', '제재사례'),
-                                        '출처': item.get('출처', '금융정보분석원'),
+                                        '출처': item.get('출처', '금융감독원'),
                                         '업종': item.get('업종', '기타'),
                                         '금융회사명': item.get('금융회사명', ''),
                                         '제목': title,
                                         '내용': content,
                                         '제재내용': item.get('제재내용', ''),
                                         '제재조치일': item.get('제재조치일', ''),
-                                        '상세페이지URL': item.get('상세페이지URL', ''),
+                                        '파일다운로드URL': item.get('파일다운로드URL', ''),
                                         'OCR추출여부': item.get('OCR추출여부', '아니오')
                                     })
                             else:
                                 # 사건이 없는 경우
                                 split_results.append({
                                     '구분': item.get('구분', '제재사례'),
-                                    '출처': item.get('출처', '금융정보분석원'),
+                                    '출처': item.get('출처', '금융감독원'),
                                     '업종': item.get('업종', '기타'),
                                     '금융회사명': item.get('금융회사명', ''),
                                     '제목': '',
                                     '내용': '',
                                     '제재내용': item.get('제재내용', ''),
                                     '제재조치일': item.get('제재조치일', ''),
-                                    '상세페이지URL': item.get('상세페이지URL', ''),
+                                    '파일다운로드URL': item.get('파일다운로드URL', ''),
                                     'OCR추출여부': item.get('OCR추출여부', '아니오')
                                 })
                         
                         # archive CSV 저장 (병합된 전체 데이터)
-                        fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '상세페이지URL', 'OCR추출여부']
+                        fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
                         with archive_csv_path.open('w', encoding='utf-8-sig', newline='') as f:
                             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                             writer.writeheader()
@@ -490,8 +441,10 @@ def main() -> None:
                 except Exception as e:
                     log(f"  ※ 병합 중 오류: {e}")
         else:
-            log("\n[건너뜀] 스크래핑 단계는 "
-                "--skip-scrape 옵션으로 생략했습니다.")
+            log("\n[건너뜀] 스크래핑 단계는 --skip-scrape 옵션으로 생략했습니다.")
+
+        # OCR 후처리 실행 (V3 OCR로 추출된 제재내용 후처리)
+        run_step('post_process_ocr.py', '2. OCR 후처리')
 
         print_stats(json_path)
     finally:
@@ -508,3 +461,6 @@ if __name__ == '__main__':
     except Exception as exc:
         log(f"\n[오류] {exc}")
         sys.exit(1)
+
+
+

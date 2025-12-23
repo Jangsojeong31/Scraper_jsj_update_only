@@ -1375,12 +1375,12 @@ def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
         file_names_str = "; ".join(item.get("file_names", [])) if item.get("file_names") else ""
         download_links_str = "; ".join(item.get("download_links", [])) if item.get("download_links") else ""
         
-        # 본문 내용 처리 (개행 유지, 1000자 제한)
+        # 본문 내용 처리 (개행 유지, 4000자 제한)
         content = item.get("content", "") or ""
         # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
         content = content.replace("\r\n", "\n").replace("\r", "\n")
-        if len(content) > 1000:
-            content = content[:1000]
+        if len(content) > 4000:
+            content = content[:4000]
         
         law_item = {
             "번호": str(idx),  # 순번으로 번호 생성

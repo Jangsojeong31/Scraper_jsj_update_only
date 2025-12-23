@@ -104,6 +104,76 @@ def clean_ocr_artifacts(text):
     return text.strip()
 
 
+def remove_all_whitespace(text: str) -> str:
+    """문자열의 모든 공백 문자 제거"""
+    if text is None:
+        return text
+    return re.sub(r'\s+', '', text)
+
+
+def add_particle_spacing(text: str) -> str:
+    """지정된 조사/어미 뒤에 공백을 강제 추가하여 가독성 확보"""
+    if text is None:
+        return text
+    
+    # 뒤에만 공백 추가하는 조사/어미
+    particles_suffix = [
+        '하여', '록', '면', '다', '터', '의', '음', '는', '은', '를', '을', '에',
+        '경우', '따라', '관한', '하며', '한후', '통해', '하였으나', '하였고', 
+        '위한', '향후', '대한', '적인', '하고', '그러나', '하거나', '으며', '앞으로'
+    ]
+    
+    # 앞뒤로 공백 추가하는 조사/어미
+    particles_both = ['및', '등', '이후', '또는']
+    
+    # 뒤에만 공백 추가
+    for token in particles_suffix:
+        text = re.sub(rf'({re.escape(token)})(?=\S)', r'\1 ', text)
+    
+    # 앞뒤로 공백 추가
+    for token in particles_both:
+        # 앞뒤에 공백이 없으면 추가
+        text = re.sub(rf'(?<!\s)({re.escape(token)})(?!\s)', r' \1 ', text)
+    
+    return text
+
+
+def wrap_related_sections(text: str) -> str:
+    """'관련법규', '관련규정' 앞에 줄바꿈을 넣고 <>로 감싸서 구분"""
+    if text is None:
+        return text
+    
+    def _wrap(match: re.Match) -> str:
+        word = match.group(1)
+        prefix = '\n' if match.start() != 0 else ''
+        return f"{prefix}<{word}>"
+    
+    return re.sub(r'(관련법규|관련규정)', _wrap, text)
+
+
+def clean_content_symbols(text: str) -> str:
+    """내용 필드에서 불필요한 기호 및 공백 제거"""
+    if text is None:
+        return text
+    # 지정된 불필요 기호 제거
+    text = re.sub(r'[\[\],0]', '', text)
+    # 연속 기호(문자·숫자·한글이 아닌 문자) → 단일 언더스코어
+    text = re.sub(r'[^0-9A-Za-z가-힣\s]+', '_', text)
+    
+    # 1차로 모든 공백 제거
+    text = remove_all_whitespace(text)
+    
+    # '관련법규'/'관련규정'을 줄바꿈 + <>로 강조
+    text = wrap_related_sections(text)
+    
+    # 조사/어미 뒤에 띄어쓰기 강제
+    text = add_particle_spacing(text)
+    
+    # 과도한 공백 정리
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    return text
+
+
 def process_ocr_text(text, preserve_spacing=False):
     """
     OCR 텍스트 후처리

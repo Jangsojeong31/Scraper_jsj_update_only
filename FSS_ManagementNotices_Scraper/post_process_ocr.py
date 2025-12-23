@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import csv
+import os
 import platform
 
 # Windows 콘솔 인코딩 설정
@@ -70,6 +71,10 @@ def clean_ocr_artifacts(text):
     }
     for wrong, correct in ocr_corrections.items():
         text = text.replace(wrong, correct)
+    
+    # 3-1. 공백이 포함된 OCR 오류 패턴 보정
+    # "과 리 료" -> "과태료" (공백이 1개 이상 포함된 경우)
+    text = re.sub(r'과\s+리\s+료', '과태료', text)
     
     # 4. 숫자-한글 사이 공백 제거
     text = re.sub(r'(?<=\d)\s+(?=[가-힣])', '', text)
@@ -154,7 +159,7 @@ def add_particle_spacing(text: str) -> str:
 
 
 def wrap_related_sections(text: str) -> str:
-    """'관련법규', '관련규정' 앞에 줄바꿈을 넣고 <>로 감싸서 구분"""
+    """'조치할사항' 앞에 줄바꿈을 넣고 <>로 감싸서 구분"""
     if text is None:
         return text
     
@@ -163,11 +168,11 @@ def wrap_related_sections(text: str) -> str:
         prefix = '\n' if match.start() != 0 else ''
         return f"{prefix}<{word}>"
     
-    return re.sub(r'(관련법규|관련규정)', _wrap, text)
+    return re.sub(r'(조치할사항)', _wrap, text)
 
 
 def clean_content_symbols(text: str) -> str:
-    """내용 필드에서 불필요한 기호 및 공백 제거"""
+    """내용 필드에서 불필요한 기호 및 공백 제거 (줄바꿈은 보존)"""
     if text is None:
         return text
     # 지정된 불필요 기호 제거
@@ -175,17 +180,19 @@ def clean_content_symbols(text: str) -> str:
     # 연속 기호(문자·숫자·한글이 아닌 문자) → 단일 언더스코어
     text = re.sub(r'[^0-9A-Za-z가-힣\s]+', '_', text)
     
-    # 1차로 모든 공백 제거
-    text = remove_all_whitespace(text)
+    # 공백만 제거 (줄바꿈은 보존)
+    # 공백(\s) 중에서 줄바꿈(\n, \r)은 유지하고 나머지(공백, 탭)만 제거
+    text = re.sub(r'[ \t]+', '', text)  # 공백과 탭만 제거, 줄바꿈(\n, \r)은 유지
     
-    # '관련법규'/'관련규정'을 줄바꿈 + <>로 강조
+    # '조치할사항'을 줄바꿈 + <>로 강조
     text = wrap_related_sections(text)
     
     # 조사/어미 뒤에 띄어쓰기 강제
     text = add_particle_spacing(text)
     
-    # 과도한 공백 정리
-    text = re.sub(r'\s{2,}', ' ', text).strip()
+    # 과도한 공백 정리 (줄바꿈은 유지)
+    # 줄바꿈이 아닌 공백만 정리
+    text = re.sub(r'[ \t]{2,}', ' ', text).strip()
     return text
 
 
@@ -219,8 +226,10 @@ def main():
     print("OCR 후처리 및 품질 개선")
     print("=" * 100)
     
-    # JSON 파일 로드
-    json_filename = 'fss_results.json'
+    # JSON 파일 로드 (output 폴더에서)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, 'output')
+    json_filename = os.path.join(output_dir, 'fss_results.json')
     try:
         with open(json_filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -270,9 +279,9 @@ def main():
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
-        # CSV 재생성
-        csv_filename = 'fss_results.csv'
-        base_fieldnames = ['번호', '구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', 
+        # CSV 재생성 (output 폴더에)
+        csv_filename = os.path.join(output_dir, 'fss_results.csv')
+        base_fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', 
                           '제재조치일', '파일다운로드URL', 'OCR추출여부', '누락필드']
         
         csv_rows = []

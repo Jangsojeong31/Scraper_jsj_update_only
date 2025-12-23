@@ -87,6 +87,74 @@ class MolegScraper(BaseScraper):
         cleaned = re.sub(r'[\(（].*?[\)）]', '', text)
         return cleaned.strip()
     
+    def _clean_content_text(self, content: str) -> str:
+        """
+        본문 텍스트에서 불필요한 부분 제거
+        
+        Args:
+            content: 원본 본문 텍스트
+            
+        Returns:
+            정제된 본문 텍스트
+        """
+        if not content:
+            return ''
+        
+        lines = content.split('\n')
+        cleaned_lines = []
+        
+        # 제거할 키워드 목록
+        remove_keywords = [
+            '본문으로 바로가기',
+            '주메뉴 바로가기',
+            '이 누리집은 대한민국 공식 전자정부 누리집입니다',
+            '공식 전자정부 누리집',
+            '100%',
+            '뉴스·소식',
+            '입법예고',
+            '홈',
+            '법제처 법령정보',
+            '전체기관 입법예고 바로가기',
+        ]
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # 불필요한 키워드가 포함된 라인 제거
+            should_remove = False
+            for keyword in remove_keywords:
+                if keyword in line:
+                    should_remove = True
+                    break
+            
+            if should_remove:
+                continue
+            
+            # '전자메일'로 시작하는 라인 제거 (연락처 정보)
+            if line.startswith('전자메일') or line.startswith('전화번호') or line.startswith('담당부서'):
+                # 하지만 실제 본문 내용에 '전자메일'이 포함될 수 있으므로, 
+                # 단독 라인이고 짧은 경우만 제거
+                if len(line) < 50:  # 짧은 라인만 제거 (연락처 정보)
+                    continue
+            
+            cleaned_lines.append(line)
+        
+        # 빈 라인 정리 (연속된 빈 라인을 하나로)
+        result_lines = []
+        prev_empty = False
+        for line in cleaned_lines:
+            if not line:
+                if not prev_empty:
+                    result_lines.append('')
+                    prev_empty = True
+            else:
+                result_lines.append(line)
+                prev_empty = False
+        
+        return '\n'.join(result_lines).strip()
+    
     def _load_target_laws_from_csv(self, csv_path: str) -> List[Dict]:
         """
         CSV 파일에서 법령명 읽기
@@ -278,32 +346,74 @@ class MolegScraper(BaseScraper):
         detail = {}
         detail['detail_url'] = detail_url
         
-        # 제목 추출 - 본문 영역에서 찾기
-        view_area = soup.find('div', class_='view') or soup.find('div', id='view') or soup.find('div', class_='content')
+        # 본문 영역 찾기: #listForm > div > div.tb_contents
+        content_area = None
         
-        if view_area:
+        # 방법 1: CSS 셀렉터로 직접 찾기 (#listForm > div > div.tb_contents)
+        list_form = soup.find('form', id='listForm')
+        if list_form:
+            # listForm 내부의 div > div.tb_contents 찾기
+            inner_div = list_form.find('div')
+            if inner_div:
+                content_area = inner_div.find('div', class_='tb_contents')
+        
+        # 방법 2: 직접 class로 찾기 (대체 방법)
+        if not content_area:
+            content_area = soup.find('div', class_='tb_contents')
+        
+        # 방법 3: 기존 방식 (fallback)
+        if not content_area:
+            content_area = soup.find('div', class_='view') or soup.find('div', id='view') or soup.find('div', class_='content')
+        
+        # 제목 추출 - 본문 영역에서 찾기
+        if content_area:
             # 제목은 보통 h2, h3, 또는 strong 태그에 있음
-            title_elem = view_area.find('h2') or view_area.find('h3') or view_area.find('h4')
+            title_elem = content_area.find('h2') or content_area.find('h3') or content_area.find('h4')
             if not title_elem:
                 # strong 태그나 큰 텍스트 찾기
-                title_elem = view_area.find('strong') or view_area.find('b')
+                title_elem = content_area.find('strong') or content_area.find('b')
             if title_elem:
                 detail['title'] = title_elem.get_text(strip=True)
         
         # 본문 내용 추출
-        if view_area:
+        if content_area:
             # 스크립트, 스타일, 네비게이션 태그 제거
-            for script in view_area(["script", "style", "nav", "header", "footer"]):
+            for script in content_area(["script", "style", "nav", "header", "footer"]):
                 script.decompose()
-            detail['content'] = view_area.get_text(separator='\n', strip=True)
+            
+            # 접근성 링크 및 불필요한 요소 제거
+            # '본문으로 바로가기', '주메뉴 바로가기' 등의 링크 제거
+            for link in content_area.find_all('a', href=True):
+                link_text = link.get_text(strip=True)
+                if any(keyword in link_text for keyword in ['본문으로', '주메뉴', '바로가기', '스킵']):
+                    link.decompose()
+            
+            # '이 누리집은 대한민국 공식 전자정부 누리집입니다.' 같은 텍스트 제거
+            for elem in content_area.find_all(['div', 'span', 'p']):
+                elem_text = elem.get_text(strip=True)
+                if any(keyword in elem_text for keyword in ['이 누리집은', '공식 전자정부', '100%']):
+                    elem.decompose()
+            
+            # 테이블 헤더 정보 제거 (공고번호, 법령종류 등은 이미 별도로 추출됨)
+            # 테이블의 첫 번째 행(헤더) 제거
+            for table in content_area.find_all('table'):
+                first_row = table.find('tr')
+                if first_row:
+                    # 헤더 행인지 확인 (th 태그가 있으면 헤더)
+                    if first_row.find('th'):
+                        first_row.decompose()
+            
+            content_text = content_area.get_text(separator='\n', strip=True)
+            # 불필요한 텍스트 라인 제거
+            cleaned_content = self._clean_content_text(content_text)
+            # 본문은 최대 4000자로 제한
+            if cleaned_content and len(cleaned_content) > 4000:
+                cleaned_content = cleaned_content[:4000]
+            detail['content'] = cleaned_content
         else:
-            # 본문 영역을 찾지 못한 경우 전체 본문에서 추출
-            body = soup.find('body')
-            if body:
-                # 스크립트, 스타일 태그 제거
-                for script in body(["script", "style", "nav", "header", "footer"]):
-                    script.decompose()
-                detail['content'] = body.get_text(separator='\n', strip=True)
+            # 본문 영역을 찾지 못한 경우 경고
+            print(f"  ⚠ 본문 영역(#listForm > div > div.tb_contents)을 찾을 수 없습니다.")
+            detail['content'] = ''
         
         # 테이블에서 메타 정보 추출 (더 정확하게)
         tables = soup.find_all('table')
@@ -431,8 +541,8 @@ class MolegScraper(BaseScraper):
             links = file_section.find_all('a', href=True)
         else:
             # 본문 영역 내의 링크만 찾기
-            if view_area:
-                links = view_area.find_all('a', href=True)
+            if content_area:
+                links = content_area.find_all('a', href=True)
             else:
                 links = soup.find_all('a', href=True)
         
@@ -886,18 +996,8 @@ def main():
     print(f"\n=== 스크래핑 완료: {len(results)}개 항목 ===")
     
     # 결과 저장
-    # 마지막 스크래핑 날짜 계산
-    last_scraped_date = None
-    if results:
-        dates = []
-        for item in results:
-            period = item.get('period', '')
-            if period:
-                parsed_date = scraper.parse_date_from_period(period)
-                if parsed_date:
-                    dates.append(parsed_date)
-        if dates:
-            last_scraped_date = max(dates).strftime('%Y-%m-%d')
+    # 스크래핑 실행 날짜를 last_scraped_date로 사용
+    last_scraped_date = time.strftime('%Y-%m-%d')
     
     # Law_LegNotice_Scraper 형식의 한글 컬럼 추가
     def parse_period_to_execution_info(period_str: str) -> tuple:
@@ -948,8 +1048,7 @@ def main():
     
     output_data = {
         'url': scraper.LIST_URL,
-        'crawled_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-        'last_scraped_date': last_scraped_date,  # 마지막 스크래핑 날짜 추가
+        'last_scraped_date': last_scraped_date,  # 스크래핑 실행 날짜
         'total_count': len(results),
         'results': results
     }

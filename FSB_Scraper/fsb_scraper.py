@@ -780,10 +780,24 @@ class FsbScraper(BaseScraper):
                         pass
                     continue
             
-            # 모든 방법 실패
-            print(f"  ⚠ 모든 iframe 접근 방법 실패")
+            # 모든 방법 실패 - iframe이 없는 경우일 수 있음
+            print(f"  ⚠ 모든 iframe 접근 방법 실패 (iframe이 없는 구조일 수 있음)")
             driver.switch_to.default_content()
-            return None
+            
+            # 메인 프레임의 HTML 저장 (iframe이 없는 경우 대비)
+            try:
+                main_soup = BeautifulSoup(driver.page_source, "lxml")
+                regulation_name = item.get('title', item.get('regulation_name', 'unknown'))
+                safe_name = re.sub(r'[^\w\s-]', '', regulation_name).replace(' ', '_')
+                debug_filename = f"debug_fsb_no_iframe_{safe_name}.html"
+                self.save_debug_html(main_soup, filename=debug_filename)
+                print(f"  ✓ 메인 프레임 HTML 저장: {debug_filename}")
+                # iframe이 없음을 표시하기 위한 플래그 추가
+                main_soup._no_iframe = True
+                return main_soup
+            except Exception as e:
+                print(f"  ⚠ 메인 프레임 HTML 저장 실패: {e}")
+                return None
 
         except Exception as e:
             print(f"  ⚠ 링크 클릭 및 추출 실패: {e}")
@@ -794,6 +808,603 @@ class FsbScraper(BaseScraper):
             except:
                 pass
             return None
+    
+    def _extract_revision_info_from_soup(self, soup: BeautifulSoup) -> Dict[str, str]:
+        """
+        BeautifulSoup 객체에서 개정정보 추출 (공통 함수)
+        
+        Args:
+            soup: BeautifulSoup 객체
+            
+        Returns:
+            {'revision_reason': str, 'enforcement_date': str, 'promulgation_date': str} 딕셔너리
+        """
+        revision_reason = ""
+        enforcement_date = ""
+        promulgation_date = ""
+        
+        try:
+            table = soup.find('table', class_='popTable')
+            if table:
+                rows = table.find_all('tr')
+                for row in rows:
+                    th = row.find('th')
+                    td = row.find('td')
+                    if th and td:
+                        th_text = th.get_text(strip=True)
+                        td_text = td.get_text(strip=True)
+                        
+                        # 시행일 추출
+                        if '시행일' in th_text:
+                            date_match = re.search(r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', td_text)
+                            if date_match:
+                                year = date_match.group(1)
+                                month = str(int(date_match.group(2))).zfill(2)
+                                day = str(int(date_match.group(3))).zfill(2)
+                                enforcement_date = f"{year}-{month}-{day}"
+                                print(f"  ✓ 시행일 추출: {enforcement_date}")
+                        
+                        # 개정일 추출 (공포일로 사용)
+                        elif '개정일' in th_text:
+                            date_match = re.search(r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', td_text)
+                            if date_match:
+                                year = date_match.group(1)
+                                month = str(int(date_match.group(2))).zfill(2)
+                                day = str(int(date_match.group(3))).zfill(2)
+                                promulgation_date = f"{year}-{month}-{day}"
+                                print(f"  ✓ 개정일 추출 (공포일로 사용): {promulgation_date}")
+                        
+                        # 개정사유 추출
+                        elif '개정사유' in th_text or '개정이유' in th_text:
+                            next_row = row.find_next_sibling('tr')
+                            if next_row:
+                                reason_td = next_row.find('td')
+                                if reason_td:
+                                    pre = reason_td.find('pre')
+                                    if pre:
+                                        extracted_text = pre.get_text(strip=True)
+                                    else:
+                                        extracted_text = reason_td.get_text(strip=True)
+                                    
+                                    # 의미 있는 개정사유인지 확인
+                                    if extracted_text and len(extracted_text) > 10:
+                                        meaningless_keywords = ['개정정보', '연혁 선택', '연혁선택', 'SBLAW', '표준 규정', '약관 연혁']
+                                        if not any(keyword in extracted_text for keyword in meaningless_keywords):
+                                            revision_reason = extracted_text
+                                            print(f"  ✓ 개정사유 추출: {revision_reason[:100]}...")
+                                        else:
+                                            print(f"  ⚠ 개정사유에 의미 없는 텍스트 포함, 빈 값으로 처리")
+                                    else:
+                                        print(f"  ⚠ 개정사유가 비어있거나 너무 짧음, 빈 값으로 처리")
+                
+                # 개정사유가 아직 없으면 한 번 더 시도 (다른 방법)
+                if not revision_reason:
+                    reason_section = soup.find('th', string=re.compile('개정사유|개정이유'))
+                    if reason_section:
+                        reason_row = reason_section.find_parent('tr')
+                        if reason_row:
+                            next_row = reason_row.find_next_sibling('tr')
+                            if next_row:
+                                reason_td = next_row.find('td')
+                                if reason_td:
+                                    pre = reason_td.find('pre')
+                                    if pre:
+                                        extracted_text = pre.get_text(strip=True)
+                                    else:
+                                        extracted_text = reason_td.get_text(strip=True)
+                                    
+                                    # 의미 있는 개정사유인지 확인
+                                    if extracted_text and len(extracted_text) > 10:
+                                        meaningless_keywords = ['개정정보', '연혁 선택', '연혁선택', 'SBLAW', '표준 규정', '약관 연혁']
+                                        if not any(keyword in extracted_text for keyword in meaningless_keywords):
+                                            revision_reason = extracted_text
+                                            print(f"  ✓ 개정사유 추출 (대체 방법): {revision_reason[:100]}...")
+                                        else:
+                                            print(f"  ⚠ 개정사유에 의미 없는 텍스트 포함, 빈 값으로 처리")
+                                    else:
+                                        print(f"  ⚠ 개정사유가 비어있거나 너무 짧음, 빈 값으로 처리")
+        except Exception as e:
+            print(f"  ⚠ 개정정보 추출 중 오류: {e}")
+        
+        return {
+            'revision_reason': revision_reason,
+            'enforcement_date': enforcement_date,
+            'promulgation_date': promulgation_date
+        }
+    
+    def extract_content_from_new_window(
+        self,
+        driver,
+        has_no_iframe: bool = False,
+        regulation_name: str = "",
+        content_limit: int = 0
+    ) -> Dict[str, str]:
+        """
+        상세 페이지에서 개정이유 버튼을 클릭하여 열리는 새 창에서 내용 추출
+        '개정이유', '시행일', '공포일' 정보를 추출
+        
+        Args:
+            driver: Selenium WebDriver 인스턴스
+            has_no_iframe: iframe이 없는 구조인지 여부
+            
+        Returns:
+            {
+                'revision_reason': str,
+                'enforcement_date': str,
+                'promulgation_date': str,
+                'revision_content': str
+            } 딕셔너리
+        """
+        if driver is None:
+            return {
+                'revision_reason': '',
+                'enforcement_date': '',
+                'promulgation_date': '',
+                'revision_content': '',
+            }
+        
+        original_window = None
+        revision_reason = ""
+        enforcement_date = ""
+        promulgation_date = ""
+        revision_content = ""
+        
+        # js_code 변수 초기화 (showPopup 처리용)
+        js_code = ""
+        
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            import time
+            import re
+            import os
+            import shutil
+            from pathlib import Path
+            
+            # 개정문 파일 다운로드 헬퍼
+            def _download_revision_file_from_popup() -> str:
+                """
+                새 창(팝업)에서 개정문(HWP/PDF) 파일을 다운로드하고 내용(개정내용)을 추출한다.
+                """
+                try:
+                    from selenium.webdriver.common.by import By as ByInner
+                except Exception:
+                    return ""
+
+                # 다운로드 전 현재 파일 목록 저장
+                files_before = set(
+                    f.name for f in self.current_dir.glob("*") if f.is_file()
+                )
+
+                link_element = None
+                # 1차: 사용자 제공 CSS 셀렉터
+                selectors = [
+                    "#Popup_content > table > tbody > tr:nth-child(7) > td > a",
+                ]
+                xpaths = [
+                    "/html/body/div/div[2]/table/tbody/tr[7]/td/a",
+                ]
+
+                # CSS selector 시도
+                for selector in selectors:
+                    try:
+                        link_element = driver.find_element(ByInner.CSS_SELECTOR, selector)
+                        if link_element:
+                            break
+                    except Exception:
+                        continue
+
+                # XPath 시도
+                if not link_element:
+                    from selenium.common.exceptions import NoSuchElementException
+                    for xp in xpaths:
+                        try:
+                            link_element = driver.find_element(ByInner.XPATH, xp)
+                            if link_element:
+                                break
+                        except NoSuchElementException:
+                            continue
+
+                if not link_element:
+                    print("  ⚠ 팝업에서 개정문 다운로드 링크를 찾지 못했습니다.")
+                    return ""
+
+                # CDP 다운로드 설정 (실패해도 계속 진행)
+                try:
+                    driver.execute_cdp_cmd('Page.setDownloadBehavior', {
+                        'behavior': 'allow',
+                        'downloadPath': str(self.current_dir)
+                    })
+                except Exception as cdp_error:
+                    print(f"  ⚠ 팝업 개정문 CDP 설정 실패 (계속 진행): {cdp_error}")
+
+                # 링크 클릭으로 다운로드 시작
+                try:
+                    driver.execute_script("arguments[0].click();", link_element)
+                    print("  → 개정문 파일 다운로드 클릭")
+                except Exception as e:
+                    print(f"  ⚠ 개정문 다운로드 클릭 실패: {e}")
+                    return ""
+
+                # 다운로드 완료 대기
+                max_wait = 60
+                waited = 0
+                downloaded_file = None
+
+                while waited < max_wait:
+                    downloaded_files = list(self.current_dir.glob("*"))
+                    crdownload_files = [
+                        f for f in downloaded_files if f.name.endswith('.crdownload')
+                    ]
+
+                    if crdownload_files:
+                        print(f"  → 개정문 다운로드 진행 중... ({waited}초)")
+                    else:
+                        for f in downloaded_files:
+                            if f.is_file() and not f.name.endswith('.crdownload'):
+                                if f.name not in files_before:
+                                    if (not downloaded_file or
+                                            f.stat().st_mtime > downloaded_file.stat().st_mtime):
+                                        downloaded_file = f
+
+                        if downloaded_file:
+                            print(f"  ✓ 개정문 파일 다운로드 완료: {downloaded_file.name}")
+                            break
+
+                    time.sleep(1)
+                    waited += 1
+
+                if not downloaded_file or not downloaded_file.exists():
+                    print("  ⚠ 개정문 파일을 찾을 수 없습니다.")
+                    return ""
+
+                # 파일명 정리 (규정명 기반)
+                ext = downloaded_file.suffix or '.hwp'
+                base_name = regulation_name or "revision"
+                safe_reg_name = re.sub(r'[^\w\s-]', '', base_name)
+                safe_reg_name = safe_reg_name.replace(' ', '_')
+                safe_filename = f"{safe_reg_name}_개정문{ext}"
+                new_file_path = self.current_dir / safe_filename
+
+                try:
+                    if str(downloaded_file) != str(new_file_path):
+                        if new_file_path.exists():
+                            new_file_path.unlink()
+                        shutil.move(downloaded_file, new_file_path)
+                    print(f"  ✓ 개정문 파일 저장: {new_file_path}")
+                except Exception as e:
+                    print(f"  ⚠ 개정문 파일 이동/이름 변경 실패: {e}")
+                    new_file_path = downloaded_file
+
+                # 파일 내용 추출
+                file_ext = new_file_path.suffix.lower()
+                file_content = ""
+                try:
+                    if file_ext == '.hwp':
+                        file_content = self.extract_hwp_content(str(new_file_path))
+                    elif file_ext == '.pdf':
+                        file_content = self.extract_pdf_content(str(new_file_path))
+                    else:
+                        # 기타 확장자는 HWP로 간주
+                        file_content = self.extract_hwp_content(str(new_file_path))
+                except Exception as e:
+                    print(f"  ⚠ 개정문 파일 내용 추출 실패: {e}")
+                    file_content = ""
+
+                if not file_content:
+                    return ""
+
+                # 개정내용 텍스트 정리 및 길이 제한 (전체 파일 내용 사용)
+                content_text = file_content.replace("\r\n", "\n").replace("\r", "\n")
+                max_len = min(4000, content_limit) if content_limit > 0 else 4000
+                if len(content_text) > max_len:
+                    content_text = content_text[:max_len]
+
+                return content_text
+            
+            # 현재 창 핸들 저장
+            original_window = driver.current_window_handle
+            all_windows_before = set(driver.window_handles)
+            
+            # 메인 프레임으로 전환
+            driver.switch_to.default_content()
+            time.sleep(0.5)
+            
+            # 개정이유 버튼 찾기 및 클릭
+            button_element = None
+            
+            # 디버깅: has_no_iframe 값 확인
+            print(f"  → has_no_iframe 값: {has_no_iframe}")
+            
+            # 버튼 검증 헬퍼 함수: img title로 확인
+            def verify_button_by_img_title(element, expected_title):
+                """버튼 내부의 img 태그 title로 검증"""
+                try:
+                    img = element.find_element(By.TAG_NAME, "img")
+                    img_title = img.get_attribute('title') or img.get_attribute('alt') or ''
+                    if expected_title in img_title:
+                        return True
+                except:
+                    pass
+                return False
+            
+            # 방법 1: CSS 셀렉터로 찾기 (iframe 있는 경우만)
+            if not has_no_iframe:
+                try:
+                    candidate = driver.find_element(By.CSS_SELECTOR, "#contents_wrap > div > div.btn_box > div > a:nth-child(3)")
+                    if candidate and verify_button_by_img_title(candidate, '개정이유'):
+                        button_element = candidate
+                        print(f"  → 개정이유 버튼 발견 (iframe 있는 경우, CSS 셀렉터, title 검증 통과)")
+                except:
+                    pass
+                
+                # 방법 2: XPath로 찾기 (iframe 있는 경우만)
+                if not button_element:
+                    try:
+                        candidate = driver.find_element(By.XPATH, "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[3]")
+                        if candidate and verify_button_by_img_title(candidate, '개정이유'):
+                            button_element = candidate
+                            print(f"  → 개정이유 버튼 발견 (iframe 있는 경우, XPath, title 검증 통과)")
+                    except:
+                        pass
+            
+            # 방법 3: iframe 없는 경우 (개정정보 버튼 - 두 번째 버튼)
+            if not button_element and has_no_iframe:
+                try:
+                    # iframe 없는 경우: #contents_wrap > div > div.btn_box > div > a:nth-child(2)
+                    candidate = driver.find_element(By.CSS_SELECTOR, "#contents_wrap > div > div.btn_box > div > a:nth-child(2)")
+                    if candidate and verify_button_by_img_title(candidate, '개정정보'):
+                        button_element = candidate
+                        print(f"  → 개정정보 버튼 발견 (iframe 없는 구조, CSS 셀렉터, title 검증 통과)")
+                except:
+                    try:
+                        # XPath로 시도: /html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[2]
+                        candidate = driver.find_element(By.XPATH, "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[2]")
+                        if candidate and verify_button_by_img_title(candidate, '개정정보'):
+                            button_element = candidate
+                            print(f"  → 개정정보 버튼 발견 (iframe 없는 구조, XPath, title 검증 통과)")
+                    except:
+                        pass
+            
+            # 방법 4: iframe 없는 경우 대체 방법 (href에 lawRevisionInfo 포함)
+            if not button_element and has_no_iframe:
+                try:
+                    # .btn_box .kor_btn 내의 개정정보 버튼 찾기
+                    candidate = driver.find_element(By.CSS_SELECTOR, ".btn_box .kor_btn a[href*='lawRevisionInfo'], .btnDiv.kor_btn a[href*='lawRevisionInfo']")
+                    if candidate and verify_button_by_img_title(candidate, '개정정보'):
+                        button_element = candidate
+                        print(f"  → 개정정보 버튼 발견 (iframe 없는 구조, href 매칭, title 검증 통과)")
+                except:
+                    try:
+                        # XPath로 시도
+                        candidate = driver.find_element(By.XPATH, "//div[@class='btn_box']//div[@class='kor_btn']//a[contains(@href, 'lawRevisionInfo')]")
+                        if candidate and verify_button_by_img_title(candidate, '개정정보'):
+                            button_element = candidate
+                            print(f"  → 개정정보 버튼 발견 (iframe 없는 구조, XPath href 매칭, title 검증 통과)")
+                    except:
+                        pass
+            
+            # 방법 5: 최후의 수단 - 모든 버튼을 검사하여 img title로 찾기
+            if not button_element:
+                try:
+                    all_buttons = driver.find_elements(By.CSS_SELECTOR, ".btn_box a, .btnDiv a")
+                    for btn in all_buttons:
+                        if verify_button_by_img_title(btn, '개정정보') or verify_button_by_img_title(btn, '개정이유'):
+                            button_element = btn
+                            print(f"  → 개정정보/개정이유 버튼 발견 (img title로 검색)")
+                            break
+                except:
+                    pass
+            
+            if not button_element:
+                print(f"  ⚠ 개정이유/개정정보 버튼을 찾을 수 없습니다")
+                return {
+                    'revision_reason': '',
+                    'enforcement_date': '',
+                    'promulgation_date': '',
+                    'revision_content': '',
+                }
+            
+            # href에서 showPopup 함수 추출 (버튼 클릭 전에)
+            href = button_element.get_attribute('href') or ''
+            onclick = button_element.get_attribute('onclick') or ''
+            js_code = href if href.startswith('javascript:') else onclick
+            
+            # 디버깅: js_code 출력
+            if js_code:
+                print(f"  → 버튼 JS 코드: {js_code[:100]}...")
+            
+            # showPopup 함수인 경우 URL 추출하여 직접 접근
+            popup_url = None
+            if js_code and 'showPopup' in js_code:
+                # showPopup('/lmxsrv/law/lawRevisionInfo.do?SEQ_HISTORY=682','revisionview','735','350');
+                popup_url_match = re.search(r"showPopup\s*\(\s*['\"]([^'\"]+)['\"]", js_code)
+                if popup_url_match:
+                    popup_url = popup_url_match.group(1)
+                    if not popup_url.startswith('http'):
+                        popup_url = urljoin(self.BASE_URL, popup_url)
+                    print(f"  → showPopup URL 추출: {popup_url}")
+                else:
+                    print(f"  ⚠ showPopup URL 추출 실패 (정규식 매칭 실패)")
+            elif js_code:
+                print(f"  ⚠ showPopup 함수를 찾을 수 없음 (js_code: {js_code[:50]}...)")
+            
+            # 버튼 클릭
+            try:
+                print(f"  → 새 창 열기 버튼 클릭 중...")
+                driver.execute_script("arguments[0].scrollIntoView(true);", button_element)
+                time.sleep(0.5)
+                
+                if popup_url:
+                    # showPopup인 경우 직접 새 창 열기 시도
+                    try:
+                        driver.execute_script(f"window.open('{popup_url}', '_blank');")
+                        time.sleep(3)
+                        print(f"  ✓ window.open으로 새 창 열기 시도 완료")
+                    except Exception as e:
+                        print(f"  ⚠ window.open 실패, 버튼 클릭으로 시도: {e}")
+                        driver.execute_script("arguments[0].click();", button_element)
+                        time.sleep(3)
+                else:
+                    # 일반 클릭
+                    driver.execute_script("arguments[0].click();", button_element)
+                    time.sleep(3)
+                
+                print(f"  ✓ 버튼 클릭 완료")
+            except Exception as e:
+                print(f"  ⚠ 버튼 클릭 실패: {e}")
+                # 클릭 실패 시 showPopup URL이 있으면 직접 접근
+                if popup_url:
+                    print(f"  → 클릭 실패, URL 직접 접근 시도: {popup_url}")
+                    try:
+                        driver.get(popup_url)
+                        time.sleep(2)
+                        # 현재 창에서 내용 추출
+                        new_window_soup = BeautifulSoup(driver.page_source, 'lxml')
+                        self.save_debug_html(new_window_soup, filename="debug_fsb_new_window_direct.html")
+                        
+                        # 공통 함수로 개정정보 추출
+                        result = self._extract_revision_info_from_soup(new_window_soup)
+
+                        # 개정문 파일에서 개정내용 추출
+                        try:
+                            popup_revision_content = _download_revision_file_from_popup()
+                            if popup_revision_content:
+                                result['revision_content'] = popup_revision_content
+                        except Exception as e3:
+                            print(f"  ⚠ 개정문 파일 처리 중 오류: {e3}")
+                        
+                        # 원래 페이지로 돌아가기
+                        driver.back()
+                        time.sleep(1)
+                        return result
+                    except Exception as e2:
+                        print(f"  ⚠ 직접 URL 접근 실패: {e2}")
+                
+                return {
+                    'revision_reason': '',
+                    'enforcement_date': '',
+                    'promulgation_date': '',
+                    'revision_content': '',
+                }
+            
+            # 새 창이 열렸는지 확인
+            all_windows_after = set(driver.window_handles)
+            new_windows = all_windows_after - all_windows_before
+            
+            if not new_windows:
+                print(f"  ⚠ 새 창이 열리지 않았습니다")
+                # showPopup이 팝업으로 열렸을 수 있으므로 현재 창에서 직접 URL 접근 시도
+                # popup_url이 없으면 버튼에서 다시 추출 시도
+                if not popup_url and js_code and 'showPopup' in js_code:
+                    popup_url_match = re.search(r"showPopup\s*\(\s*['\"]([^'\"]+)['\"]", js_code)
+                    if popup_url_match:
+                        popup_url = popup_url_match.group(1)
+                        if not popup_url.startswith('http'):
+                            popup_url = urljoin(self.BASE_URL, popup_url)
+                        print(f"  → showPopup URL 재추출: {popup_url}")
+                
+                if popup_url:
+                    print(f"  → 팝업 URL로 직접 접근 시도: {popup_url}")
+                    try:
+                        driver.get(popup_url)
+                        time.sleep(2)
+                        # 현재 창에서 내용 추출
+                        new_window_soup = BeautifulSoup(driver.page_source, 'lxml')
+                        self.save_debug_html(new_window_soup, filename="debug_fsb_new_window_direct.html")
+                        
+                        # 공통 함수로 개정정보 추출
+                        result = self._extract_revision_info_from_soup(new_window_soup)
+
+                        # 개정문 파일에서 개정내용 추출
+                        try:
+                            popup_revision_content = _download_revision_file_from_popup()
+                            if popup_revision_content:
+                                result['revision_content'] = popup_revision_content
+                        except Exception as e3:
+                            print(f"  ⚠ 개정문 파일 처리 중 오류: {e3}")
+                        
+                        # 원래 페이지로 돌아가기
+                        driver.back()
+                        time.sleep(1)
+                        return result
+                    except Exception as e:
+                        print(f"  ⚠ 직접 URL 접근 실패: {e}")
+                
+                return {
+                    'revision_reason': '',
+                    'enforcement_date': '',
+                    'promulgation_date': '',
+                    'revision_content': '',
+                }
+            
+            # 새 창으로 전환
+            new_window_handle = new_windows.pop()
+            driver.switch_to.window(new_window_handle)
+            print(f"  ✓ 새 창으로 전환 완료")
+            
+            # 새 창 로드 대기
+            time.sleep(2)
+            
+            # 새 창의 HTML 저장 (디버깅용)
+            try:
+                new_window_soup = BeautifulSoup(driver.page_source, 'lxml')
+                self.save_debug_html(new_window_soup, filename="debug_fsb_new_window.html")
+                print(f"  ✓ 새 창 HTML 저장 완료")
+            except:
+                pass
+            
+            # 새 창의 내용 추출 (테이블 구조 파싱)
+            try:
+                # BeautifulSoup으로 테이블 구조 파싱
+                new_window_soup = BeautifulSoup(driver.page_source, 'lxml')
+                
+                # 공통 함수로 개정정보 추출
+                result = self._extract_revision_info_from_soup(new_window_soup)
+                revision_reason = result['revision_reason']
+                enforcement_date = result['enforcement_date']
+                promulgation_date = result['promulgation_date']
+
+                # 개정문 파일에서 개정내용 추출
+                try:
+                    popup_revision_content = _download_revision_file_from_popup()
+                    if popup_revision_content:
+                        revision_content = popup_revision_content
+                except Exception as e3:
+                    print(f"  ⚠ 개정문 파일 처리 중 오류: {e3}")
+                
+            except Exception as e:
+                print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                import traceback
+                traceback.print_exc()
+                # 오류 발생 시 빈 값으로 유지
+                revision_reason = ""
+                enforcement_date = ""
+                promulgation_date = ""
+            
+            # 원래 창으로 복귀
+            driver.close()  # 새 창 닫기
+            driver.switch_to.window(original_window)
+            print(f"  ✓ 원래 창으로 복귀 완료")
+            
+        except Exception as e:
+            print(f"  ⚠ 새 창 처리 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            # 원래 창으로 복귀 시도
+            try:
+                if original_window:
+                    driver.switch_to.window(original_window)
+            except:
+                pass
+        
+        return {
+            'revision_reason': revision_reason,
+            'enforcement_date': enforcement_date,
+            'promulgation_date': promulgation_date,
+            'revision_content': revision_content,
+        }
     
     def extract_law_info_from_content(self, content: str, title: str = "") -> Dict:
         """파일 내용에서 법규 정보 추출 (규정명, 기관명, 본문, 제정일, 최근 개정일)"""
@@ -1289,12 +1900,13 @@ class FsbScraper(BaseScraper):
                                     item['regulation_name'] = law_info.get('regulation_name')
                                 if law_info.get('enactment_date'):
                                     item['enactment_date'] = law_info.get('enactment_date')
-                                if law_info.get('revision_date'):
+                                # revision_date는 select에서 추출한 값이 우선 (이미 있으면 덮어쓰지 않음)
+                                if law_info.get('revision_date') and not item.get('revision_date'):
                                     item['revision_date'] = law_info.get('revision_date')
                                 
-                                # 본문 설정 (제한 적용)
+                                # 본문 설정 (제한 적용, 최대 4000자)
                                 content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                 if len(content) > max_length:
                                     item['content'] = content[:max_length]
                                 else:
@@ -1307,7 +1919,7 @@ class FsbScraper(BaseScraper):
                             file_content = self.extract_pdf_content(str(new_file_path))
                             if file_content:
                                 content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                 if len(content) > max_length:
                                     item['content'] = content[:max_length]
                                 else:
@@ -1373,8 +1985,8 @@ class FsbScraper(BaseScraper):
             from selenium.webdriver.common.by import By
             
             chrome_options = Options()
-            # 헤드리스 모드 비활성화 (다운로드 문제 해결을 위해)
-            # chrome_options.add_argument('--headless')
+            # 헤드리스 모드 활성화 (크롬 창이 열리지 않도록)
+            chrome_options.add_argument('--headless')
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
@@ -1537,57 +2149,193 @@ class FsbScraper(BaseScraper):
                             try:
                                 detail_soup = self.click_tree_link_and_extract(driver, item)
                                 if detail_soup:
-                                    # 본문 추출 (#lawDetailContent iframe 내부)
-                                    # iframe 내부의 body나 전체 내용 추출
-                                    content = detail_soup.get_text(separator='\n', strip=True)
-                                    if content and len(content) > 20:
-                                        # 개행 유지, 1000자 제한
-                                        content = content.replace("\r\n", "\n").replace("\r", "\n")
-                                        max_length = min(1000, content_limit) if content_limit > 0 else 1000
-                                        if len(content) > max_length:
-                                            content = content[:max_length]
-                                        item['content'] = content
-                                        print(f"  ✓ 본문 추출 완료 ({len(content)}자)")
+                                    # iframe이 없는 경우인지 확인
+                                    has_no_iframe = getattr(detail_soup, '_no_iframe', False)
                                     
-                                    # 날짜 정보 추출 (select 요소에서)
-                                    driver.switch_to.default_content()
-                                    time.sleep(1)
-                                    
-                                    try:
-                                        # select 요소 찾기
-                                        date_select = driver.find_element(By.XPATH, "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[2]/div/select")
-                                        from selenium.webdriver.support.ui import Select
-                                        select = Select(date_select)
-                                        options = select.options
+                                    if has_no_iframe:
+                                        # iframe이 없는 경우: 메인 프레임에서 직접 추출
+                                        print(f"  → iframe 없는 구조 감지, 메인 프레임에서 직접 추출")
+                                        driver.switch_to.default_content()
+                                        time.sleep(1)
                                         
-                                        if options:
-                                            # 가장 위에 있는 옵션 (첫 번째) = 최근 개정일
-                                            first_option_text = options[0].text.strip()
-                                            item['revision_date'] = self._normalize_date_text(first_option_text)
-                                            print(f"  ✓ 최근 개정일 추출: {item['revision_date']} (원본: '{first_option_text}')")
-                                            
-                                            # '제정' 텍스트가 있는 옵션 찾기
-                                            for opt in options:
-                                                opt_text = opt.text.strip()
-                                                if '제정' in opt_text:
-                                                    item['enactment_date'] = self._normalize_date_text(opt_text)
-                                                    print(f"  ✓ 제정일 추출: {item['enactment_date']} (원본: '{opt_text}')")
-                                                    break
-                                    except Exception as e:
-                                        print(f"  ⚠ 날짜 select 요소를 찾을 수 없음: {e}")
-                                    
-                                    # 파일 다운로드 버튼 찾기 (메인 프레임에서)
-                                    try:
-                                        # CSS Selector로 시도
-                                        download_button = driver.find_element(By.CSS_SELECTOR, "#contents_wrap > div > div.btn_box > div > a:nth-child(2)")
-                                    except:
+                                        # 테이블에서 정보 추출
                                         try:
-                                            # XPath로 시도
-                                            download_button = driver.find_element(By.XPATH, "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[2]")
+                                            # 테이블 찾기 (.file_content > table.brdComView)
+                                            table = detail_soup.find('table', class_='brdComView')
+                                            if table:
+                                                rows = table.find_all('tr')
+                                                for row in rows:
+                                                    th = row.find('th')
+                                                    td = row.find('td')
+                                                    if th and td:
+                                                        th_text = th.get_text(strip=True)
+                                                        td_text = td.get_text(strip=True)
+                                                        
+                                                        # 시행일 추출 (참고용, 새 창에서도 가져옴)
+                                                        if '시행일' in th_text:
+                                                            date_match = re.search(r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일', td_text)
+                                                            if date_match:
+                                                                year = date_match.group(1)
+                                                                month = str(int(date_match.group(2))).zfill(2)
+                                                                day = str(int(date_match.group(3))).zfill(2)
+                                                                item['enforcement_date'] = f"{year}-{month}-{day}"
+                                                                print(f"  ✓ 시행일 추출: {item['enforcement_date']} (원본: '{td_text}')")
                                         except Exception as e:
-                                            print(f"  ⚠ 다운로드 버튼을 찾을 수 없음: {e}")
-                                            download_button = None
+                                            print(f"  ⚠ 테이블에서 정보 추출 실패: {e}")
+                                        
+                                        # select 요소에서 최근 개정일 추출 (최우선)
+                                        try:
+                                            date_select = driver.find_element(By.CSS_SELECTOR, "select#histroySeq, select[name='SEQ_HISTORY']")
+                                            from selenium.webdriver.support.ui import Select
+                                            select = Select(date_select)
+                                            options = select.options
+                                            
+                                            if options:
+                                                first_option_text = options[0].text.strip()
+                                                # 최근 개정일은 select에서 추출한 값 사용
+                                                item['revision_date'] = self._normalize_date_text(first_option_text)
+                                                print(f"  ✓ 최근 개정일 추출 (select): {item['revision_date']} (원본: '{first_option_text}')")
+                                        except Exception as e:
+                                            print(f"  ⚠ select 요소를 찾을 수 없음: {e}")
+                                        
+                                        # 본문은 PDF로 제공되므로 파일 다운로드 후 추출
+                                        # 일단 빈 문자열로 설정
+                                        item['content'] = ""
+                                        print(f"  ⚠ 본문은 PDF 파일로 제공되므로 파일 다운로드 후 추출 예정")
+                                        
+                                        # 파일 다운로드 버튼 찾기 (iframe 없는 구조)
+                                        # 버튼 검증 헬퍼 함수: img title로 확인
+                                        def verify_download_button_by_img_title(element, expected_titles):
+                                            """버튼 내부의 img 태그 title로 검증 (전문 다운로드 또는 개정문 다운로드)"""
+                                            try:
+                                                img = element.find_element(By.TAG_NAME, "img")
+                                                img_title = img.get_attribute('title') or img.get_attribute('alt') or ''
+                                                for expected in expected_titles:
+                                                    if expected in img_title:
+                                                        return True
+                                            except:
+                                                pass
+                                            return False
+                                        
+                                        download_button = None
+                                        try:
+                                            # 전문 다운로드 버튼 찾기 (href에 fileDown 포함)
+                                            candidates = driver.find_elements(By.CSS_SELECTOR, ".btn_box .kor_btn a[href*='fileDown'], .btnDiv.kor_btn a[href*='fileDown']")
+                                            for candidate in candidates:
+                                                if verify_download_button_by_img_title(candidate, ['전문 다운로드', '전문']):
+                                                    download_button = candidate
+                                                    print(f"  ✓ 전문 다운로드 버튼 발견 (title 검증 통과)")
+                                                    break
+                                        except:
+                                            pass
+                                        
+                                        if not download_button:
+                                            try:
+                                                # XPath로 시도
+                                                candidates = driver.find_elements(By.XPATH, "//div[@class='btn_box']//div[@class='kor_btn']//a[contains(@href, 'fileDown')]")
+                                                for candidate in candidates:
+                                                    if verify_download_button_by_img_title(candidate, ['전문 다운로드', '전문']):
+                                                        download_button = candidate
+                                                        print(f"  ✓ 전문 다운로드 버튼 발견 (XPath, title 검증 통과)")
+                                                        break
+                                            except Exception as e:
+                                                print(f"  ⚠ 다운로드 버튼을 찾을 수 없음: {e}")
+                                        
+                                        # 최후의 수단: 모든 버튼을 검사하여 img title로 찾기
+                                        if not download_button:
+                                            try:
+                                                all_buttons = driver.find_elements(By.CSS_SELECTOR, ".btn_box a, .btnDiv a")
+                                                for btn in all_buttons:
+                                                    if verify_download_button_by_img_title(btn, ['전문 다운로드', '전문']):
+                                                        download_button = btn
+                                                        print(f"  ✓ 전문 다운로드 버튼 발견 (img title로 검색)")
+                                                        break
+                                            except:
+                                                pass
+                                    else:
+                                        # iframe이 있는 경우: 기존 로직 사용
+                                        # 본문 추출 (#lawDetailContent iframe 내부)
+                                        content = detail_soup.get_text(separator='\n', strip=True)
+                                        if content and len(content) > 20:
+                                            # 개행 유지, 4000자 제한
+                                            content = content.replace("\r\n", "\n").replace("\r", "\n")
+                                            max_length = min(4000, content_limit) if content_limit > 0 else 4000
+                                            if len(content) > max_length:
+                                                content = content[:max_length]
+                                            item['content'] = content
+                                            print(f"  ✓ 본문 추출 완료 ({len(content)}자)")
+                                        
+                                        # 날짜 정보 추출 (select 요소에서)
+                                        driver.switch_to.default_content()
+                                        time.sleep(1)
+                                        
+                                        try:
+                                            # select 요소 찾기
+                                            date_select = driver.find_element(By.XPATH, "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[2]/div/select")
+                                            from selenium.webdriver.support.ui import Select
+                                            select = Select(date_select)
+                                            options = select.options
+                                            
+                                            if options:
+                                                # 가장 위에 있는 옵션 (첫 번째) = 최근 개정일
+                                                first_option_text = options[0].text.strip()
+                                                item['revision_date'] = self._normalize_date_text(first_option_text)
+                                                print(f"  ✓ 최근 개정일 추출: {item['revision_date']} (원본: '{first_option_text}')")
+                                                
+                                                # '제정' 텍스트가 있는 옵션 찾기
+                                                for opt in options:
+                                                    opt_text = opt.text.strip()
+                                                    if '제정' in opt_text:
+                                                        item['enactment_date'] = self._normalize_date_text(opt_text)
+                                                        print(f"  ✓ 제정일 추출: {item['enactment_date']} (원본: '{opt_text}')")
+                                                        break
+                                        except Exception as e:
+                                            print(f"  ⚠ 날짜 select 요소를 찾을 수 없음: {e}")
+                                        
+                                        # 파일 다운로드 버튼 찾기 (메인 프레임에서)
+                                        # 버튼 검증 헬퍼 함수: img title로 확인
+                                        def verify_download_button_by_img_title_iframe(element, expected_titles):
+                                            """버튼 내부의 img 태그 title로 검증 (전문 다운로드 또는 개정문 다운로드)"""
+                                            try:
+                                                img = element.find_element(By.TAG_NAME, "img")
+                                                img_title = img.get_attribute('title') or img.get_attribute('alt') or ''
+                                                for expected in expected_titles:
+                                                    if expected in img_title:
+                                                        return True
+                                            except:
+                                                pass
+                                            return False
+                                        
+                                        download_button = None
+                                        try:
+                                            # CSS Selector로 시도
+                                            candidate = driver.find_element(By.CSS_SELECTOR, "#contents_wrap > div > div.btn_box > div > a:nth-child(2)")
+                                            if candidate and verify_download_button_by_img_title_iframe(candidate, ['전문 다운로드', '전문']):
+                                                download_button = candidate
+                                                print(f"  ✓ 전문 다운로드 버튼 발견 (iframe 있는 경우, CSS 셀렉터, title 검증 통과)")
+                                        except:
+                                            try:
+                                                # XPath로 시도
+                                                candidate = driver.find_element(By.XPATH, "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[2]")
+                                                if candidate and verify_download_button_by_img_title_iframe(candidate, ['전문 다운로드', '전문']):
+                                                    download_button = candidate
+                                                    print(f"  ✓ 전문 다운로드 버튼 발견 (iframe 있는 경우, XPath, title 검증 통과)")
+                                            except Exception as e:
+                                                print(f"  ⚠ 다운로드 버튼을 찾을 수 없음: {e}")
+                                        
+                                        # 최후의 수단: 모든 버튼을 검사하여 img title로 찾기
+                                        if not download_button:
+                                            try:
+                                                all_buttons = driver.find_elements(By.CSS_SELECTOR, ".btn_box a, #contents_wrap a")
+                                                for btn in all_buttons:
+                                                    if verify_download_button_by_img_title_iframe(btn, ['전문 다운로드', '전문']):
+                                                        download_button = btn
+                                                        print(f"  ✓ 전문 다운로드 버튼 발견 (img title로 검색)")
+                                                        break
+                                            except:
+                                                pass
                                     
+                                    # 다운로드 버튼 처리 (iframe 유무와 관계없이)
                                     if download_button:
                                         # 버튼의 href 또는 onclick 확인
                                         href = download_button.get_attribute('href') or ''
@@ -1620,10 +2368,45 @@ class FsbScraper(BaseScraper):
                                                 item['download_link'] = urljoin(self.BASE_URL, href) if href else ''
                                             
                                             item['file_name'] = file_name or 'download'
-                                            # 다운로드 버튼 선택자 저장 (나중에 다시 찾기 위해)
-                                            item['download_button_selector'] = "#contents_wrap > div > div.btn_box > div > a:nth-child(2)"
-                                            item['download_button_xpath'] = "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[2]"
+                                            
+                                            # 다운로드 버튼 선택자 저장 (iframe 유무에 따라 다름)
+                                            if has_no_iframe:
+                                                item['download_button_selector'] = ".btn_box .kor_btn a[href*='fileDown']"
+                                                item['download_button_xpath'] = "//div[@class='btn_box']//div[@class='kor_btn']//a[contains(@href, 'fileDown')]"
+                                            else:
+                                                item['download_button_selector'] = "#contents_wrap > div > div.btn_box > div > a:nth-child(2)"
+                                                item['download_button_xpath'] = "/html/body/div[3]/div[3]/div[2]/div[2]/div/div[3]/div/a[2]"
+                                            
                                             print(f"  ✓ 다운로드 버튼 발견: {item['file_name']} (JS: {js_function[:50] if js_function else 'N/A'})")
+                                    
+                                    # 새 창에서 개정이유, 시행일, 공포일, 개정내용 추출
+                                    try:
+                                        print(f"  → 새 창에서 내용 추출 시도 중...")
+                                        new_window_data = self.extract_content_from_new_window(
+                                            driver,
+                                            has_no_iframe=has_no_iframe,
+                                            regulation_name=regulation_name,
+                                            content_limit=content_limit,
+                                        )
+                                        if new_window_data:
+                                            # 새 창에서 추출한 내용 저장
+                                            if new_window_data.get('revision_reason'):
+                                                item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                            if new_window_data.get('enforcement_date'):
+                                                item['enforcement_date'] = new_window_data.get('enforcement_date', '')
+                                            if new_window_data.get('promulgation_date'):
+                                                item['promulgation_date'] = new_window_data.get('promulgation_date', '')
+                                            if new_window_data.get('revision_content'):
+                                                item['revision_content'] = new_window_data.get('revision_content', '')
+                                            
+                                            revision_reason_len = len(item.get('revision_reason', ''))
+                                            print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {item.get('enforcement_date', '없음')}, 공포일: {item.get('promulgation_date', '없음')})")
+                                        else:
+                                            print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다.")
+                                    except Exception as e:
+                                        print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                                        import traceback
+                                        traceback.print_exc()
                                 else:
                                     print(f"  ⚠ 상세 내용 추출 실패")
                             
@@ -1694,21 +2477,52 @@ class FsbScraper(BaseScraper):
                                     
                                     if not download_js_function:
                                         # 다운로드 버튼 다시 찾기 (stale element 방지)
+                                        # 버튼 검증 헬퍼 함수: img title로 확인
+                                        def verify_download_button_title(element, expected_titles):
+                                            """버튼 내부의 img 태그 title로 검증"""
+                                            try:
+                                                img = element.find_element(By.TAG_NAME, "img")
+                                                img_title = img.get_attribute('title') or img.get_attribute('alt') or ''
+                                                for expected in expected_titles:
+                                                    if expected in img_title:
+                                                        return True
+                                            except:
+                                                pass
+                                            return False
+                                        
                                         download_button = None
                                         if download_button_selector:
                                             try:
-                                                download_button = driver.find_element(By.CSS_SELECTOR, download_button_selector)
+                                                candidate = driver.find_element(By.CSS_SELECTOR, download_button_selector)
+                                                if candidate and verify_download_button_title(candidate, ['전문 다운로드', '전문']):
+                                                    download_button = candidate
+                                                    print(f"  ✓ 다운로드 버튼 재확인 (CSS 셀렉터, title 검증 통과)")
                                             except:
                                                 pass
                                         
                                         if not download_button and download_button_xpath:
                                             try:
-                                                download_button = driver.find_element(By.XPATH, download_button_xpath)
+                                                candidate = driver.find_element(By.XPATH, download_button_xpath)
+                                                if candidate and verify_download_button_title(candidate, ['전문 다운로드', '전문']):
+                                                    download_button = candidate
+                                                    print(f"  ✓ 다운로드 버튼 재확인 (XPath, title 검증 통과)")
+                                            except:
+                                                pass
+                                        
+                                        # 셀렉터/XPath로 찾지 못한 경우 img title로 직접 검색
+                                        if not download_button:
+                                            try:
+                                                all_buttons = driver.find_elements(By.CSS_SELECTOR, ".btn_box a, .btnDiv a, #contents_wrap a")
+                                                for btn in all_buttons:
+                                                    if verify_download_button_title(btn, ['전문 다운로드', '전문']):
+                                                        download_button = btn
+                                                        print(f"  ✓ 다운로드 버튼 발견 (img title로 검색)")
+                                                        break
                                             except:
                                                 pass
                                         
                                         if not download_button:
-                                            print(f"  ⚠ 다운로드 버튼을 찾을 수 없음")
+                                            print(f"  ⚠ 다운로드 버튼을 찾을 수 없음 (title 검증 실패)")
                                             continue
                                         
                                         # 버튼 클릭
@@ -1795,12 +2609,13 @@ class FsbScraper(BaseScraper):
                                                 item['regulation_name'] = law_info.get('regulation_name')
                                             if law_info.get('enactment_date'):
                                                 item['enactment_date'] = law_info.get('enactment_date')
-                                            if law_info.get('revision_date'):
+                                            # revision_date는 select에서 추출한 값이 우선 (이미 있으면 덮어쓰지 않음)
+                                            if law_info.get('revision_date') and not item.get('revision_date'):
                                                 item['revision_date'] = law_info.get('revision_date')
                                             
-                                            # 본문 설정 (1000자 제한, 개행 유지)
+                                            # 본문 설정 (4000자 제한, 개행 유지)
                                             content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                            max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                            max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                             if len(content) > max_length:
                                                 item['content'] = content[:max_length]
                                             else:
@@ -1839,12 +2654,13 @@ class FsbScraper(BaseScraper):
                                                 item['regulation_name'] = law_info.get('regulation_name')
                                             if law_info.get('enactment_date'):
                                                 item['enactment_date'] = law_info.get('enactment_date')
-                                            if law_info.get('revision_date'):
+                                            # revision_date는 select에서 추출한 값이 우선 (이미 있으면 덮어쓰지 않음)
+                                            if law_info.get('revision_date') and not item.get('revision_date'):
                                                 item['revision_date'] = law_info.get('revision_date')
                                             
-                                            # 본문 설정 (1000자 제한, 개행 유지)
+                                            # 본문 설정 (4000자 제한, 개행 유지)
                                             content = file_content.replace("\r\n", "\n").replace("\r", "\n")
-                                            max_length = min(1000, content_limit) if content_limit > 0 else 1000
+                                            max_length = min(4000, content_limit) if content_limit > 0 else 4000
                                             if len(content) > max_length:
                                                 item['content'] = content[:max_length]
                                             else:
@@ -1955,6 +2771,10 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
             '제정일': scraper.normalize_date_format(item.get('enactment_date', '')),
             '최근 개정일': scraper.normalize_date_format(item.get('revision_date', '')),
             '소관부서': item.get('department', ''),
+            '개정이유': item.get('revision_reason', ''),
+            '개정내용': item.get('revision_content', ''),
+            '시행일': item.get('enforcement_date', ''),
+            '공포일': item.get('promulgation_date', ''),
             '파일 이름': file_name
         }
         law_results.append(law_item)
@@ -1983,18 +2803,18 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
     os.makedirs(csv_dir, exist_ok=True)
     csv_path = os.path.join(csv_dir, 'fsb_scraper.csv')
     
-    headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 이름"]
+    headers = ["구분", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "개정이유", "개정내용", "시행일", "공포일", "파일 이름"]
     
     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
         
         for law_item in law_results:
-            # 본문 내용 처리 (개행 유지, 1000자 제한)
+            # 본문 내용 처리 (개행 유지, 4000자 제한)
             content = law_item.get('본문', '') or ''
             content = content.replace("\r\n", "\n").replace("\r", "\n")
-            if len(content) > 1000:
-                content = content[:1000]
+            if len(content) > 4000:
+                content = content[:4000]
             
             csv_item = law_item.copy()
             csv_item['본문'] = content
