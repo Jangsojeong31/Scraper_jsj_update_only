@@ -171,6 +171,9 @@ from Law_LegNotice_Scraper.law_legnotice_scraper_v2 import law_legnotice_health_
 from Law_Scraper.law_scraper_v2 import law_health_check
 from Moleg_Scraper.moleg_scraper_v2 import moleg_health_check
 
+#보도자료
+from PressReleases_Scraper.scrape_fss_press_releases_v2 import fss_press_releases_health_check
+
 # ==================================================
 # Health Check 목록
 # ==================================================
@@ -201,6 +204,7 @@ HEALTH_CHECKS = [
     law_legnotice_health_check,
     law_health_check,
     moleg_health_check,
+    fss_press_releases_health_check,
 ]
 
 # ==================================================

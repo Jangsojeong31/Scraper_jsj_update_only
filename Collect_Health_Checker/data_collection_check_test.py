@@ -131,6 +131,7 @@ from BOK_Scraper.bok_scraper_v2 import bok_law_regulations_health_check
 
 # 여신금융협회
 from CREFIA_LegNotice_Scraper.crefia_legnotice_scraper_v2 import crefia_legnotice_health_check
+from CREFIA_Scraper.crefia_scraper_v2 import crefia_health_check
 
 # 저축은행중앙회
 from FSB_Scraper.fsb_scraper_v2 import fsb_health_check
@@ -170,35 +171,41 @@ from Law_LegNotice_Scraper.law_legnotice_scraper_v2 import law_legnotice_health_
 from Law_Scraper.law_scraper_v2 import law_health_check
 from Moleg_Scraper.moleg_scraper_v2 import moleg_health_check
 
+#보도자료
+from PressReleases_Scraper.scrape_fss_press_releases_v2 import fss_press_releases_health_check
+
 # ==================================================
 # Health Check 목록
 # ==================================================
 HEALTH_CHECKS = [
-    bok_legnotice_health_check,
-    bok_law_regulations_health_check,
-    crefia_legnotice_health_check,
-    fsb_health_check,
-    fsc_guideline_health_check,
-    fsc_legnotice_health_check,
-    fss_admin_guidance_health_check,
-    fss_admin_health_check,
-    fss_guideline_check,
-    fss_legnotice_health_check,
-    fss_mngtnotice_check,
-    fss_sanctions_check,
-    fss_menual_health_check,
-    kfb_committee_health_check,
-    kfb_finlaw_health_check,
-    kfb_legnotice_health_check,
-    kfb_health_check,
-    kofia_legnotice_health_check,
-    kofia_health_check,
-    kofiu_health_check,
-    krx_legnotice_health_check,
-    krx_health_check,
-    law_legnotice_health_check,
-    law_health_check,
-    moleg_health_check,
+    # bok_legnotice_health_check,
+    # bok_law_regulations_health_check,
+    # crefia_legnotice_health_check,
+    crefia_health_check,
+    # fsb_health_check,
+    # fsc_guideline_health_check,
+    # fsc_legnotice_health_check,
+    # fss_admin_guidance_health_check,
+    # fss_admin_health_check,
+    # fss_guideline_check,
+    # fss_legnotice_health_check,
+    # fss_mngtnotice_check,
+    # fss_sanctions_check,
+    # fss_menual_health_check,
+    # kfb_committee_health_check,
+    # kfb_finlaw_health_check,
+    # kfb_legnotice_health_check,
+    # kfb_health_check,
+    # kofia_legnotice_health_check,
+    # kofia_health_check,
+    # kofiu_health_check,
+    # krx_legnotice_health_check,
+    # krx_health_check,
+    # law_legnotice_health_check,
+    # law_health_check,
+    # moleg_health_check,
+    fss_press_releases_health_check,
+    
 ]
 
 # ==================================================
