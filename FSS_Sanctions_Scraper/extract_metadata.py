@@ -25,7 +25,8 @@ def collapse_split_syllables(text):
 def remove_page_numbers(text):
     """
     텍스트에서 페이지 번호 패턴 제거
-    예: "- 1 -", "- 2 -", "- 10 -" 등
+    예: "- 1 -", "- 2 -", "- 10 -", "-1-", "-2-" 등
+    페이지 번호는 \n으로 대체됨
     
     Args:
         text: 원본 텍스트
@@ -37,10 +38,21 @@ def remove_page_numbers(text):
         return text
     
     # 페이지 번호 패턴: "- 숫자 -" (앞뒤 공백 포함)
-    # 줄 전체가 페이지 번호인 경우 해당 줄 제거
+    # 줄 전체가 페이지 번호인 경우 해당 줄을 \n으로 대체
     text = re.sub(r'\n\s*-\s*\d+\s*-\s*\n', '\n', text)
-    # 문장 중간에 있는 페이지 번호도 제거
-    text = re.sub(r'\s*-\s*\d+\s*-\s*', ' ', text)
+    # 줄 시작에 페이지 번호가 있는 경우 (줄 끝까지)
+    text = re.sub(r'\n\s*-\s*\d+\s*-\s*', '\n', text)
+    # 줄 끝에 페이지 번호가 있는 경우 (줄 시작부터)
+    text = re.sub(r'\s*-\s*\d+\s*-\s*\n', '\n', text)
+    
+    # 문장 중간에 있는 페이지 번호도 \n으로 대체
+    text = re.sub(r'\s*-\s*\d+\s*-\s*', '\n', text)  # "- 1 -" 형식
+    text = re.sub(r'\s*-\d+-\s*', '\n', text)  # "-1-" 형식 (공백 없음)
+    text = re.sub(r'\s*-\s*\d+-\s*', '\n', text)  # "- 1-" 형식
+    text = re.sub(r'\s*-\d+\s*-\s*', '\n', text)  # "-1 -" 형식
+    
+    # 연속된 빈 줄 정리 (페이지 번호 제거 후 생길 수 있는 빈 줄 정리)
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # 3개 이상 연속된 줄바꿈을 2개로
     
     return text.strip()
 
@@ -586,8 +598,18 @@ def _extract_incidents_from_section(section_text):
             
             # 새 사건 시작
             # parent_title이 있으면 "상위제목 - 하위제목" 형식으로, 없으면 하위제목만
+            # 단, "문책사항", "책임사항", "자율처리 필요사항", "경영유의", "개선사항" 등 특수 키워드는 접두사로 사용하지 않음
             if parent_title:
-                current_title = f"{parent_title} - {sub_title}"
+                # 특수 키워드 체크 (공백 제거 후 비교)
+                parent_title_normalized = re.sub(r'\s+', '', parent_title)
+                special_keywords = ['문책사항', '책임사항', '자율처리필요사항', '경영유의', '경영유의사항', '개선사항']
+                is_special_keyword = any(keyword in parent_title_normalized for keyword in special_keywords)
+                
+                if is_special_keyword:
+                    # 특수 키워드는 접두사로 사용하지 않고 하위 제목만 사용
+                    current_title = sub_title
+                else:
+                    current_title = f"{parent_title} - {sub_title}"
             else:
                 current_title = sub_title
             current_content = []
@@ -695,13 +717,29 @@ def format_date_to_iso(date_str):
     날짜 문자열을 YYYY-MM-DD 형식으로 변환
     
     Args:
-        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일")
+        date_str: 다양한 형식의 날짜 문자열 (예: "2024. 5. 15.", "2025-10-20", "2024년 5월 15일", "20251217")
         
     Returns:
         str: YYYY-MM-DD 형식의 날짜 문자열 (변환 실패 시 원본 반환)
     """
     if not date_str:
         return date_str
+    
+    # 8자리 숫자 형식 (YYYYMMDD) 처리: "20251217" -> "2025-12-17"
+    if re.match(r'^\d{8}$', date_str):
+        try:
+            year = date_str[:4]
+            month = date_str[4:6]
+            day = date_str[6:8]
+            year_int = int(year)
+            month_int = int(month)
+            day_int = int(day)
+            
+            # 기본적인 유효성 검사
+            if 1900 <= year_int <= 2100 and 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                return f"{year}-{month}-{day}"
+        except ValueError:
+            pass
     
     # 숫자만 추출 (년, 월, 일)
     numbers = re.findall(r'\d+', date_str)

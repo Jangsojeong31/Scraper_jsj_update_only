@@ -35,6 +35,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from common.base_scraper import BaseScraper
+from common.file_comparator import FileComparator
 from common.file_extractor import FileExtractor
 from data_scraper import extract_data_from_text, extract_dates_from_filename
 
@@ -95,39 +96,104 @@ class CrefiaScraper(BaseScraper):
             clean_downloads: 크롤링 시작 전 downloads 폴더를 정리할지 여부
         """
         super().__init__(delay)
-        self.download_dir = os.path.join("output", "downloads")
-        os.makedirs(self.download_dir, exist_ok=True)
-        # BaseScraper의 session을 FileExtractor에 전달
+        # 출력 디렉토리 설정
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "output"
+        (self.output_dir / "downloads").mkdir(parents=True, exist_ok=True)
+        # previous와 current 디렉토리 설정
+        self.previous_dir = self.output_dir / "downloads" / "previous"
+        self.current_dir = self.output_dir / "downloads" / "current"
+        self.previous_dir.mkdir(parents=True, exist_ok=True)
+        self.current_dir.mkdir(parents=True, exist_ok=True)
+        # 하위 호환성을 위해 download_dir도 유지 (current_dir을 가리킴)
+        self.download_dir = str(self.current_dir)
+        # BaseScraper의 session을 FileExtractor에 전달 (current 디렉토리 사용)
         self.file_extractor = FileExtractor(
-            download_dir=self.download_dir,
+            download_dir=str(self.current_dir),
             session=self.session
         )
+        # 파일 비교기 초기화
+        self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
         self.cleanup_downloads = cleanup_downloads
         self.clean_downloads = clean_downloads
         
         if self.clean_downloads:
             self._clean_downloads_folder()
         
-        print("다운로드 폴더 내용:", os.listdir(self.download_dir))
+        print("다운로드 폴더 내용:", os.listdir(self.current_dir))
     
     def _clean_downloads_folder(self):
-        """downloads 폴더의 모든 파일 삭제"""
+        """downloads 폴더의 모든 파일 삭제 (current 디렉토리만)"""
         try:
-            files = os.listdir(self.download_dir)
-            if files:
-                print(f"🗑️ downloads 폴더 정리 중... ({len(files)}개 파일)")
-                for file in files:
-                    file_path = os.path.join(self.download_dir, file)
-                    if os.path.isfile(file_path):
-                        try:
-                            os.remove(file_path)
-                        except Exception as e:
-                            print(f"  ⚠ 파일 삭제 실패: {file} - {e}")
-                print("✅ downloads 폴더 정리 완료")
+            files = list(self.current_dir.glob("*"))
+            file_list = [f for f in files if f.is_file()]
+            if file_list:
+                print(f"🗑️ downloads/current 폴더 정리 중... ({len(file_list)}개 파일)")
+                for file_path in file_list:
+                    try:
+                        file_path.unlink()
+                    except Exception as e:
+                        print(f"  ⚠ 파일 삭제 실패: {file_path.name} - {e}")
+                print("✅ downloads/current 폴더 정리 완료")
             else:
-                print("📂 downloads 폴더가 비어있습니다.")
+                print("📂 downloads/current 폴더가 비어있습니다.")
         except Exception as e:
             print(f"⚠ downloads 폴더 정리 중 오류: {e}")
+    
+    def _backup_current_to_previous(self) -> None:
+        """스크래퍼 시작 시 current 디렉토리를 previous로 백업
+        다음 실행 시 비교를 위해 현재 버전을 이전 버전으로 만듦
+        """
+        if not self.current_dir.exists():
+            return
+        
+        # current 디렉토리에 파일이 있는지 확인
+        files_in_current = [f for f in self.current_dir.glob("*") if f.is_file()]
+        if not files_in_current:
+            return
+        
+        print(f"  → 이전 버전 백업 중... (current → previous)")
+        
+        # previous 디렉토리 비우기
+        import shutil
+        if self.previous_dir.exists():
+            for item in self.previous_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+        
+        # current의 파일들을 previous로 복사
+        for file_path in files_in_current:
+            shutil.copy2(file_path, self.previous_dir / file_path.name)
+        
+        # current 디렉토리 비우기 (새 파일만 남기기 위해)
+        for file_path in files_in_current:
+            file_path.unlink()
+        
+        print(f"  ✓ 이전 버전 백업 완료 ({len(files_in_current)}개 파일)")
+    
+    def _clear_diffs_directory(self) -> None:
+        """스크래퍼 시작 시 diffs 디렉토리 비우기
+        이전 실행의 diff 파일이 남아있어 혼동을 방지하기 위해
+        """
+        diffs_dir = self.output_dir / "downloads" / "diffs"
+        if not diffs_dir.exists():
+            return
+        
+        import shutil
+        diff_files = list(diffs_dir.glob("*"))
+        if not diff_files:
+            return
+        
+        print(f"  → 이전 diff 파일 정리 중...")
+        for item in diff_files:
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+        
+        print(f"  ✓ diff 파일 정리 완료 ({len(diff_files)}개 파일)")
     
     # ---------------- 목록 추출 ----------------
     def extract_list_items(
@@ -286,11 +352,14 @@ class CrefiaScraper(BaseScraper):
 
                         # 방법 1: URL로 직접 다운로드 시도
                         if download_url and filename:
-                            filepath = os.path.join(self.download_dir, filename)
+                            # current 디렉토리에 파일 저장
+                            filepath = self.current_dir / filename
+                            # previous 디렉토리에서 이전 파일 경로 확인
+                            previous_filepath = self.previous_dir / filename
                             
-                            # 이미 같은 파일이 존재하는지 확인
-                            if os.path.exists(filepath):
-                                print(f"  ⏭️ 파일이 이미 존재합니다: {filename} (건너뜀)")
+                            # 이미 current에 같은 파일이 존재하는지 확인
+                            if filepath.exists():
+                                print(f"  ⏭️ 파일이 이미 current에 존재합니다: {filename} (건너뜀)")
                                 downloaded_file = filename
                                 if not file_name:
                                     file_name = filename
@@ -303,9 +372,44 @@ class CrefiaScraper(BaseScraper):
                                     response = requests.get(download_url, timeout=15)
                                     
                                     if response.status_code == 200:
-                                        with open(filepath, "wb") as f:
+                                        # 임시 파일명으로 다운로드 (비교 후 교체)
+                                        temp_filepath = self.current_dir / f".tmp_{filename}"
+                                        with open(temp_filepath, "wb") as f:
                                             f.write(response.content)
-                                        print(f"  ✅ 파일 저장 완료: {filepath}")
+                                        print(f"  ✅ 파일 다운로드 완료: {temp_filepath}")
+                                        
+                                        # 기존 파일과 비교
+                                        comparison_result = None
+                                        if previous_filepath.exists():
+                                            print(f"  → 이전 파일과 비교 중...")
+                                            comparison_result = self.file_comparator.compare_and_report(
+                                                str(temp_filepath),
+                                                str(previous_filepath),
+                                                save_diff=True
+                                            )
+                                            
+                                            if comparison_result['changed']:
+                                                print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                                                # 변경된 경우 새 파일로 교체
+                                                temp_filepath.replace(filepath)
+                                                print(f"  ✅ 파일 교체 완료: {filepath}")
+                                            else:
+                                                print(f"  ✓ 파일 동일 (변경 없음)")
+                                                # 동일한 경우 임시 파일 삭제하고 previous에서 current로 복사
+                                                try:
+                                                    temp_filepath.unlink()
+                                                    print(f"  🗑️ 동일한 파일이므로 임시 파일 삭제")
+                                                except Exception as e:
+                                                    print(f"  ⚠ 임시 파일 삭제 실패: {e}")
+                                                # previous에서 current로 복사 (동일하지만 current에 유지)
+                                                import shutil
+                                                shutil.copy2(previous_filepath, filepath)
+                                                print(f"  ✓ 이전 파일을 current로 복사")
+                                        else:
+                                            print(f"  ✓ 새 파일 (이전 파일 없음)")
+                                            # 새 파일인 경우 임시 파일을 정식 파일명으로 변경
+                                            temp_filepath.replace(filepath)
+                                        
                                         downloaded_file = filename
                                         if not file_name:
                                             file_name = filename
@@ -318,10 +422,10 @@ class CrefiaScraper(BaseScraper):
                         if not downloaded_file:
                             print(f"📥 방법 2: driver 클릭으로 다운로드: {text}")
                             
-                            # 다운로드 감지
-                            download_dir_abs = os.path.abspath(self.download_dir)
+                            # 다운로드 감지 (current 디렉토리 사용)
+                            download_dir_abs = os.path.abspath(str(self.current_dir))
                             print(f"  📂 다운로드 디렉토리: {download_dir_abs}")
-                            before = set(os.listdir(self.download_dir))
+                            before = set(f.name for f in self.current_dir.glob("*") if f.is_file())
                             print(f"  📋 다운로드 전 파일 수: {len(before)}개")
                             
                             # 클릭 전 현재 URL 저장
@@ -347,27 +451,29 @@ class CrefiaScraper(BaseScraper):
                             crdownload_count = 0
 
                             while time.time() - start_time < timeout:
-                                after = set(os.listdir(self.download_dir))
+                                after = set(f.name for f in self.current_dir.glob("*") if f.is_file())
                                 new_files = after - before
 
-                            if new_files:
-                                for new_file in new_files:
-                                    print(f"  🔍 새 파일 발견: {new_file}")
-                                    if new_file.endswith(".crdownload"):
-                                        crdownload_count += 1
-                                        print(f"  ⏳ 다운로드 진행 중... ({crdownload_count}초)")
-                                    else:
-                                        # 이미 같은 파일명이 존재하는지 확인
-                                        new_file_path = os.path.join(self.download_dir, new_file)
-                                        if filename and os.path.exists(os.path.join(self.download_dir, filename)):
-                                            # 기대한 파일명과 다를 수 있으므로, 새로 다운로드된 파일은 유지
-                                            downloaded_file = new_file
-                                            print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
+                                if new_files:
+                                    for new_file in new_files:
+                                        print(f"  🔍 새 파일 발견: {new_file}")
+                                        if new_file.endswith(".crdownload"):
+                                            crdownload_count += 1
+                                            print(f"  ⏳ 다운로드 진행 중... ({crdownload_count}초)")
                                         else:
-                                            downloaded_file = new_file
-                                            print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
-                                        break
-                                    
+                                            # 이미 같은 파일명이 존재하는지 확인
+                                            new_file_path = self.current_dir / new_file
+                                            if filename and (self.current_dir / filename).exists():
+                                                # 기대한 파일명과 다를 수 있으므로, 새로 다운로드된 파일은 유지
+                                                downloaded_file = new_file
+                                                print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
+                                            else:
+                                                downloaded_file = new_file
+                                                print(f"  ✅ 다운로드 완료 파일: {downloaded_file}")
+                                            break
+                                        
+                                        if downloaded_file:
+                                            break
                                     if downloaded_file:
                                         break
                                 else:
@@ -382,17 +488,70 @@ class CrefiaScraper(BaseScraper):
                                 print(f"  📋 다운로드 후 파일 수: {len(after) if 'after' in locals() else len(before)}개")
                                 # .crdownload 파일이 남아있는지 확인
                                 crdownload_files = [
-                                    f for f in os.listdir(self.download_dir)
-                                    if f.endswith(".crdownload")
+                                    f.name for f in self.current_dir.glob("*.crdownload") if f.is_file()
                                 ]
                                 if crdownload_files:
                                     print(f"  ⚠ 미완료 다운로드 파일 발견: {crdownload_files}")
                                 continue
 
-                            filepath = os.path.join(self.download_dir, downloaded_file)
+                            filepath = self.current_dir / downloaded_file
                             # onclick에서 추출한 파일명이 없으면 다운로드된 파일명 사용
                             if not file_name:
                                 file_name = downloaded_file
+                            
+                            # 기존 파일과 비교
+                            comparison_result = None
+                            # 기대한 파일명이 있으면 그것으로 비교, 없으면 다운로드된 파일명으로 비교
+                            compare_filename = filename if filename else downloaded_file
+                            previous_filepath = self.previous_dir / compare_filename
+                            
+                            # 기존 파일이 previous에 존재하는지 확인
+                            if previous_filepath.exists():
+                                print(f"  → 이전 파일과 비교 중...")
+                                # 임시 파일명으로 새 파일을 저장하여 비교
+                                temp_filepath = self.current_dir / f".tmp_{downloaded_file}"
+                                try:
+                                    import shutil
+                                    shutil.copy2(filepath, temp_filepath)
+                                    comparison_result = self.file_comparator.compare_and_report(
+                                        str(temp_filepath),
+                                        str(previous_filepath),
+                                        save_diff=True
+                                    )
+                                    
+                                    if comparison_result['changed']:
+                                        print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                                        # 변경된 경우 새 파일을 current에 유지
+                                        temp_filepath.unlink()  # 임시 파일 삭제
+                                        # filepath는 이미 current에 있음
+                                    else:
+                                        print(f"  ✓ 파일 동일 (변경 없음)")
+                                        # 동일한 경우 새로 다운로드한 파일 삭제하고 previous에서 current로 복사
+                                        try:
+                                            filepath.unlink()
+                                            print(f"  🗑️ 동일한 파일이므로 새 파일 삭제")
+                                            # previous에서 current로 복사 (동일하지만 current에 유지)
+                                            import shutil
+                                            shutil.copy2(previous_filepath, filepath)
+                                            print(f"  ✓ 이전 파일을 current로 복사")
+                                        except Exception as e:
+                                            print(f"  ⚠ 파일 처리 실패: {e}")
+                                    # 임시 파일 정리
+                                    if temp_filepath.exists():
+                                        try:
+                                            temp_filepath.unlink()
+                                        except:
+                                            pass
+                                except Exception as e:
+                                    print(f"  ⚠ 파일 비교 중 오류: {e}")
+                                    if temp_filepath.exists():
+                                        try:
+                                            temp_filepath.unlink()
+                                        except:
+                                            pass
+                            else:
+                                print(f"  ✓ 새 파일 (이전 파일 없음)")
+                            
                             print(f"  ✅ driver 클릭 다운로드 완료: {filepath}")
                             print(f"  📝 저장할 파일명: {file_name}")
 
@@ -413,7 +572,9 @@ class CrefiaScraper(BaseScraper):
                                 print(f"  📅 최근 개정일 추출 (파일명): {filename_revision}")
                         
                         try:
-                            full_content = self.file_extractor.extract_hwp_content(filepath)
+                            # filepath가 Path 객체인 경우 문자열로 변환
+                            filepath_str = str(filepath) if isinstance(filepath, Path) else filepath
+                            full_content = self.file_extractor.extract_hwp_content(filepath_str)
                             original_length = len(full_content)
                             
                             # 2단계: 파일 내용에서 데이터 추출 (앞부분 4000자 사용)
@@ -470,7 +631,11 @@ class CrefiaScraper(BaseScraper):
                         # 다운로드된 파일 정리 (옵션)
                         if self.cleanup_downloads:
                             try:
-                                os.remove(filepath)
+                                # filepath가 Path 객체인 경우 처리
+                                if isinstance(filepath, Path):
+                                    filepath.unlink()
+                                else:
+                                    os.remove(filepath)
                                 print(f"  🗑️ 다운로드 파일 삭제: {file_name}")
                             except Exception as e:
                                 print(f"  ⚠ 파일 삭제 실패: {e}")
@@ -503,17 +668,22 @@ class CrefiaScraper(BaseScraper):
         return results
     
     # ---------------- 크롤링 ----------------
-    def crawl_self_regulation_status(self, limit: int = 0, headless: bool = False) -> List[Dict]:
+    def crawl_self_regulation_status(self, limit: int = 0, headless: bool = True) -> List[Dict]:
         """
         자율규제 현황 크롤링
         
         Args:
             limit: 가져올 개수 제한 (0=전체)
-            headless: 헤드리스 모드 사용 여부 (다운로드 시 False 권장)
+            headless: 헤드리스 모드 사용 여부 (기본값: True, 화면 숨김)
         """
+        # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
+        self._backup_current_to_previous()
+        # 이전 실행의 diff 파일 정리
+        self._clear_diffs_directory()
+        
         driver: Optional[webdriver.Chrome] = None
         try:
-            driver = init_selenium(self.download_dir, headless=headless, scraper=self)
+            driver = init_selenium(str(self.current_dir), headless=headless, scraper=self)
             print("Selenium 드라이버 생성 완료")
         except Exception as exc:
             print(f"⚠ Selenium 드라이버 생성 실패: {exc}")
@@ -608,9 +778,14 @@ if __name__ == "__main__":
         help="크롤링 시작 전 downloads 폴더의 모든 파일 삭제"
     )
     
+    parser.add_argument(
+        "--no-headless", action="store_true",
+        help="헤드리스 모드 비활성화 (크롬 화면 표시, 기본값: headless 모드)"
+    )
+    
     args = parser.parse_args()
     
     crawler = CrefiaScraper(cleanup_downloads=args.cleanup, clean_downloads=args.clean_downloads)
-    results = crawler.crawl_self_regulation_status(limit=args.limit)
+    results = crawler.crawl_self_regulation_status(limit=args.limit, headless=not args.no_headless)
     print(f"\n추출된 데이터: {len(results)}개")
     save_crefia_results(results)

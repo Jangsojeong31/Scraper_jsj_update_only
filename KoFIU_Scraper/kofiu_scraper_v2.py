@@ -121,7 +121,8 @@ class KoFIUScraperV2:
         """
         금융회사명으로 업종 조회
         - 정확한 매칭 우선
-        - 부분 매칭 시도 (회사명에 포함되어 있는 경우)
+        - 법인 형태 정규화 후 매칭
+        - 부분 매칭 시도 (최소 3자 이상, 회사명에 포함되어 있는 경우)
         - 매칭되지 않으면 '기타' 반환
         """
         if not institution_name:
@@ -132,21 +133,35 @@ class KoFIUScraperV2:
         if clean_name in self.industry_map:
             return self.industry_map[clean_name]
         
-        # 특수문자 제거 후 매칭 (예: * 제거)
-        clean_name_no_special = re.sub(r'[*\s]', '', clean_name)
+        # 법인 형태 정규화 함수
+        def normalize_company_name(name):
+            """법인 형태 제거 후 정규화"""
+            # (주), ㈜, 주식회사 등 제거
+            name = re.sub(r'\(주\)|㈜|주식회사', '', name)
+            # 특수문자 및 공백 제거
+            name = re.sub(r'[*\s]', '', name)
+            return name
+        
+        # 법인 형태 제거 후 매칭
+        clean_name_normalized = normalize_company_name(clean_name)
         for company, industry in self.industry_map.items():
-            company_clean = re.sub(r'[*\s]', '', company)
-            if clean_name_no_special == company_clean:
+            company_normalized = normalize_company_name(company)
+            if clean_name_normalized == company_normalized:
                 return industry
         
-        # 부분 매칭 시도 (금융회사명이 매핑 테이블의 회사명에 포함되거나 그 반대)
-        for company, industry in self.industry_map.items():
-            # 금융회사명이 회사명을 포함하는 경우
-            if company in clean_name:
-                return industry
-            # 회사명이 금융회사명을 포함하는 경우
-            if clean_name in company:
-                return industry
+        # 부분 매칭 시도 (최소 3자 이상인 경우만)
+        # 금융회사명이 3자 미만이면 부분 매칭 시도하지 않음
+        if len(clean_name_normalized) >= 3:
+            for company, industry in self.industry_map.items():
+                company_normalized = normalize_company_name(company)
+                # 회사명도 3자 이상인 경우만 매칭 시도
+                if len(company_normalized) >= 3:
+                    # 금융회사명이 회사명을 포함하는 경우
+                    if company_normalized in clean_name_normalized:
+                        return industry
+                    # 회사명이 금융회사명을 포함하는 경우
+                    if clean_name_normalized in company_normalized:
+                        return industry
         
         return '기타'
     
@@ -215,7 +230,13 @@ class KoFIUScraperV2:
         parsed = urlparse(url)
         path = parsed.path.lower()
         query = parsed.query.lower()
-        return path.endswith('.pdf') or '.pdf' in query
+        # .pdf 확장자 체크
+        if path.endswith('.pdf') or '.pdf' in query:
+            return True
+        # downloadBoard.do 같은 다운로드 엔드포인트도 PDF로 인식
+        if 'downloadboard.do' in path:
+            return True
+        return False
 
     def derive_filename(self, url: str, link_text: str = "") -> str:
         """URL과 링크 텍스트에서 파일명 추출"""
@@ -253,7 +274,7 @@ class KoFIUScraperV2:
             force_ocr: True면 무조건 OCR 시도
         
         Returns:
-            tuple: (추출된 내용, 문서유형, 파일경로)
+            tuple: (추출된 내용, 문서유형, 파일다운로드URL)
         """
         try:
             # PDF URL인 경우 직접 다운로드
@@ -272,12 +293,10 @@ class KoFIUScraperV2:
                     # FileExtractor로 PDF 내용 추출
                     content = self.file_extractor.extract_pdf_content(file_path)
                     doc_type = 'PDF-텍스트'
-                    ocr_attempted = False
                     
                     # force_ocr가 True이거나 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                     if force_ocr or not content or len(content.strip()) < self.min_text_length:
                         if self.ocr_extractor.is_available():
-                            ocr_attempted = True
                             ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
                             if ocr_text:
                                 # OCR 결과 후처리 (띄어쓰기 보존)
@@ -288,23 +307,20 @@ class KoFIUScraperV2:
                                 print(f"  ✗ OCR 추출 실패 (결과 없음)")
                         else:
                             print(f"  ✗ OCR 사용 불가")
-                    else:
-                        # 일반 텍스트 추출 성공 시에도 후처리 적용 (OCR 오류 패턴이 있을 수 있음)
-                        content = process_ocr_text(content, preserve_spacing=True)
+                    
+                    # 임시 파일 삭제
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
                     
                     if content and content.strip():
                         print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                        # 파일 경로 반환 (나중에 OCR 재시도 시 필요할 수 있음)
-                        return content, doc_type, file_path
+                        return content, doc_type, detail_url
                     else:
-                        # 임시 파일 삭제
-                        try:
-                            os.remove(file_path)
-                        except:
-                            pass
-                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', None
+                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', detail_url
                 else:
-                    return "[파일 다운로드 실패]", '오류'
+                    return "[파일 다운로드 실패]", '오류', detail_url
             
             # 일반 페이지에서 첨부파일 링크 찾기
             response = self.get_page(detail_url)
@@ -346,12 +362,10 @@ class KoFIUScraperV2:
                         if file_path.lower().endswith('.pdf'):
                             content = self.file_extractor.extract_pdf_content(file_path)
                             doc_type = 'PDF-텍스트'
-                            ocr_attempted = False
                             
                             # force_ocr가 True이거나 텍스트 추출 실패 또는 너무 짧으면 OCR 시도
                             if force_ocr or not content or len(content.strip()) < self.min_text_length:
                                 if self.ocr_extractor.is_available():
-                                    ocr_attempted = True
                                     ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
                                     if ocr_text:
                                         # OCR 결과 후처리 (띄어쓰기 보존)
@@ -362,21 +376,18 @@ class KoFIUScraperV2:
                                         print(f"  ✗ OCR 추출 실패 (결과 없음)")
                                 else:
                                     print(f"  ✗ OCR 사용 불가")
-                            else:
-                                # 일반 텍스트 추출 성공 시에도 후처리 적용 (OCR 오류 패턴이 있을 수 있음)
-                                content = process_ocr_text(content, preserve_spacing=True)
+                            
+                            # 임시 파일 삭제
+                            try:
+                                os.remove(file_path)
+                            except:
+                                pass
                             
                             if content and content.strip():
                                 print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                                # 파일 경로 반환 (나중에 OCR 재시도 시 필요할 수 있음)
-                                return content, doc_type, file_path
+                                return content, doc_type, file_url
                             else:
-                                # 임시 파일 삭제
-                                try:
-                                    os.remove(file_path)
-                                except:
-                                    pass
-                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', None
+                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url
                         else:
                             # 임시 파일 삭제
                             try:
@@ -386,13 +397,13 @@ class KoFIUScraperV2:
                             return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일'
                     break
 
-            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', None
+            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', ''
 
         except Exception as e:
             print(f"  첨부파일 추출 중 오류: {e}")
             import traceback
             traceback.print_exc()
-            return f"[오류: {str(e)}]", '오류', None
+            return f"[오류: {str(e)}]", '오류', ''
 
     def scrape_list_page(self, page_index):
         """목록 페이지 스크래핑 (Selenium 사용)"""
@@ -438,6 +449,14 @@ class KoFIUScraperV2:
                     title_link = subject_p.find('a') if subject_p else None
                     title = title_link.get_text(strip=True) if title_link else ""
                     
+                    # 제목에서 금융회사명 추출 (형식: "{금융회사명} 제재내용 공개안")
+                    institution_from_title = ""
+                    if title:
+                        # "제재내용 공개안" 또는 "제재" 앞까지 추출
+                        match = re.match(r'^(.+?)\s+제재', title)
+                        if match:
+                            institution_from_title = match.group(1).strip()
+                    
                     # 날짜 추출 (첫 번째 li_date가 게시일)
                     date_spans = li.find_all('span', class_='li_date')
                     post_date = ""
@@ -463,10 +482,11 @@ class KoFIUScraperV2:
                                 pdf_filename = pdf_link.get_text(strip=True)
                     
                     items.append({
-                        '상세페이지URL': pdf_url,
+                        '첨부파일URL': pdf_url,
                         '_pdf_filename': pdf_filename,
                         '_link_text': title,
-                        '_post_date': post_date
+                        '_post_date': post_date,
+                        '_institution_from_title': institution_from_title  # 목록에서 추출한 금융회사명
                     })
                     
                 except Exception as e:
@@ -615,7 +635,7 @@ class KoFIUScraperV2:
                     # 범위 내 항목 발견
                     page_has_valid_items = True
                     
-                pdf_url = item.get('상세페이지URL')
+                pdf_url = item.get('첨부파일URL')
                 if pdf_url and pdf_url in seen_urls:
                     continue
                 if pdf_url:
@@ -689,14 +709,16 @@ class KoFIUScraperV2:
             link_text = item.pop('_link_text', '')
             pdf_filename = item.pop('_pdf_filename', '')
             item.pop('_post_date', None)  # 임시 필드 제거
+            institution_from_title = item.pop('_institution_from_title', '')  # 목록에서 추출한 금융회사명
             
             print(f"\n[{idx}/{len(all_items)}] {pdf_filename or link_text or 'N/A'} 처리 중...")
             
-            if item.get('상세페이지URL'):
-                attachment_content, doc_type, file_path = self.extract_attachment_content(
-                    item['상세페이지URL'], 
+            if item.get('첨부파일URL'):
+                attachment_content, doc_type, file_download_url = self.extract_attachment_content(
+                    item['첨부파일URL'], 
                     pdf_filename or link_text
                 )
+                item['파일다운로드URL'] = file_download_url
                 item['제재조치내용'] = attachment_content
                 
                 # OCR 추출 여부 설정
@@ -704,17 +726,29 @@ class KoFIUScraperV2:
                 item['OCR추출여부'] = '예' if is_ocr else '아니오'
                 
                 # PDF 내용에서 금융회사명, 제재조치일, 제재내용 추출
+                # V3: extract_metadata.py만 사용 (OCR/일반 텍스트 모두 동일한 함수 사용)
                 if attachment_content and not attachment_content.startswith('['):
-                    # OCR이든 일반 추출이든 동일한 함수 사용 (이미 process_ocr_text로 후처리됨)
+                    if is_ocr:
+                        print(f"  OCR 텍스트로 메타데이터 추출 중...")
+                    
                     institution, sanction_date = extract_metadata_from_content(attachment_content)
-                    if institution:
+                    
+                    # 금융회사명: 목록에서 추출한 값 우선, 없으면 PDF에서 추출한 값 사용
+                    if institution_from_title:
+                        item['금융회사명'] = institution_from_title
+                        print(f"  금융회사명 (목록): {institution_from_title}")
+                    elif institution:
                         # 마지막 '*', '@' 제거
                         institution = institution.rstrip('*@')
                         item['금융회사명'] = institution
-                        # 업종 매핑
-                        industry = self.get_industry(institution)
+                        print(f"  금융회사명 (PDF): {institution}")
+                    
+                    # 업종 매핑
+                    final_institution = item.get('금융회사명', '')
+                    if final_institution:
+                        industry = self.get_industry(final_institution)
                         item['업종'] = industry
-                        print(f"  금융회사명 추출: {institution} (업종: {industry})")
+                        print(f"  업종: {industry}")
                     else:
                         item['업종'] = '기타'
                     if sanction_date:
@@ -722,94 +756,142 @@ class KoFIUScraperV2:
                         print(f"  제재조치일 추출: {sanction_date}")
                     
                     # 제재내용 (표 데이터) 추출
-                    sanction_details = extract_sanction_details(attachment_content)
-                    if sanction_details:
-                        item['제재내용'] = sanction_details
-                        print(f"  제재내용 추출: {len(sanction_details)}자")
+                    try:
+                        sanction_details = extract_sanction_details(attachment_content)
+                        if sanction_details:
+                            item['제재내용'] = sanction_details
+                            print(f"  제재내용 추출: {len(sanction_details)}자")
+                        else:
+                            print(f"  제재내용 추출: 없음")
+                    except Exception as e:
+                        print(f"  ⚠ 제재내용 추출 중 오류 발생: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        item['제재내용'] = ''
                     
                     # 사건 제목/내용 추출 (4번 항목)
-                    incidents = extract_incidents(attachment_content)
-                    if incidents:
-                        # OCR 추출인 경우 '내용' 필드에 clean_content_symbols 적용 (FSS와 동일)
-                        if is_ocr:
-                            for key in list(incidents.keys()):
-                                if key.startswith('내용'):
-                                    # 먼저 process_ocr_text로 기본 후처리 (띄어쓰기 보존)
-                                    processed = process_ocr_text(incidents[key], preserve_spacing=True)
-                                    # 그 다음 clean_content_symbols로 조사 뒤 띄어쓰기 추가
-                                    incidents[key] = clean_content_symbols(processed)
-                        item.update(incidents)
-                        incident_count = len([k for k in incidents.keys() if k.startswith('제목')])
-                        print(f"  사건 추출: {incident_count}건")
-                    
-                    # 제재내용, 제목, 내용이 모두 비어있고 아직 OCR을 시도하지 않았다면 OCR 재시도
-                    has_sanction_details = bool(sanction_details and sanction_details.strip())
-                    has_incidents = bool(incidents and len([k for k in incidents.keys() if k.startswith('제목')]) > 0)
-                    
-                    if not has_sanction_details and not has_incidents and not is_ocr and file_path and os.path.exists(file_path):
-                        print(f"  ⚠ 제재내용, 제목, 내용이 모두 비어있어 OCR 재시도...")
-                        if self.ocr_extractor.is_available():
-                            ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
-                            if ocr_text:
-                                # OCR 결과 후처리 (OCR 재시도이므로 collapse_split_syllables도 적용)
-                                ocr_content = process_ocr_text(ocr_text, preserve_spacing=False)
-                                item['제재조치내용'] = ocr_content
-                                item['OCR추출여부'] = '예'
-                                
-                                # OCR 결과로 다시 메타데이터 추출
-                                institution, sanction_date = extract_metadata_from_content(ocr_content)
-                                if institution:
-                                    # 마지막 '*', '@' 제거
-                                    institution = institution.rstrip('*@')
-                                    item['금융회사명'] = institution
-                                    industry = self.get_industry(institution)
-                                    item['업종'] = industry
-                                    print(f"  ✓ OCR 재시도 후 금융회사명 추출: {institution} (업종: {industry})")
-                                
-                                if sanction_date:
-                                    item['제재조치일'] = sanction_date
-                                    print(f"  ✓ OCR 재시도 후 제재조치일 추출: {sanction_date}")
-                                
-                                # 제재내용 추출
-                                sanction_details = extract_sanction_details(ocr_content)
-                                if sanction_details:
-                                    item['제재내용'] = sanction_details
-                                    print(f"  ✓ OCR 재시도 후 제재내용 추출: {len(sanction_details)}자")
-                                
-                                # 사건 추출
-                                incidents = extract_incidents(ocr_content)
-                                if incidents:
-                                    # '내용' 필드에 clean_content_symbols 적용 (FSS와 동일)
-                                    for key in list(incidents.keys()):
-                                        if key.startswith('내용'):
-                                            # 먼저 process_ocr_text로 기본 후처리 (띄어쓰기 보존)
-                                            processed = process_ocr_text(incidents[key], preserve_spacing=True)
-                                            # 그 다음 clean_content_symbols로 조사 뒤 띄어쓰기 추가
-                                            incidents[key] = clean_content_symbols(processed)
-                                    item.update(incidents)
-                                    incident_count = len([k for k in incidents.keys() if k.startswith('제목')])
-                                    print(f"  ✓ OCR 재시도 후 사건 추출: {incident_count}건")
-                            
-                            # 임시 파일 삭제
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
+                    incidents = {}
+                    try:
+                        print(f"  사건 제목/내용 추출 중...")
+                        incidents = extract_incidents(attachment_content)
+                        if incidents:
+                            # OCR 추출인 경우 '내용' 필드에 clean_content_symbols 적용 (FSS와 동일)
+                            if is_ocr:
+                                for key in list(incidents.keys()):
+                                    if key.startswith('내용'):
+                                        # 먼저 process_ocr_text로 기본 후처리 (띄어쓰기 보존)
+                                        processed = process_ocr_text(incidents[key], preserve_spacing=True)
+                                        # 그 다음 clean_content_symbols로 조사 뒤 띄어쓰기 추가
+                                        incidents[key] = clean_content_symbols(processed)
+                            item.update(incidents)
+                            incident_count = len([k for k in incidents.keys() if k.startswith('제목')])
+                            print(f"  사건 추출: {incident_count}건")
                         else:
-                            # OCR 사용 불가 시 파일 삭제
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
-                    elif file_path and os.path.exists(file_path):
-                        # 파일이 남아있으면 삭제
-                        try:
-                            os.remove(file_path)
-                        except:
-                            pass
+                            print(f"  사건 추출: 없음")
+                    except Exception as e:
+                        print(f"  ⚠ 사건 추출 중 오류 발생: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # 오류가 발생해도 계속 진행
+                        incidents = {}
+                    
+                    # 메타데이터 추출 결과가 모두 비어있고, 일반 텍스트 추출이었던 경우 OCR 재시도
+                    # 금융회사명, 제재조치일은 제외 (목록에서 추출하거나 필수 항목이 아님)
+                    has_metadata = (
+                        item.get('제재내용') or 
+                        incidents
+                    )
+                    
+                    if (not has_metadata and 
+                        doc_type == 'PDF-텍스트' and 
+                        attachment_content and 
+                        len(attachment_content.strip()) > 0 and
+                        not attachment_content.startswith('[')):
+                        print(f"  ⚠ 메타데이터 추출 실패 - OCR 재시도 중...")
+                        # 파일을 다시 다운로드하여 OCR 시도
+                        ocr_retry_url = item['첨부파일URL'] if self.is_pdf_url(item['첨부파일URL']) else file_download_url
+                        
+                        if ocr_retry_url and self.is_pdf_url(ocr_retry_url):
+                            filename = self.derive_filename(ocr_retry_url, pdf_filename or link_text)
+                            file_path, actual_filename = self.file_extractor.download_file(
+                                url=ocr_retry_url,
+                                filename=filename,
+                                referer=self.list_url if self.is_pdf_url(item['첨부파일URL']) else item['첨부파일URL']
+                            )
+                            
+                            if file_path and os.path.exists(file_path) and self.ocr_extractor.is_available():
+                                ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
+                                if ocr_text:
+                                    # OCR 결과 후처리
+                                    ocr_content = process_ocr_text(ocr_text, preserve_spacing=True)
+                                    item['제재조치내용'] = ocr_content
+                                    item['OCR추출여부'] = '예'
+                                    doc_type = 'PDF-OCR'
+                                    is_ocr = True
+                                    
+                                    print(f"  ✓ OCR 재시도 성공 ({len(ocr_content)}자)")
+                                    
+                                    # OCR 텍스트로 메타데이터 재추출
+                                    institution, sanction_date = extract_metadata_from_content(ocr_content)
+                                    
+                                    if institution_from_title:
+                                        item['금융회사명'] = institution_from_title
+                                    elif institution:
+                                        institution = institution.rstrip('*@')
+                                        item['금융회사명'] = institution
+                                    
+                                    final_institution = item.get('금융회사명', '')
+                                    if final_institution:
+                                        industry = self.get_industry(final_institution)
+                                        item['업종'] = industry
+                                    else:
+                                        item['업종'] = '기타'
+                                    
+                                    if sanction_date:
+                                        item['제재조치일'] = sanction_date
+                                    
+                                    try:
+                                        sanction_details = extract_sanction_details(ocr_content)
+                                        if sanction_details:
+                                            item['제재내용'] = sanction_details
+                                    except Exception as e:
+                                        item['제재내용'] = ''
+                                    
+                                    try:
+                                        incidents = extract_incidents(ocr_content)
+                                        if incidents:
+                                            for key in list(incidents.keys()):
+                                                if key.startswith('내용'):
+                                                    processed = process_ocr_text(incidents[key], preserve_spacing=True)
+                                                    incidents[key] = clean_content_symbols(processed)
+                                            item.update(incidents)
+                                    except Exception as e:
+                                        incidents = {}
+                                    
+                                    # 임시 파일 삭제
+                                    try:
+                                        os.remove(file_path)
+                                    except:
+                                        pass
+                                else:
+                                    print(f"  ✗ OCR 재시도 실패 (결과 없음)")
+                                    # 임시 파일 삭제
+                                    try:
+                                        os.remove(file_path)
+                                    except:
+                                        pass
+                            else:
+                                print(f"  ✗ OCR 재시도 불가 (파일 다운로드 실패 또는 OCR 사용 불가)")
             else:
                 item['제재조치내용'] = "[첨부파일 URL이 없습니다]"
-                item['업종'] = '기타'
+                # 목록에서 추출한 금융회사명이 있으면 사용
+                if institution_from_title:
+                    item['금융회사명'] = institution_from_title
+                    industry = self.get_industry(institution_from_title)
+                    item['업종'] = industry
+                    print(f"  금융회사명 (목록): {institution_from_title} (업종: {industry})")
+                else:
+                    item['업종'] = '기타'
                 item['OCR추출여부'] = '아니오'
             
             # 업종 필드가 없는 경우 기타로 설정
@@ -876,7 +958,8 @@ class KoFIUScraperV2:
     def _post_process_content(self, text):
         """
         '내용' 필드 후처리
-        - <관련법규>, <관련규정> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        - <관련법규>, <관련규정>, <조치할사항> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        - (가), (나), (다) 등 앞에 줄바꿈 추가
         """
         if not text:
             return text
@@ -892,6 +975,24 @@ class KoFIUScraperV2:
         # <관련규정> 또는 < 관련규정 > 형태 모두 처리
         # 줄바꿈이 없는 경우에만 줄바꿈 추가
         result = re.sub(r'(?<![\n\r])\s*<(\s*)관련규정(\s*)>', r'\n<\1관련규정\2>', result)
+        
+        # <조치할사항> 또는 <조시할사항> 앞에 줄바꿈 추가 (공백 포함 패턴도 처리)
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)조치할사항(\s*)>', r'\n<\1조치할사항\2>', result)
+        result = re.sub(r'(?<![\n\r])\s*<(\s*)조시할사항(\s*)>', r'\n<\1조시할사항\2>', result)
+        
+        # (가), (나), (다) 등 한글 괄호 패턴 앞에 줄바꿈 추가
+        # 반각 괄호: (가), ( 가 ), (나) 등
+        # 전각 괄호: （가）, （ 가 ）, （나） 등
+        # 원문자: ㈎(가), ㈏(나), ㈐(다) 등
+        # 줄바꿈이 없는 경우에만 줄바꿈 추가 (이미 줄바꿈이 있으면 중복 방지)
+        # 반각 괄호 패턴 (공백 포함 가능)
+        result = re.sub(r'(?<![\n\r])\s*\(\s*([가-하])\s*\)', r'\n(\1)', result)
+        # 전각 괄호 패턴 (공백 포함 가능)
+        result = re.sub(r'(?<![\n\r])\s*（\s*([가-하])\s*）', r'\n(\1)', result)
+        # 원문자 패턴 (㈎=가, ㈏=나, ㈐=다, ... ㈛=하)
+        # 유니코드 범위: ㈎(U+320E) ~ ㈛(U+321B)
+        result = re.sub(r'(?<![\n\r])\s*([㈎-㈛])', r'\n\1', result)
         
         return result
     
@@ -958,7 +1059,7 @@ class KoFIUScraperV2:
                 '업종': item.get('업종', '기타'),
                 '제재조치일': sanction_date,
                 '제재내용': processed_sanction_content,
-                '상세페이지URL': item.get('상세페이지URL', ''),
+                '파일다운로드URL': item.get('파일다운로드URL', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
             
@@ -1018,8 +1119,8 @@ class KoFIUScraperV2:
             csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 상세페이지URL, OCR추출여부
-                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '상세페이지URL', 'OCR추출여부']
+                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
+                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
 
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')

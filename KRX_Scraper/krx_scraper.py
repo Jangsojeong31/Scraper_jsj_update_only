@@ -550,6 +550,19 @@ class KrxScraper(BaseScraper):
                         except:
                             print(f"  ⚠ 개정이유 버튼을 찾을 수 없음")
                     
+                    # 파일 변경이 감지된 경우에만 개정이유 추출
+                    # comparison_result는 _extract_detail 호출 전에 확인할 수 없으므로,
+                    # 여기서는 항상 추출하고, 나중에 비교 결과에 따라 필터링하는 대신
+                    # 비교 결과를 먼저 확인할 수 있도록 구조 변경 필요
+                    # 하지만 현재 구조상 _extract_detail 내부에서 비교를 수행하므로
+                    # 비교 결과를 확인하기 어려움. 대신 파일 다운로드 후 비교 결과를 확인하여
+                    # 조건부로 개정이유 추출하도록 수정
+                    
+                    # 비교 결과 확인 (파일 다운로드가 이미 완료된 경우)
+                    # comparison_result는 _extract_detail의 지역 변수이므로
+                    # 여기서는 파일 다운로드 후 비교를 수행하고 결과에 따라 추출
+                    should_extract_revision = True  # 기본값은 True (새 파일이거나 변경 감지)
+                    
                     if revision_button:
                         # 버튼 클릭 전 다운로드 디렉토리 파일 목록 확인
                         files_before = set(self.current_dir.glob("*"))
@@ -580,32 +593,46 @@ class KrxScraper(BaseScraper):
                             if downloaded_file.is_file():
                                 print(f"  → 다운로드된 파일 발견: {downloaded_file.name}")
                                 
-                                # 파일 내용 추출
-                                from common.file_extractor import FileExtractor
-                                file_extractor = FileExtractor(download_dir=str(self.current_dir))
+                                # 파일 다운로드 후 비교 수행
+                                comparison_result_revision = self._compare_with_previous_file(str(downloaded_file), downloaded_file.name)
                                 
-                                file_ext = downloaded_file.suffix.lower()
-                                if file_ext == '.pdf':
-                                    file_content = file_extractor.extract_pdf_content(str(downloaded_file))
-                                elif file_ext in ['.hwp', '.hwpx']:
-                                    file_content = file_extractor.extract_hwp_content(str(downloaded_file))
+                                # 비교 결과에 따라 개정이유 추출 여부 결정
+                                if comparison_result_revision:
+                                    should_extract_revision = comparison_result_revision.get('changed', True)
                                 else:
-                                    # 기타 파일 형식 시도
-                                    file_content = file_extractor.extract_hwp_content(str(downloaded_file))
+                                    should_extract_revision = True  # 비교 실패 시 추출
                                 
-                                if file_content:
-                                    print(f"  → 파일 내용 추출 완료 ({len(file_content)}자)")
+                                if should_extract_revision:
+                                    # 파일 내용 추출
+                                    from common.file_extractor import FileExtractor
+                                    file_extractor = FileExtractor(download_dir=str(self.current_dir))
                                     
-                                    # 개정이유, 공포일, 시행일, 개정내용 추출
-                                    revision_info = self._extract_revision_info_from_content(file_content)
-                                    revision_reason = revision_info.get('revision_reason', '')
-                                    promulgation_date = revision_info.get('promulgation_date', '')
-                                    enforcement_date = revision_info.get('enforcement_date', '')
-                                    revision_content = revision_info.get('revision_content', '')
+                                    file_ext = downloaded_file.suffix.lower()
+                                    if file_ext == '.pdf':
+                                        file_content = file_extractor.extract_pdf_content(str(downloaded_file))
+                                    elif file_ext in ['.hwp', '.hwpx']:
+                                        file_content = file_extractor.extract_hwp_content(str(downloaded_file))
+                                    else:
+                                        # 기타 파일 형식 시도
+                                        file_content = file_extractor.extract_hwp_content(str(downloaded_file))
                                     
-                                    print(f"  ✓ 개정이유: {len(revision_reason)}자, 개정내용: {len(revision_content)}자, 공포일: {promulgation_date}, 시행일: {enforcement_date}")
+                                    if file_content:
+                                        print(f"  → 파일 내용 추출 완료 ({len(file_content)}자)")
+                                        
+                                        # 개정이유, 공포일, 시행일, 개정내용 추출
+                                        revision_info = self._extract_revision_info_from_content(file_content)
+                                        revision_reason = revision_info.get('revision_reason', '')
+                                        promulgation_date = revision_info.get('promulgation_date', '')
+                                        enforcement_date = revision_info.get('enforcement_date', '')
+                                        revision_content = revision_info.get('revision_content', '')
+                                        
+                                        print(f"  ✓ 개정이유: {len(revision_reason)}자, 개정내용: {len(revision_content)}자, 공포일: {promulgation_date}, 시행일: {enforcement_date}")
+                                    else:
+                                        print(f"  ⚠ 파일 내용 추출 실패")
                                 else:
-                                    print(f"  ⚠ 파일 내용 추출 실패")
+                                    print(f"  → 파일 변경 없음, 개정이유/개정내용 추출 스킵")
+                                    revision_reason = ""
+                                    revision_content = ""
                         else:
                             print(f"  ⚠ 다운로드된 파일을 찾을 수 없음")
                 except Exception as e:
@@ -702,18 +729,21 @@ class KrxScraper(BaseScraper):
             traceback.print_exc()
             return ""
     
-    def _compare_with_previous_file(self, new_file_path: str, file_name: str) -> None:
+    def _compare_with_previous_file(self, new_file_path: str, file_name: str) -> Optional[Dict]:
         """다운로드한 파일을 이전 파일과 비교
         Args:
             new_file_path: 새로 다운로드한 파일 경로
             file_name: 파일명
+        Returns:
+            비교 결과 딕셔너리 또는 None
         """
         try:
             previous_file = self._find_previous_file(file_name)
             
             if not previous_file:
                 print(f"  ✓ 새 파일 (이전 파일 없음)")
-                return
+                # 새 파일은 변경으로 간주
+                return {'changed': True, 'new_exists': True, 'old_exists': False}
             
             print(f"  → 이전 파일과 비교 중... (이전 파일: {previous_file})")
             comparison_result = self.file_comparator.compare_and_report(
@@ -731,11 +761,14 @@ class KrxScraper(BaseScraper):
                         print(f"    HTML Diff 파일: {html_file}")
             else:
                 print(f"  ✓ 파일 동일 (변경 없음)")
+            
+            return comparison_result
                 
         except Exception as e:
             print(f"  ⚠ 파일 비교 중 오류: {e}")
             import traceback
             traceback.print_exc()
+            return None
     
     def _download_file(self, driver, download_url: str, file_name: str) -> str:
         """프린트 팝업 URL을 사용해서 PDF 파일 다운로드
