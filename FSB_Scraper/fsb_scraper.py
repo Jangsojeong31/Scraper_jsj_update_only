@@ -1873,6 +1873,8 @@ class FsbScraper(BaseScraper):
                         
                         # 이전 파일과 비교
                         previous_file_path = self.previous_dir / safe_filename
+                        comparison_result = None
+                        file_changed = False
                         if previous_file_path.exists():
                             print(f"  → 이전 파일과 비교 중...")
                             comparison_result = self.file_comparator.compare_and_report(
@@ -1882,10 +1884,12 @@ class FsbScraper(BaseScraper):
                             )
                             if comparison_result['changed']:
                                 print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                                file_changed = True
                             else:
                                 print(f"  ✓ 파일 동일 (변경 없음)")
                         else:
                             print(f"  ✓ 새 파일 (이전 파일 없음)")
+                            file_changed = True  # 새 파일은 변경으로 간주
                         
                         # HWP 파일 내용 추출
                         file_ext = Path(new_file_path).suffix.lower()
@@ -2379,34 +2383,49 @@ class FsbScraper(BaseScraper):
                                             
                                             print(f"  ✓ 다운로드 버튼 발견: {item['file_name']} (JS: {js_function[:50] if js_function else 'N/A'})")
                                     
-                                    # 새 창에서 개정이유, 시행일, 공포일, 개정내용 추출
-                                    try:
-                                        print(f"  → 새 창에서 내용 추출 시도 중...")
-                                        new_window_data = self.extract_content_from_new_window(
-                                            driver,
-                                            has_no_iframe=has_no_iframe,
-                                            regulation_name=regulation_name,
-                                            content_limit=content_limit,
-                                        )
-                                        if new_window_data:
-                                            # 새 창에서 추출한 내용 저장
-                                            if new_window_data.get('revision_reason'):
-                                                item['revision_reason'] = new_window_data.get('revision_reason', '')
-                                            if new_window_data.get('enforcement_date'):
-                                                item['enforcement_date'] = new_window_data.get('enforcement_date', '')
-                                            if new_window_data.get('promulgation_date'):
-                                                item['promulgation_date'] = new_window_data.get('promulgation_date', '')
-                                            if new_window_data.get('revision_content'):
-                                                item['revision_content'] = new_window_data.get('revision_content', '')
-                                            
-                                            revision_reason_len = len(item.get('revision_reason', ''))
-                                            print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {item.get('enforcement_date', '없음')}, 공포일: {item.get('promulgation_date', '없음')})")
-                                        else:
-                                            print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다.")
-                                    except Exception as e:
-                                        print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
-                                        import traceback
-                                        traceback.print_exc()
+                                    # 새 창에서 개정이유, 시행일, 공포일, 개정내용 추출 (파일 변경이 감지된 경우에만)
+                                    # comparison_result는 item에 저장되어 있을 수 있으므로 확인
+                                    item_comparison = item.get('comparison') or comparison_result
+                                    should_extract_revision = False
+                                    
+                                    if item_comparison:
+                                        should_extract_revision = item_comparison.get('changed', False)
+                                    else:
+                                        # comparison_result가 없으면 새 파일로 간주하여 추출
+                                        should_extract_revision = True
+                                    
+                                    if should_extract_revision:
+                                        try:
+                                            print(f"  → 파일 변경 감지됨, 새 창에서 개정이유/개정내용 추출 시도 중...")
+                                            new_window_data = self.extract_content_from_new_window(
+                                                driver,
+                                                has_no_iframe=has_no_iframe,
+                                                regulation_name=regulation_name,
+                                                content_limit=content_limit,
+                                            )
+                                            if new_window_data:
+                                                # 새 창에서 추출한 내용 저장
+                                                if new_window_data.get('revision_reason'):
+                                                    item['revision_reason'] = new_window_data.get('revision_reason', '')
+                                                if new_window_data.get('enforcement_date'):
+                                                    item['enforcement_date'] = new_window_data.get('enforcement_date', '')
+                                                if new_window_data.get('promulgation_date'):
+                                                    item['promulgation_date'] = new_window_data.get('promulgation_date', '')
+                                                if new_window_data.get('revision_content'):
+                                                    item['revision_content'] = new_window_data.get('revision_content', '')
+                                                
+                                                revision_reason_len = len(item.get('revision_reason', ''))
+                                                print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 시행일: {item.get('enforcement_date', '없음')}, 공포일: {item.get('promulgation_date', '없음')})")
+                                            else:
+                                                print(f"  ⚠ 새 창에서 내용을 추출하지 못했습니다.")
+                                        except Exception as e:
+                                            print(f"  ⚠ 새 창 내용 추출 중 오류: {e}")
+                                            import traceback
+                                            traceback.print_exc()
+                                    else:
+                                        print(f"  → 파일 변경 없음, 개정이유/개정내용 추출 스킵")
+                                        item['revision_reason'] = ''
+                                        item['revision_content'] = ''
                                 else:
                                     print(f"  ⚠ 상세 내용 추출 실패")
                             
@@ -2586,6 +2605,8 @@ class FsbScraper(BaseScraper):
                                         
                                         # 이전 파일과 비교
                                         previous_file_path = self.previous_dir / safe_filename
+                                        comparison_result = None
+                                        file_changed = False
                                         if previous_file_path.exists():
                                             print(f"  → 이전 파일과 비교 중...")
                                             comparison_result = self.file_comparator.compare_and_report(
@@ -2595,10 +2616,15 @@ class FsbScraper(BaseScraper):
                                             )
                                             if comparison_result['changed']:
                                                 print(f"  ✓ 파일 변경 감지: {comparison_result['diff_summary']}")
+                                                file_changed = True
                                             else:
                                                 print(f"  ✓ 파일 동일 (변경 없음)")
                                         else:
                                             print(f"  ✓ 새 파일 (이전 파일 없음)")
+                                            file_changed = True  # 새 파일은 변경으로 간주
+                                        
+                                        # 비교 결과를 item에 저장 (나중에 개정이유 추출 시 사용)
+                                        item['comparison'] = comparison_result
                                         
                                         # 파일 내용 추출
                                         file_content = self.extract_hwp_content(str(new_file_path))
