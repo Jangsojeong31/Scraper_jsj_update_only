@@ -131,6 +131,7 @@ from BOK_Scraper.bok_scraper_v2 import bok_law_regulations_health_check
 
 # 여신금융협회
 from CREFIA_LegNotice_Scraper.crefia_legnotice_scraper_v2 import crefia_legnotice_health_check
+from CREFIA_Scraper.crefia_scraper_v2 import crefia_health_check
 
 # 저축은행중앙회
 from FSB_Scraper.fsb_scraper_v2 import fsb_health_check
@@ -177,6 +178,7 @@ HEALTH_CHECKS = [
     bok_legnotice_health_check,
     bok_law_regulations_health_check,
     crefia_legnotice_health_check,
+    crefia_health_check,
     fsb_health_check,
     fsc_guideline_health_check,
     fsc_legnotice_health_check,

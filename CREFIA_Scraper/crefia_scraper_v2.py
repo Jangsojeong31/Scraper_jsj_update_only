@@ -36,7 +36,7 @@ if str(project_root) not in sys.path:
 
 from common.base_scraper import BaseScraper
 from common.file_extractor import FileExtractor
-from data_scraper import extract_data_from_text, extract_dates_from_filename
+from CREFIA_Scraper.data_scraper import extract_data_from_text, extract_dates_from_filename
 
 # ---------------- Selenium 다운로드 유틸 ----------------
 def init_selenium(download_dir: str, headless: bool = False, scraper=None) -> webdriver.Chrome:
