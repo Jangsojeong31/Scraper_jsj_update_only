@@ -37,12 +37,9 @@ except ImportError:
 # common 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
-#from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
-from .extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
-#from ocr_extractor import OCRExtractor
-from .ocr_extractor import OCRExtractor
-#from post_process_ocr import process_ocr_text, clean_content_symbols
-from .post_process_ocr import process_ocr_text, clean_content_symbols
+from KoFIU_Scraper.extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
+from KoFIU_Scraper.ocr_extractor import OCRExtractor
+from KoFIU_Scraper.post_process_ocr import process_ocr_text, clean_content_symbols
 
 try:
     from selenium import webdriver
@@ -1040,122 +1037,6 @@ class KoFIUScraperV2:
             import traceback
             traceback.print_exc()
 
-# -------------------------------------------------
-# Health Check 모드
-# -------------------------------------------------
-import os
-import time
-from datetime import datetime
-from typing import Dict, Optional
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
-import json
-
-def kofiu_health_check() -> Dict:
-    """
-    금융투자협회(KOFIA) 제재조치 현황 Health Check
-    출력 JSON 양식은 BOK Health Check 구조와 동일
-    """
-    BASE_URL = "https://law.kofia.or.kr"
-    LIST_URL = "https://law.kofia.or.kr/service/law/lawCurrentMain.do"
-    CURRENT_DIR = "output"
-
-    os.makedirs(CURRENT_DIR, exist_ok=True)
-
-    result: Dict = {
-        "org_name": "KOFIA",
-        "target": "금융투자협회 > 제재조치 현황",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "search_page": {"url": LIST_URL, "success": False, "message": None},
-            "list_page": {"success": False, "count": 0, "title": None},
-            "detail_page": {"url": None, "success": False, "content_length": 0}
-        },
-        "error": None
-    }
-
-    def _create_webdriver() -> webdriver.Chrome:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--lang=ko-KR")
-        prefs = {
-            "download.default_directory": os.path.abspath(CURRENT_DIR),
-            "download.prompt_for_download": False,
-            "plugins.always_open_pdf_externally": True
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
-        return webdriver.Chrome(options=chrome_options)
-
-    driver: Optional[webdriver.Chrome] = None
-    try:
-        driver = _create_webdriver()
-        # 1. 검색/목록 페이지 접근
-        driver.get(LIST_URL)
-        time.sleep(3)
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
-
-        # 2. 목록 1건 추출
-        tree_links = []
-        try:
-            tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-            driver.switch_to.frame(tree_iframe)
-            soup = BeautifulSoup(driver.page_source, "lxml")
-            driver.switch_to.default_content()
-            nodes = soup.select("a")
-            if nodes:
-                first_node = nodes[0]
-                tree_links.append({
-                    "title": first_node.get_text(strip=True),
-                    "href": first_node.get("href")
-                })
-                result["checks"]["list_page"]["success"] = True
-                result["checks"]["list_page"]["count"] = 1
-                result["checks"]["list_page"]["title"] = first_node.get_text(strip=True)
-        except Exception as e:
-            result["error"] = f"목록 추출 오류: {e}"
-
-        # 3. 상세 페이지 접근
-        if tree_links:
-            item = tree_links[0]
-            try:
-                tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-                driver.switch_to.frame(tree_iframe)
-                link_elem = driver.find_element(By.LINK_TEXT, item["title"])
-                link_elem.click()
-                time.sleep(2)
-                content_soup = BeautifulSoup(driver.page_source, "lxml")
-                driver.switch_to.default_content()
-
-                result["checks"]["detail_page"]["url"] = item["href"]
-                result["checks"]["detail_page"]["success"] = True
-                content_text = content_soup.get_text(strip=True)
-                result["checks"]["detail_page"]["content_length"] = len(content_text)
-
-            except Exception as e:
-                result["error"] = f"상세 페이지 접근 실패: {e}"
-
-        # 최종 상태 결정
-        if all([
-            result["checks"]["search_page"]["success"],
-            result["checks"]["list_page"]["success"],
-            result["checks"]["detail_page"]["success"]
-        ]):
-            result["status"] = "OK"
-
-    except Exception as e:
-        result["error"] = str(e)
-    finally:
-        if driver:
-            driver.quit()
-
-    return result
 
 if __name__ == "__main__":
     # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)
@@ -1176,27 +1057,8 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, default='kofiu_results.json',
                         help='출력 파일명 (기본값: kofiu_results.json)')
     
-    # -------------------------------------------------
-    # Health Check 모드
-    # -------------------------------------------------
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Health Check만 실행하고 종료",
-    )
-
     args = parser.parse_args()
     
-    # -------------------------------------------------
-    # Health Check 모드
-    # python kofiu_scraper_v2.py --check
-    # -------------------------------------------------
-    import json
-    if args.check:
-        result = kofiu_health_check()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        sys.exit(0)
-
     scraper = KoFIUScraperV2()
     results = scraper.scrape_all(limit=args.limit, after_date=args.after, sdate=args.sdate, edate=args.edate)
     scraper.save_results(filename=args.output)

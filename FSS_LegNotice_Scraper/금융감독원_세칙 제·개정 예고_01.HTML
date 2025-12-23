@@ -1,0 +1,663 @@
+<main id="mainContents">
+				<div class="hgroup">
+					<h1>세칙 제·개정 예고</h1>
+					<div class="page-toolbar">
+						<button type="button" class="sns-toggle" aria-label="SNS 공유 열기"></button>
+						<div class="sns-wrap">
+							<div class="sns-wrap__set">
+								<button type="button" data-type="twitter" class="tweeter" aria-label="엑스(X) 공유 새창열림"></button>
+								<button type="button" data-type="kakaotalk" class="kakaotalk" aria-label="카카오톡 공유 새창열림"></button>
+								<button type="button" data-type="naverblog" class="blog" aria-label="블로그 공유 새창열림"></button>
+								<button type="button" data-type="facebook" class="facebook" aria-label="페이스북 공유 새창열림"></button>
+							</div>
+							<script src="https://developers.kakao.com/sdk/js/kakao.js"></script>
+								<script src="/static/jslibrary/sns.js"></script>
+							</div>
+						<i class="vline"></i>
+						<button type="button" class="page-print" aria-label="프린트"></button>
+					</div>
+				</div>
+				<div id="content">
+<!-- 					<div class="logout">
+						<a href="" class="logout-btn">로그아웃</a>
+					</div> -->
+
+<!-- 내용  -->
+				
+
+
+
+
+
+
+
+
+<script type="application/javascript">
+    function fnSearchClear(){
+        $("#sdate").val('');
+        $("#edate").val('');
+        $("#searchWrd").val('');
+
+    }
+
+    function fnSearch(pageIndex) {
+    	if($('#sdate').val() != '' || $('#sdate').val() != null){
+    		var b = $('#sdate').val();
+    		var e = $('#edate').val();
+    		if (b > e) {
+    			alert('검색 종료일이 시작일보다 작습니다.');
+    			return;
+    		}
+    	}
+
+        $("#pageIndex").val(pageIndex);
+        $("#frm").submit();
+    }
+</script>
+
+<form id="frm" name="frm" action="/fss/job/lrgRegItnPrvntc/list.do" class="sh">
+    <input type="hidden" id="menuNo" name="menuNo" value="200489">
+    <input type="hidden" id="pageIndex" name="pageIndex" value="1">
+    <span class="date-set">
+        <input id="sdate" name="sdate" class="sdate" title="검색기간 시작일 연도 - 월 - 일 (예)YYYY-MM-DD" value="" type="text" autocomplete="off" placeholder="연도 - 월 - 일" style="background-color: white" readonly="">
+        <span class="dash">~</span>
+        <input id="edate" name="edate" class="edate" title="검색기간 종료일 연도 - 월 - 일 (예)YYYY-MM-DD" value="" type="text" autocomplete="off" placeholder="연도 - 월 - 일" style="background-color: white" readonly="">
+    </span>
+    <span class="select keyword-cate">
+        <select name="searchCnd" title="검색어 조건">
+            <option value="1">제목</option>
+        </select>
+    </span>
+    <span class="keyword">
+        <input type="text" id="searchWrd" name="searchWrd" value="" title="검색어">
+    </span>
+    <div class="btns">
+        <!-- <button type="submit" class="search" aria-label="검색"></button> -->
+        <button type="button" onclick="fnSearch('1')" class="search"></button>
+        <button type="button" class="reset" aria-label="초기화" onclick="fnSearchClear();"></button>
+    </div>
+</form>
+<div class="count-total">전체 <em>1006</em>건 [ <em>1</em>/101 페이지 ]</div>
+<div class="bd-list">
+    <table>
+        <caption>세칙 제·개정 예고 목록</caption>
+        <thead>
+        <tr>
+            <th class="no">번호</th>
+            <th>제목</th>
+            <th class="date">개정일</th>
+            <th class="file">첨부파일</th>
+            <th class="file">의견&amp;회신</th>
+            <th class="count">조회수</th>
+        </tr>
+        </thead>
+        <tbody>
+            
+                
+                    <tr>
+                        
+                        <td class="no">1006</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3726&amp;menuNo=200489&amp;pageIndex=1">
+                                전자금융감독규정시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-12-09</td>
+                        <td class="fileTdList">
+                            
+                                
+                                
+                                    
+                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%E3%80%8C%EC%A0%84%EC%9E%90%EA%B8%88%EC%9C%B5%EA%B0%90%EB%8F%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%E3%80%8D%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_24430790287803721.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                        <i class="ico-hwp"></i>
+                                    </a>
+                                
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>38</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">1005</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3725&amp;menuNo=200489&amp;pageIndex=1">
+                                금융투자업규정시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-12-08</td>
+                        <td class="fileTdList"><span class="only-m">첨부파일</span>
+                            
+                                
+                                
+                                
+                                    <div class="file-group">
+                                        <button type="button" class="file-group__ctrl" aria-label="첨부파일 묶음 열기"></button>
+                                        <div class="file-group__set">
+                                            <p class="file-group__set__title">다운로드할 파일을 선택하세요.</p>
+                                            <div class="file-group__set__body">
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=1.%20%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_24368397130701300.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-hwp"></i>
+                                                        <span class="name">1. 금융투자업규정시행세칙 개정 사전예고(안)_24368397130701300.hwp</span>
+                                                    </a>
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=2.%20%EB%B3%84%EC%B2%A81)%20(%EB%B3%84%ED%91%9C%201)%20%EC%9E%AC%EB%AC%B4%EC%83%81%ED%83%9C%ED%91%9C%ED%8F%AC%EA%B4%84%EC%86%90%EC%9D%B5%EA%B3%84%EC%82%B0%EC%84%9C(%EC%97%B0%EA%B2%B0%20%EB%B0%8F%20%EA%B0%81%EC%A3%BC%EC%82%AC%ED%95%AD%20%ED%8F%AC%ED%95%A8)%EC%9D%98%20%EA%B3%BC%EB%AA%A9%EA%B5%AC%EB%B6%84%C2%B8%20%EA%B7%B8%20%EB%B0%B0%EC%97%B4%EC%88%9C%EC%84%9C%EC%99%80%20%EA%B3%BC%EB%AA%A9%EB%B3%84%20%EC%B2%98%EB%A6%AC%EB%82%B4%EC%9A%A9(%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99)_24368397138558453.xlsx&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-xls"></i>
+                                                        <span class="name">2. 별첨1) (별표 1) 재무상태표포괄손익계산서(연결 및 각주사항 포함)의 과목구분¸ 그 배열순서와 과목별 처리내용(금융투자업규정시행세칙)_24368397138558453.xlsx</span>
+                                                    </a>
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=3.%20%EB%B3%84%EC%B2%A82)%20%EB%B3%84%EC%B1%85%EC%84%9C%EC%8B%9D%20%EC%A0%9C17%ED%98%B8%20%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EC%9E%90%EC%9D%98%20%EC%97%85%EB%AC%B4%EB%B3%B4%EA%B3%A0%EC%84%9C%20%EA%B0%9C%EC%A0%95%EC%95%88_24368397146093882.xlsx&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-xls"></i>
+                                                        <span class="name">3. 별첨2) 별책서식 제17호 금융투자업자의 업무보고서 개정안_24368397146093882.xlsx</span>
+                                                    </a>
+                                                
+                                            </div>
+                                            <button type="button" class="close" aria-label="닫기"></button>
+                                        </div>
+                                    </div>
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>135</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">1004</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3685&amp;menuNo=200489&amp;pageIndex=1">
+                                보험업감독업무시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-11-24</td>
+                        <td class="fileTdList"><span class="only-m">첨부파일</span>
+                            
+                                
+                                
+                                
+                                    <div class="file-group">
+                                        <button type="button" class="file-group__ctrl" aria-label="첨부파일 묶음 열기"></button>
+                                        <div class="file-group__set">
+                                            <p class="file-group__set__title">다운로드할 파일을 선택하세요.</p>
+                                            <div class="file-group__set__body">
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=251124_%EB%B3%B4%ED%97%98%EC%97%85%EA%B0%90%EB%8F%85%EC%97%85%EB%AC%B4%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_23134495148826017.hwpx&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-hwp"></i>
+                                                        <span class="name">251124_보험업감독업무시행세칙 개정 사전예고(안)_23134495148826017.hwpx</span>
+                                                    </a>
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=251124_%EB%B3%B4%ED%97%98%EC%97%85%EA%B0%90%EB%8F%85%EC%97%85%EB%AC%B4%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_%EB%B3%84%EC%B2%A8_%5B%EB%B3%84%EC%A7%8026%5D_%EC%97%85%EB%AC%B4%EB%B3%B4%EA%B3%A0%EC%84%9C%20%EA%B0%9C%EC%A0%95(%EC%95%88)_23134495220753420.xlsx&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-xls"></i>
+                                                        <span class="name">251124_보험업감독업무시행세칙 개정 사전예고(안)_별첨_[별지26]_업무보고서 개정(안)_23134495220753420.xlsx</span>
+                                                    </a>
+                                                
+                                            </div>
+                                            <button type="button" class="close" aria-label="닫기"></button>
+                                        </div>
+                                    </div>
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>1166</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">1003</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3667&amp;menuNo=200489&amp;pageIndex=1">
+                                금융투자업규정시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-11-19</td>
+                        <td class="fileTdList">
+                            
+                                
+                                
+                                    
+                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=251118_%20%E3%80%8C%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%E3%80%8D%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_%EC%9E%90%EB%B3%B8%EC%8B%9C%EC%9E%A5%EA%B0%90%EB%8F%85%EA%B5%AD_F_22730007784053766.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                        <i class="ico-hwp"></i>
+                                    </a>
+                                
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>1220</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">1002</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3666&amp;menuNo=200489&amp;pageIndex=1">
+                                전자금융감독규정시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-11-17</td>
+                        <td class="fileTdList">
+                            
+                                
+                                
+                                    
+                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=251120_%EC%A0%84%EC%9E%90%EA%B8%88%EC%9C%B5%EA%B0%90%EB%8F%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EC%97%85%EB%AC%B4%EB%B3%B4%EA%B3%A0%EC%84%9C%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0_%EC%88%98%EC%A0%95_22815215295632094.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                        <i class="ico-hwp"></i>
+                                    </a>
+                                
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>1241</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">1001</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3645&amp;menuNo=200489&amp;pageIndex=1">
+                                은행업감독업무시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-10-30</td>
+                        <td class="fileTdList"><span class="only-m">첨부파일</span>
+                            
+                                
+                                
+                                
+                                    <div class="file-group">
+                                        <button type="button" class="file-group__ctrl" aria-label="첨부파일 묶음 열기"></button>
+                                        <div class="file-group__set">
+                                            <p class="file-group__set__title">다운로드할 파일을 선택하세요.</p>
+                                            <div class="file-group__set__body">
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%EC%9D%80%ED%96%89%EC%97%85%EA%B0%90%EB%8F%85%EC%97%85%EB%AC%B4%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_%EC%9D%80%ED%96%89%EB%A6%AC%EC%8A%A4%ED%81%AC%EA%B0%90%EB%8F%85%ED%8C%80_FFFF_21001430776560997.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-hwp"></i>
+                                                        <span class="name">은행업감독업무시행세칙 개정 사전예고(안)_은행리스크감독팀_FFFF_21001430776560997.hwp</span>
+                                                    </a>
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%EC%9D%80%ED%96%89%EC%97%85%EA%B0%90%EB%8F%85%EC%97%85%EB%AC%B4%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99(%EA%B7%9C%EC%A0%9C%EC%98%81%ED%96%A5%EB%B6%84%EC%84%9D%EC%84%9C)_F_21001430784161800.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-hwp"></i>
+                                                        <span class="name">은행업감독업무시행세칙(규제영향분석서)_F_21001430784161800.hwp</span>
+                                                    </a>
+                                                
+                                            </div>
+                                            <button type="button" class="close" aria-label="닫기"></button>
+                                        </div>
+                                    </div>
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>1943</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">1000</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3626&amp;menuNo=200489&amp;pageIndex=1">
+                                보험업감독업무시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-09-26</td>
+                        <td class="fileTdList">
+                            
+                                
+                                
+                                    
+                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=250926_%EB%B3%B4%ED%97%98%EC%97%85%EA%B0%90%EB%8F%85%EC%97%85%EB%AC%B4%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0%EC%95%88_%EC%B5%9C%EC%A2%85_ff_18057707068347929.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                        <i class="ico-hwp"></i>
+                                    </a>
+                                
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>4032</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">999</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3625&amp;menuNo=200489&amp;pageIndex=1">
+                                금융투자업규정시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-09-24</td>
+                        <td class="fileTdList"><span class="only-m">첨부파일</span>
+                            
+                                
+                                
+                                
+                                    <div class="file-group">
+                                        <button type="button" class="file-group__ctrl" aria-label="첨부파일 묶음 열기"></button>
+                                        <div class="file-group__set">
+                                            <p class="file-group__set__title">다운로드할 파일을 선택하세요.</p>
+                                            <div class="file-group__set__body">
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%E3%80%8C%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%E3%80%8D%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0(%EC%95%88)_17859011633570630.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-hwp"></i>
+                                                        <span class="name">「금융투자업규정시행세칙」 개정 사전예고(안)_17859011633570630.hwp</span>
+                                                    </a>
+                                                
+                                                    
+                                                    
+                                                        
+                                                    
+                                                        
+                                                            
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                
+                                                                    
+                                                                
+                                                            
+                                                        
+                                                    
+                                                    
+                                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99(%EA%B7%9C%EC%A0%9C%EC%98%81%ED%96%A5%EB%B6%84%EC%84%9D%EC%84%9C)_20250917_17859011652620582.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                                        <i class="ico-hwp"></i>
+                                                        <span class="name">금융투자업규정시행세칙(규제영향분석서)_20250917_17859011652620582.hwp</span>
+                                                    </a>
+                                                
+                                            </div>
+                                            <button type="button" class="close" aria-label="닫기"></button>
+                                        </div>
+                                    </div>
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>3601</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">998</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3605&amp;menuNo=200489&amp;pageIndex=1">
+                                금융투자업규정시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-09-16</td>
+                        <td class="fileTdList">
+                            
+                                
+                                
+                                    
+                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0%EC%95%88_%EA%B8%88%EC%9C%B5%ED%88%AC%EC%9E%90%EC%97%85%EA%B7%9C%EC%A0%95%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99_%EC%9E%90%EB%B3%B8%EC%8B%9C%EC%9E%A5%EA%B0%90%EB%8F%85%EA%B5%AD(%EC%9E%90%EB%B3%B8%EC%8B%9C%EC%9E%A5%EC%A0%9C%EB%8F%84%ED%8C%80,%20%EA%B1%B4%EC%A0%84%EA%B2%BD%EC%98%81%ED%8C%80)f_17200557007664512.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                        <i class="ico-hwp"></i>
+                                    </a>
+                                
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>3860</td>
+                    </tr>
+
+                    
+
+                
+                    <tr>
+                        
+                        <td class="no">997</td>
+                        <td class="title">
+                            <a href="/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=3585&amp;menuNo=200489&amp;pageIndex=1">
+                                금융소비자보호에 관한 감독규정 시행세칙
+                            </a>
+                        </td>
+                        <td><span class="only-m">개정일</span>2025-09-05</td>
+                        <td class="fileTdList">
+                            
+                                
+                                
+                                    
+                                    <a href="/fss.hpdownload?path=/LAW1/pre/&amp;file=%EA%B8%88%EC%9C%B5%EC%86%8C%EB%B9%84%EC%9E%90%20%EB%B3%B4%ED%98%B8%EC%97%90%20%EA%B4%80%ED%95%9C%20%EA%B0%90%EB%8F%85%EA%B7%9C%EC%A0%95%20%EC%8B%9C%ED%96%89%EC%84%B8%EC%B9%99%20%EA%B0%9C%EC%A0%95%20%EC%82%AC%EC%A0%84%EC%98%88%EA%B3%A0_250905_F_16234257382215012.hwp&amp;type=lmx" target="_blank" class="file-group__set__item" title="새창열림">
+                                        <i class="ico-hwp"></i>
+                                    </a>
+                                
+                                
+                            
+                        </td>
+                        <td class="fileTdList">
+                            
+                        </td>
+                        <td><span class="only-m">조회수</span>3932</td>
+                    </tr>
+
+                    
+
+                
+            
+            
+        </tbody>
+    </table>
+</div>
+
+    <div class="pagination-set"><ul class="pagination pagination-centered"><li class="i first disabled"><a title="처음 목록" href="javascript:fnSearch(1)" data-pageindex="1"><span class="s"><span>처음 <span class="t">목록</span></span></span></a></li><li class="i prev disabled"><a title="이전 목록" href="javascript:fnSearch(0)" data-pageindex="0"><span class="s"><span>이전 <span class="t">목록</span></span></span></a></li><li class="active"><span><em title="현재목록"><span>1</span></em></span></li><li><a href="javascript:fnSearch(2)" data-pageindex="2"><span>2</span></a></li><li><a href="javascript:fnSearch(3)" data-pageindex="3"><span>3</span></a></li><li><a href="javascript:fnSearch(4)" data-pageindex="4"><span>4</span></a></li><li><a href="javascript:fnSearch(5)" data-pageindex="5"><span>5</span></a></li><li><a href="javascript:fnSearch(6)" data-pageindex="6"><span>6</span></a></li><li><a href="javascript:fnSearch(7)" data-pageindex="7"><span>7</span></a></li><li><a href="javascript:fnSearch(8)" data-pageindex="8"><span>8</span></a></li><li><a href="javascript:fnSearch(9)" data-pageindex="9"><span>9</span></a></li><li><a href="javascript:fnSearch(10)" data-pageindex="10"><span>10</span></a></li><li class="i next"><a title="다음 목록" href="javascript:fnSearch(11)" data-pageindex="11"><span class="s"><span>다음 <span class="t">목록</span></span></span></a></li><li class="i end"><a title="마지막 목록" href="javascript:fnSearch(101)" data-pageindex="101"><span class="s"><span>끝 <span class="t">목록</span></span></span></a></li></ul></div>
+
+<script>
+$fileList = $('.fileTdList, .file-group__set').find('a');
+$fileList.each(function() {
+	var url =  $(this).attr('href');
+	if(url != ""){
+		$(this).attr('href',encodeURI(url));
+	}
+})
+</script><!-- //내용 -->
+
+				</div>
+				<!-- //#content -->
+			</main>
