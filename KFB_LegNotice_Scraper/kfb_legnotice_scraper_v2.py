@@ -6,14 +6,6 @@ import sys
 import json
 import time
 import re
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import NoSuchElementException
 
 # ==================================================
 # 프로젝트 루트 등록
@@ -22,6 +14,17 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import NoSuchElementException
+#from webdriver_manager.chrome import ChromeDriverManager
+from common.base_scraper import BaseScraper
+
 
 from common.common_logger import get_logger
 
@@ -41,13 +44,20 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # WebDriver 생성
 # ==================================================
 def create_driver():
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()    
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--window-size=1920x1080")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return scraper._create_webdriver(options)
 # ==================================================
 # 의견청취기간 날짜 정제
 # ==================================================
@@ -211,6 +221,7 @@ def scrape_all(start_date=None, end_date=None):
 # Health Check (KFB 자율규제 제정·개정예고)
 # ==================================================
 def kfb_legnotice_health_check() -> dict:
+    start_time = time.perf_counter()
     check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     result = {
@@ -219,23 +230,21 @@ def kfb_legnotice_health_check() -> dict:
         "check_time": check_time,
         "status": "FAIL",
         "checks": {
-            "search_page": {
-                "url": LIST_URL,
-                "success": False,
-                "message": ""
-            },
             "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
+                "url": LIST_URL,
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
             },
             "detail_page": {
                 "url": None,
-                "success": False,
-                "content_length": 0
-            }
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
+            },
         },
-        "error": None
+        "error": None,
+        "elapsed": None,
     }
 
     driver = create_driver()
@@ -243,41 +252,45 @@ def kfb_legnotice_health_check() -> dict:
     try:
         logger.info("[HEALTH] KFB 자율규제 제정·개정예고 Health Check 시작")
 
-        # 1️⃣ 목록 페이지 접근
+        # ----------------------
+        # 1️⃣ 목록 페이지 체크
+        # ----------------------
+        t0 = time.perf_counter()
+
         driver.get(LIST_URL)
         time.sleep(2)
 
         rows = parse_list_rows(driver)
         if not rows:
-            result["checks"]["search_page"]["message"] = "목록 페이지 접근 실패 또는 공고 없음"
-            return result
+            raise RuntimeError("목록 페이지 접근 실패 또는 공고 없음")
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "목록 페이지 접근 성공"
-
-        # 2️⃣ 목록 1건 추출
         first_row = rows[0]
         cols = first_row.find_all("td")
         if len(cols) < 4:
-            result["error"] = "목록 컬럼 파싱 실패"
-            return result
+            raise RuntimeError("목록 컬럼 파싱 실패")
 
         link = cols[2].find("a")
         if not link:
-            result["error"] = "상세 링크 추출 실패"
-            return result
+            raise RuntimeError("상세 링크 추출 실패")
 
         title = cols[2].get_text(strip=True)
         href = link.get("href", "")
         notice_idx = href.replace("Javascript:readRun(", "").replace(");", "")
         detail_url = DETAIL_URL_TEMPLATE.format(idx=notice_idx)
 
-        result["checks"]["list_page"]["success"] = True
-        result["checks"]["list_page"]["count"] = 1
-        result["checks"]["list_page"]["title"] = title
+        result["checks"]["list_page"].update({
+            "status": "OK",
+            "message": f"목록 1건 추출 성공 ({title})",
+            "elapsed": round(time.perf_counter() - t0, 3),
+        })
 
-        # 3️⃣ 상세 페이지 접근
+        # ----------------------
+        # 2️⃣ 상세 페이지 체크
+        # ----------------------
+        t1 = time.perf_counter()
+
         result["checks"]["detail_page"]["url"] = detail_url
+
         driver.get(detail_url)
         time.sleep(1)
 
@@ -285,11 +298,13 @@ def kfb_legnotice_health_check() -> dict:
         content = detail_data.get("content")
 
         if not content:
-            result["error"] = "상세 페이지 본문 추출 실패"
-            return result
+            raise RuntimeError("상세 페이지 본문 추출 실패")
 
-        result["checks"]["detail_page"]["success"] = True
-        result["checks"]["detail_page"]["content_length"] = len(content)
+        result["checks"]["detail_page"].update({
+            "status": "OK",
+            "message": "상세 페이지 접근 및 본문 영역 확인",
+            "elapsed": round(time.perf_counter() - t1, 3),
+        })
 
         result["status"] = "OK"
         return result
@@ -299,6 +314,7 @@ def kfb_legnotice_health_check() -> dict:
         return result
 
     finally:
+        result["elapsed"] = round(time.perf_counter() - start_time, 3)
         driver.quit()
         logger.info("[HEALTH] 드라이버 종료")
 

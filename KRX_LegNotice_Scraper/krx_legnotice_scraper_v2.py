@@ -9,6 +9,12 @@ import argparse
 from datetime import datetime, timedelta
 import logging
 
+# 프로젝트 루트 sys.path
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
@@ -16,9 +22,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import WebDriverException
+#from webdriver_manager.chrome import ChromeDriverManager
 
+from common.base_scraper import BaseScraper
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(CURRENT_DIR, "output", "json")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ==================================================
 # WDM 로그 제거
 # ==================================================
@@ -29,10 +40,6 @@ os.environ["WDM_LOG_LEVEL"] = "0"  # INFO 로그 숨김
 # ==================================================
 BASE_URL = "https://rule.krx.co.kr/out/index.do"
 DETAIL_BASE_URL = "https://rule.krx.co.kr/out/pds/goPdsMain.do"
-
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(CURRENT_DIR, "output", "json")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 ORG_NAME = "KRX"
 CHROME_OPTIONS = [
@@ -60,11 +67,21 @@ logger = get_logger()
 # WebDriver 생성
 # ==================================================
 def create_driver():
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()
     options = Options()
-    for opt in CHROME_OPTIONS:
-        options.add_argument(opt)
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    return driver
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return scraper._create_webdriver(options)
 
 # ==================================================
 # 상세 페이지 파싱
@@ -217,13 +234,14 @@ def scrape_all(keyword=None, start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-def krx_legnotice_health_check():
+def krx_legnotice_health_check() -> dict:
     """
-    KRX 규정 제·개정 예고 Health Check
+    KRX 규정 제·개정 예고 Health Check (v2)
     - 목록 1건 추출
-    - 상세 페이지 접근 검증
+    - 상세 페이지 접근 및 본문 영역 확인
     """
 
+    start_time = time.perf_counter()
     check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     result = {
@@ -232,23 +250,21 @@ def krx_legnotice_health_check():
         "check_time": check_time,
         "status": "FAIL",
         "checks": {
-            "search_page": {
-                "url": BASE_URL,
-                "success": False,
-                "message": ""
-            },
             "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
+                "url": BASE_URL,
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
             },
             "detail_page": {
                 "url": DETAIL_BASE_URL,
-                "success": False,
-                "content_length": 0
-            }
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
+            },
         },
-        "error": None
+        "error": None,
+        "elapsed": None,
     }
 
     driver = None
@@ -257,66 +273,81 @@ def krx_legnotice_health_check():
         wait = WebDriverWait(driver, 20)
 
         # ---------------------------------
-        # 1. 메인 페이지 접근
+        # 1️⃣ 목록 페이지 체크
         # ---------------------------------
-        logger.info(f"[CHECK] {BASE_URL}")
+        t0 = time.perf_counter()
+
+        logger.info(f"[HEALTH] KRX 메인 접근: {BASE_URL}")
         driver.get(BASE_URL)
         time.sleep(1)
 
         # 메뉴 클릭
         menu = wait.until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "li[vo='/out/pds/goPdsMain.do'] a"))
+            EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "li[vo='/out/pds/goPdsMain.do'] a")
+            )
         )
         menu.click()
         time.sleep(1)
 
         # iframe 전환
-        wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "workPage")))
+        wait.until(
+            EC.frame_to_be_available_and_switch_to_it((By.ID, "workPage"))
+        )
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "목록 페이지 접근 성공"
+        # 목록 로딩 확인
+        wait.until(
+            EC.presence_of_all_elements_located(
+                (By.CSS_SELECTOR, "div.x-grid3-row")
+            )
+        )
 
-        # ---------------------------------
-        # 2. 목록 1건 추출
-        # ---------------------------------
-        wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.x-grid3-row")))
         rows = driver.find_elements(By.CSS_SELECTOR, "div.x-grid3-row")
-
         if not rows:
-            result["error"] = "목록 데이터 없음"
-            return result
+            raise RuntimeError("목록 데이터 없음")
 
         row = rows[0]
-        title = row.find_element(By.CSS_SELECTOR, "div.x-grid3-col-1").text.strip()
+        title = row.find_element(
+            By.CSS_SELECTOR, "div.x-grid3-col-1"
+        ).text.strip()
 
-        result["checks"]["list_page"]["success"] = True
-        result["checks"]["list_page"]["count"] = 1
-        result["checks"]["list_page"]["title"] = title
+        result["checks"]["list_page"].update({
+            "status": "OK",
+            "message": f"목록 1건 추출 성공 ({title})",
+            "elapsed": round(time.perf_counter() - t0, 3),
+        })
 
         # ---------------------------------
-        # 3. 상세 페이지 접근
+        # 2️⃣ 상세 페이지 체크
         # ---------------------------------
+        t1 = time.perf_counter()
+
         logger.info(f"[HEALTH] 상세 접근: {title}")
         ActionChains(driver).move_to_element(row).click().perform()
         time.sleep(1)
 
         detail_title, content = parse_detail_page(driver, wait)
-        content_length = len(content) if content else 0
+        if not content:
+            raise RuntimeError("상세 페이지 본문 추출 실패")
 
-        result["checks"]["detail_page"]["success"] = content_length > 0
-        result["checks"]["detail_page"]["content_length"] = content_length
+        result["checks"]["detail_page"].update({
+            "status": "OK",
+            "message": "상세 페이지 접근 및 본문 영역 확인",
+            "elapsed": round(time.perf_counter() - t1, 3),
+        })
 
         result["status"] = "OK"
+        return result
 
     except Exception as e:
         logger.exception("[HEALTH] KRX Health Check 실패")
         result["error"] = str(e)
+        return result
 
     finally:
+        result["elapsed"] = round(time.perf_counter() - start_time, 3)
         if driver:
             driver.quit()
-
-    return result
 
 # ==================================================
 # main

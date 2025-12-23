@@ -17,7 +17,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
+#from webdriver_manager.chrome import ChromeDriverManager
 
 # ==================================================
 # 프로젝트 루트 등록
@@ -29,6 +29,7 @@ if PROJECT_ROOT not in sys.path:
 
 from common.common_logger import get_logger
 from common.constants import LegalDocProvided
+from common.base_scraper import BaseScraper
 
 ORG_NAME = LegalDocProvided.FSS
 logger = get_logger("fss_legnotice_selenium")
@@ -51,17 +52,24 @@ MAX_WORKERS = 5  # 동시 상세 페이지 수집 스레드 수
 # Selenium 드라이버 생성
 # ==================================================
 def create_driver(headless=True):
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-logging")
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """     
+    scraper = BaseScraper()
+    chrome_options = Options()
+    if HEADLESS:
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    return scraper._create_webdriver(chrome_options)
 
 # ==================================================
 # 날짜 문자열 → datetime.date
@@ -188,10 +196,8 @@ def scrape_all(start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-# ==================================================
-# Health Check (FSS 세칙 제·개정 예고)
-# ==================================================
 def fss_legnotice_health_check() -> dict:
+    start_time = time.perf_counter()
     check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     result = {
@@ -200,23 +206,21 @@ def fss_legnotice_health_check() -> dict:
         "check_time": check_time,
         "status": "FAIL",
         "checks": {
-            "search_page": {
-                "url": LIST_URL,
-                "success": False,
-                "message": ""
-            },
             "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
+                "url": LIST_URL,
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
             },
             "detail_page": {
                 "url": None,
-                "success": False,
-                "content_length": 0
-            }
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
+            },
         },
-        "error": None
+        "error": None,
+        "elapsed": None,
     }
 
     driver = create_driver(headless=HEADLESS)
@@ -224,34 +228,42 @@ def fss_legnotice_health_check() -> dict:
     try:
         logger.info("[HEALTH] FSS 세칙 제·개정 예고 Health Check 시작")
 
-        # 1️⃣ 목록 페이지 접근
+        # ----------------------
+        # 1️⃣ 목록 페이지 체크
+        # ----------------------
+        t0 = time.perf_counter()
+
         driver.get(LIST_URL)
         page_items = parse_list_page(driver)
 
         if not page_items:
-            result["checks"]["search_page"]["message"] = "목록 페이지 접근 실패 또는 공고 없음"
-            return result
+            raise RuntimeError("목록 페이지 접근 실패 또는 공고 없음")
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "목록 페이지 접근 성공"
-
-        # 2️⃣ 목록 1건 추출
         first_item = page_items[0]
-        result["checks"]["list_page"]["success"] = True
-        result["checks"]["list_page"]["count"] = 1
-        result["checks"]["list_page"]["title"] = first_item["title"]
 
-        # 3️⃣ 상세 페이지 접근
+        result["checks"]["list_page"].update({
+            "status": "OK",
+            "message": f"목록 1건 추출 성공 ({first_item['title']})",
+            "elapsed": round(time.perf_counter() - t0, 3),
+        })
+
+        # ----------------------
+        # 2️⃣ 상세 페이지 체크
+        # ----------------------
+        t1 = time.perf_counter()
+
         detail_url = first_item["detail_url"]
         result["checks"]["detail_page"]["url"] = detail_url
 
         detail_text = parse_detail(detail_url)
         if not detail_text:
-            result["error"] = "상세 페이지 본문 추출 실패"
-            return result
+            raise RuntimeError("상세 페이지 본문 추출 실패")
 
-        result["checks"]["detail_page"]["success"] = True
-        result["checks"]["detail_page"]["content_length"] = len(detail_text)
+        result["checks"]["detail_page"].update({
+            "status": "OK",
+            "message": "상세 페이지 접근 및 본문 영역 확인",
+            "elapsed": round(time.perf_counter() - t1, 3),
+        })
 
         result["status"] = "OK"
         return result
@@ -261,6 +273,7 @@ def fss_legnotice_health_check() -> dict:
         return result
 
     finally:
+        result["elapsed"] = round(time.perf_counter() - start_time, 3)
         driver.quit()
         logger.info("[HEALTH] 드라이버 종료")
 

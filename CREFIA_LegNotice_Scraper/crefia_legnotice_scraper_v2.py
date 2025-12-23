@@ -16,7 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
+# from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
 # ==================================================
@@ -30,7 +30,7 @@ if PROJECT_ROOT not in sys.path:
 from common.common_logger import get_logger
 from common.common_http import check_url_status
 from common.constants import URLStatus, LegalDocProvided
-
+from common.base_scraper import BaseScraper
 # ==================================================
 # 설정
 # ==================================================
@@ -50,25 +50,41 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # 드라이버 생성
 # ==================================================
 def create_driver(headless=True):
-    chrome_options = Options()
-    if headless:
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--disable-gpu")
+    # chrome_options = Options()
+    # if headless:
+    #     chrome_options.add_argument("--headless=new")
+    #     chrome_options.add_argument("--disable-gpu")
 
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--remote-allow-origins=*")
+    # chrome_options.add_argument("--no-sandbox")
+    # chrome_options.add_argument("--disable-dev-shm-usage")
+    # chrome_options.add_argument("--disable-extensions")
+    # chrome_options.add_argument("--remote-allow-origins=*")
 
-    prefs = {
-        "profile.managed_default_content_settings.images": 2
-    }
-    chrome_options.add_experimental_option("prefs", prefs)
+    # prefs = {
+    #     "profile.managed_default_content_settings.images": 2
+    # }
+    # chrome_options.add_experimental_option("prefs", prefs)
 
-    service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.capabilities["pageLoadStrategy"] = PAGE_LOAD_STRATEGY
-    return driver
+    # service = ChromeService(ChromeDriverManager().install())
+    # driver = webdriver.Chrome(service=service, options=chrome_options)
+    # driver.capabilities["pageLoadStrategy"] = PAGE_LOAD_STRATEGY
+    # return driver
+
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return scraper._create_webdriver(options)
 
 # ==================================================
 # 목록 로딩 대기
@@ -212,6 +228,7 @@ def scrape_all(start_date=None, end_date=None):
 # Health Check
 # ==================================================
 def crefia_legnotice_health_check() -> dict:
+    start_time = time.perf_counter()
     check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     result = {
@@ -221,28 +238,35 @@ def crefia_legnotice_health_check() -> dict:
         "status": "FAIL",
         "checks": {
             "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
+                "url": BASE_LIST_URL,
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
             },
             "detail_page": {
                 "url": None,
-                "success": False,
-                "content_length": 0
-            }
+                "status": "FAIL",
+                "message": "",
+                "elapsed": None,
+            },
         },
-        "error": None
+        "error": None,
+        "elapsed": None,
     }
 
     driver = create_driver(HEADLESS)
     wait = WebDriverWait(driver, WAIT_TIMEOUT)
 
     try:
+        # ----------------------
+        # 1. 목록 페이지 체크
+        # ----------------------
+        t0 = time.perf_counter()
+
         driver.get(BASE_LIST_URL)
 
         if not wait_for_list(driver, wait):
-            result["error"] = "목록 페이지 로딩 실패"
-            return result
+            raise RuntimeError("목록 페이지 로딩 실패")
 
         rows = driver.find_elements(
             By.CSS_SELECTOR,
@@ -250,33 +274,38 @@ def crefia_legnotice_health_check() -> dict:
         )
 
         if not rows:
-            result["error"] = "목록 없음"
-            return result
+            raise RuntimeError("목록 없음")
 
         first_row = rows[0]
         title = first_row.find_element(By.CSS_SELECTOR, "td.align_L a").text.strip()
 
         result["checks"]["list_page"].update({
-            "success": True,
-            "count": 1,
-            "title": title
+            "status": "OK",
+            "message": f"목록 1건 추출 성공 ({title})",
+            "elapsed": round(time.perf_counter() - t0, 3),
         })
 
-        driver.execute_script("arguments[0].click();", first_row)
+        # ----------------------
+        # 2. 상세 페이지 체크
+        # ----------------------
+        t1 = time.perf_counter()
+
+        link = first_row.find_element(By.CSS_SELECTOR, "td.align_L a")
+        driver.execute_script("arguments[0].click();", link)
         time.sleep(0.8)
 
         detail_url = driver.current_url
         detail_html = driver.page_source
         detail = parse_detail_html(detail_html, detail_url)
 
-        if not detail["content"]:
-            result["error"] = "본문 추출 실패"
-            return result
+        if not detail.get("content"):
+            raise RuntimeError("상세 페이지 본문 추출 실패")
 
         result["checks"]["detail_page"].update({
             "url": detail_url,
-            "success": True,
-            "content_length": len(detail["content"])
+            "status": "OK",
+            "message": "상세 페이지 접근 및 본문 영역 확인",
+            "elapsed": round(time.perf_counter() - t1, 3),
         })
 
         result["status"] = "OK"
@@ -287,6 +316,7 @@ def crefia_legnotice_health_check() -> dict:
         return result
 
     finally:
+        result["elapsed"] = round(time.perf_counter() - start_time, 3)
         driver.quit()
 
 # ==================================================

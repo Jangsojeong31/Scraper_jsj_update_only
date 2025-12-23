@@ -20,7 +20,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
+# from webdriver_manager.chrome import ChromeDriverManager
 
 # ==================================================
 # 프로젝트 루트 경로 등록
@@ -33,6 +33,7 @@ if PROJECT_ROOT not in sys.path:
 from common.common_logger import get_logger
 from common.common_http import check_url_status
 from common.constants import URLStatus, LegalDocProvided
+from common.base_scraper import BaseScraper
 
 # ==================================================
 # 설정
@@ -51,14 +52,21 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # 드라이버 생성
 # ==================================================
 def create_driver():
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return scraper._create_webdriver(options)
 # ==================================================
 # 날짜 처리
 # ==================================================
