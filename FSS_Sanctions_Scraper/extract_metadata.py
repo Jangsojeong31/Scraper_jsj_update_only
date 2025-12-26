@@ -598,11 +598,11 @@ def _extract_incidents_from_section(section_text):
             
             # 새 사건 시작
             # parent_title이 있으면 "상위제목 - 하위제목" 형식으로, 없으면 하위제목만
-            # 단, "문책사항", "책임사항", "자율처리 필요사항", "경영유의", "개선사항" 등 특수 키워드는 접두사로 사용하지 않음
+            # 단, "문책사항", "책임사항", "자율처리 필요사항", "경영유의", "개선사항", "주의사항" 등 특수 키워드는 접두사로 사용하지 않음
             if parent_title:
                 # 특수 키워드 체크 (공백 제거 후 비교)
                 parent_title_normalized = re.sub(r'\s+', '', parent_title)
-                special_keywords = ['문책사항', '책임사항', '자율처리필요사항', '경영유의', '경영유의사항', '개선사항']
+                special_keywords = ['문책사항', '책임사항', '자율처리필요사항', '경영유의', '경영유의사항', '개선사항', '주의사항']
                 is_special_keyword = any(keyword in parent_title_normalized for keyword in special_keywords)
                 
                 if is_special_keyword:
