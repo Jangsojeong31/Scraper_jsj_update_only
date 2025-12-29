@@ -1,3 +1,5 @@
+# kofiu_scraper_v2.py
+
 """
 금융정보분석원(KoFIU) 제재공시 스크래퍼 v2
 - common/file_extractor.py의 FileExtractor를 사용하여 PDF 추출
@@ -37,12 +39,9 @@ except ImportError:
 # common 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
-# from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
-from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
-# from ocr_extractor import OCRExtractor
-from ocr_extractor import OCRExtractor
-# from post_process_ocr import process_ocr_text, clean_content_symbols
-from post_process_ocr import process_ocr_text, clean_content_symbols
+from KoFIU_Scraper.extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
+from KoFIU_Scraper.ocr_extractor import OCRExtractor
+from KoFIU_Scraper.post_process_ocr import process_ocr_text, clean_content_symbols
 
 try:
     from selenium import webdriver
@@ -1544,119 +1543,211 @@ class KoFIUScraperV2:
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-import os
-import time
-from datetime import datetime
-from typing import Dict, Optional
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
-import json
+from typing import Dict
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.base_scraper import BaseScraper
+from KoFIU_Scraper.extractor.pdf_extractor import PDFExtractor
+from KoFIU_Scraper.extractor.ocr_extractor import OCRExtractor
 
 def kofiu_health_check() -> Dict:
-    """
-    금융투자협회(KOFIA) 제재조치 현황 Health Check
-    출력 JSON 양식은 BOK Health Check 구조와 동일
-    """
-    BASE_URL = "https://law.kofia.or.kr"
-    LIST_URL = "https://law.kofia.or.kr/service/law/lawCurrentMain.do"
-    CURRENT_DIR = "output"
 
-    os.makedirs(CURRENT_DIR, exist_ok=True)
-
-    result: Dict = {
-        "org_name": "KOFIA",
-        "target": "금융투자협회 > 제재조치 현황",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "search_page": {"url": LIST_URL, "success": False, "message": None},
-            "list_page": {"success": False, "count": 0, "title": None},
-            "detail_page": {"url": None, "success": False, "content_length": 0}
-        },
-        "error": None
-    }
-
-    def _create_webdriver() -> webdriver.Chrome:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--lang=ko-KR")
-        prefs = {
-            "download.default_directory": os.path.abspath(CURRENT_DIR),
-            "download.prompt_for_download": False,
-            "plugins.always_open_pdf_externally": True
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
-        return webdriver.Chrome(options=chrome_options)
-
-    driver: Optional[webdriver.Chrome] = None
-    try:
-        driver = _create_webdriver()
-        # 1. 검색/목록 페이지 접근
-        driver.get(LIST_URL)
-        time.sleep(3)
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
-
-        # 2. 목록 1건 추출
-        tree_links = []
+    def safe_remove(path: str):
         try:
-            tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-            driver.switch_to.frame(tree_iframe)
-            soup = BeautifulSoup(driver.page_source, "lxml")
-            driver.switch_to.default_content()
-            nodes = soup.select("a")
-            if nodes:
-                first_node = nodes[0]
-                tree_links.append({
-                    "title": first_node.get_text(strip=True),
-                    "href": first_node.get("href")
-                })
-                result["checks"]["list_page"]["success"] = True
-                result["checks"]["list_page"]["count"] = 1
-                result["checks"]["list_page"]["title"] = first_node.get_text(strip=True)
+            if path and os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    BASE_URL = "https://www.kofiu.go.kr"
+    LIST_URL = "https://www.kofiu.go.kr/kor/notification/sanctions.do"
+    OUTPUT_DIR = "output/downloads"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    start_time = time.perf_counter()
+    result = base_health_output(
+        auth_src="금융위원회-금융정보분석원 > 제재공시",
+        scraper_id="KOFIU",
+        target_url=LIST_URL,
+    )
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--lang=ko-KR")
+    prefs = {
+        "download.default_directory": os.path.abspath(OUTPUT_DIR),
+        "download.prompt_for_download": False,
+        "plugins.always_open_pdf_externally": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+
+    driver = None
+    try:
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            LIST_URL,
+            use_selenium=True,
+            allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=LIST_URL,
+            )
+                
+        baseScraper = BaseScraper()
+        # driver = webdriver.Chrome(options=chrome_options)        
+        driver = baseScraper._create_webdriver(chrome_options)
+        # Headless 모드에서 다운로드 허용 설정 (중요)
+        driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": os.path.abspath(OUTPUT_DIR)
+        })        
+        driver.get(LIST_URL)
+        wait = WebDriverWait(driver, 15)
+
+        # 1. 첫 번째 게시물 선택
+        first_li = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "li.bo_li")))
+        title = first_li.find_element(By.CSS_SELECTOR, "p.li_subject").text.strip()
+        result["checks"]["list"] = {
+            "success": True,
+            "count": 1,
+            "title": title
+        }
+
+        # 2. 첨부파일 처리용 기본 구조
+        file_check = {
+            "download_ok": False,
+            "selenium_required": True,
+            "text_extract_ok": False,
+            "ocr_available": False,
+            "reason": None,
+            "message": None,
+            "download_url": None,
+            "path": None
+        }
+
+        try:
+            # 첨부파일 버튼 클릭
+            btn_file_open = first_li.find_element(By.CSS_SELECTOR, "a.btn_file_open")
+            driver.execute_script("arguments[0].click();", btn_file_open)
+
+            # PDF 링크 대기 및 클릭
+            pdf_link_selector = "ul.file_list a.pdf"
+            pdf_link_elem = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, f"li.bo_li {pdf_link_selector}")
+            ))
+            href = pdf_link_elem.get_attribute("href")
+            download_url = urljoin(BASE_URL, href)
+            file_check["download_url"] = download_url
+
+            # ======================================================
+            # 4-1. 다운로드 클릭
+            # ======================================================
+            driver.execute_script("arguments[0].click();", pdf_link_elem)
+
+            # 다운로드 완료 대기
+            timeout = 20
+            save_path = None
+            start_wait = time.time()
+            while time.time() - start_wait < timeout:
+                files = [f for f in os.listdir(OUTPUT_DIR) if f.lower().endswith(".pdf")]
+                if files:
+                    potential_path = os.path.join(OUTPUT_DIR, files[-1])
+                    if os.path.getsize(potential_path) > 0:
+                        save_path = potential_path
+                        break
+                time.sleep(1)
+
+            if save_path:
+                file_check.update(download_ok=True, path=save_path)
+                # PDF 본문 추출 시도
+                try:
+                    text = PDFExtractor.extract_text(save_path)
+                    if text.strip():
+                        result["checks"]["pdf_parse"] = {
+                            "success": True,
+                            "message": "PDF 본문 파싱 가능"
+                        }
+                        file_check["text_extract_ok"] = True
+                except Exception as e:
+                    # PDF 파싱 실패 시 OCR 추출 시도
+                    try:
+                        ocr_text = OCRExtractor().extract_text(save_path)
+                        if ocr_text.strip():
+                            result["checks"]["ocr_parse"] = {
+                                "success": True,
+                                "message": "OCR 본문 파싱 가능"
+                            }
+                            file_check["ocr_available"] = True
+                    except Exception as e2:
+                        result["checks"]["ocr_parse"] = {
+                            "success": False,
+                            "message": f"[OCR_FAIL] {e2}"
+                        }
+            else:
+                file_check.update(reason="DOWNLOAD_FAIL", message="PDF 다운로드 실패 또는 타임아웃")
+
         except Exception as e:
-            result["error"] = f"목록 추출 오류: {e}"
+            file_check.update(reason="ELEMENT_NOT_FOUND", message=str(e))
 
-        # 3. 상세 페이지 접근
-        if tree_links:
-            item = tree_links[0]
-            try:
-                tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-                driver.switch_to.frame(tree_iframe)
-                link_elem = driver.find_element(By.LINK_TEXT, item["title"])
-                link_elem.click()
-                time.sleep(2)
-                content_soup = BeautifulSoup(driver.page_source, "lxml")
-                driver.switch_to.default_content()
+        # FSS 스타일 출력
+        result["checks"]["file_download"] = {
+            "url": file_check.get("download_url"),
+            "success": file_check.get("download_ok", False),
+            "message": "첨부파일 다운로드 가능" if file_check.get("download_ok") else file_check.get("message")
+        }
 
-                result["checks"]["detail_page"]["url"] = item["href"]
-                result["checks"]["detail_page"]["success"] = True
-                content_text = content_soup.get_text(strip=True)
-                result["checks"]["detail_page"]["content_length"] = len(content_text)
+        # 헬스 체크 최종 상태
+        result["ok"] = file_check["download_ok"]
+        result["status"] = "OK" if result["ok"] else "FAIL"
+        result["elapsed_ms"] = int((time.perf_counter() - start_time) * 1000)
 
-            except Exception as e:
-                result["error"] = f"상세 페이지 접근 실패: {e}"
-
-        # 최종 상태 결정
-        if all([
-            result["checks"]["search_page"]["success"],
-            result["checks"]["list_page"]["success"],
-            result["checks"]["detail_page"]["success"]
-        ]):
-            result["status"] = "OK"
+        return result
 
     except Exception as e:
-        result["error"] = str(e)
+        raise HealthCheckError(HealthErrorType.UNKNOWN_ERROR, str(e), "kofiu_health_check")
+
     finally:
+        # ===============================
+        # ✅ 기능 완료 후 파일 삭제
+        # ===============================
+        safe_remove(save_path)
+
         if driver:
             driver.quit()
 
-    return result
+# ==================================================
+# scheduler call
+# ==================================================
+def run(csv_path=None, limit=0):
+    scraper = KoFIUScraperV2()
+    results = scraper.scrape_all()
+    scraper.save_results()
+
+    print("\n" + "=" * 60)
+    print("스크래핑 완료!")
+    print(f"총 {len(results)}개 제재 건 수집 (사건별로 분리되어 저장됨)")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)

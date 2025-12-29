@@ -1,4 +1,4 @@
-# bok_legnotice_scraper_selenium_driverpool.py
+# bok_legnotice_scraper.py
 # BOK 규정예고 / Selenium 기반 스크래퍼
 # 페이지네이션 반복 + 상세 페이지 병렬 크롤링 + 드라이버 풀 사용 (메모리 최적화)
 # 한국은행-운영 및 법규→ 법규정보→ 규정 예고
@@ -7,7 +7,7 @@ import os
 import sys
 import json
 import argparse
-import time
+from time import time, sleep
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 from queue import Queue
@@ -237,75 +237,148 @@ def scrape_all(start_date=None, end_date=None):
 # ==================================================
 # Health Check
 # ==================================================
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
 def bok_legnotice_health_check() -> dict:
     """
     BOK 규정예고 Health Check
-    - 목록 1건 추출 성공 여부
-    - 목록 1건 상세 페이지 접근 성공 여부
+    - HTTP 접근
+    - 목록 1건 확인
+    - 상세 페이지 접근
     """
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    result = {
-        "org_name": ORG_NAME,
-        "target": "한국은행 > 운영 및 법규 > 법규정보 > 규정 예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": LIST_URL,
-                "status": "FAIL",
-                "message": ""
-            },
-            "detail_page": {
-                "url": "",
-                "status": "FAIL",
-                "message": ""
-            }
-        }
-    }
 
-    driver = create_driver()
+    start_ts = time()
+
+    result = base_health_output(
+        auth_src="한국은행-규정예고",
+        scraper_id="BOK_LEGNOTICE",
+        target_url=LIST_URL,
+    )
+
+    driver = None
 
     try:
-        # 1️⃣ 목록 페이지 접근
+        # ==================================================
+        # 1️⃣ HTTP 체크 (항상 생성)
+        # ==================================================
+        http_result = check_url_status(LIST_URL)
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status_code": http_result["http_code"],
+            "verify_ssl": True,
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+
+        # ==================================================
+        # 2️⃣ 목록 접근
+        # ==================================================
+        driver = create_driver()
         driver.get(LIST_URL)
+
         WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.bdLine.type2.type3 ul li"))
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "div.bdLine.type2.type3 ul li")
+            )
         )
 
         items = parse_list(driver)
+
         if not items:
-            result["checks"]["list_page"]["message"] = "목록 1건도 추출되지 않음"
-            return result
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "규정예고 목록이 비어 있음",
+                "div.bdLine.type2.type3 ul > li",
+            )
 
         first_item = items[0]
-        result["checks"]["list_page"]["status"] = "OK"
-        result["checks"]["list_page"]["message"] = "목록 1건 추출 성공"
 
-        # 2️⃣ 상세 페이지 접근
-        detail_url = first_item["detail_url"]
-        result["checks"]["detail_page"]["url"] = detail_url
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(items),
+        }
+
+        # ==================================================
+        # 3️⃣ 상세 페이지 접근
+        # ==================================================
+        detail_url = first_item.get("detail_url")
+
+        if not detail_url:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락",
+                "a[href]",
+            )
 
         driver.get(detail_url)
+
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dbdata"))
         )
 
-        result["checks"]["detail_page"]["status"] = "OK"
-        result["checks"]["detail_page"]["message"] = "상세 페이지 접근 및 본문 영역 확인"
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": detail_url,
+            "content_length": len(
+                driver.find_element(By.CSS_SELECTOR, "div.dbdata").text.strip()
+            ),
+        }
 
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
-        return result
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except TimeoutException as e:
-        result["checks"]["detail_page"]["message"] = f"Timeout 발생: {e}"
-        return result
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.TIMEOUT,
+                "페이지 로딩 Timeout",
+                str(e),
+            ),
+        )
 
     except Exception as e:
-        result["checks"]["detail_page"]["message"] = str(e)
-        return result
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e),
+            ),
+        )
 
     finally:
-        driver.quit()
+        result["elapsed_ms"] = int((time() - start_ts) * 1000)
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
 
 # ==================================================
 # CLI

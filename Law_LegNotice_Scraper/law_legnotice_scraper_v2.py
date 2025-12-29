@@ -887,16 +887,20 @@ def main():
     
     args = parser.parse_args()
     
-    print("=== 법제처 시행예정법령 스크래퍼 시작 ===\n")
+    data_process(delay=1.0, csv_path=args.csv_path, content_all=args.content_all,max_items=args.max_items, no_detail=args.no_detail)
     
-    scraper = LawLegNoticeScraper(delay=1.0, csv_path=args.csv_path, content_all=args.content_all)
+   
+def data_process(delay, csv_path=None, content_all=None, max_items=None, no_detail=None):
+    print("=== 법제처 시행예정법령 스크래퍼 시작 ===\n")
+
+    scraper = LawLegNoticeScraper(delay, csv_path, content_all)
     
     # 스크래핑 실행
     results = scraper.scrape_all(
-        max_items=args.max_items,
-        extract_detail=not args.no_detail
+        max_items=max_items,
+        extract_detail=not no_detail
     )
-    
+
     print(f"\n=== 스크래핑 완료: {len(results)}개 항목 ===")
     
     # 날짜 필드 정규화 및 본문 길이 제한
@@ -963,6 +967,14 @@ def main():
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
+from common.health_schema import base_health_output
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_mapper import apply_health_error
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.constants import URLStatus
+
 def law_legnotice_health_check() -> dict:
     """
     법제처 국가법령정보센터 - 시행예정법령 Health Check
@@ -977,34 +989,11 @@ def law_legnotice_health_check() -> dict:
 
     scraper = LawLegNoticeScraper(delay=1.0)
 
-    result = {
-        "org_name": "MOLEGIS",
-        "target": "법제처 > 국가법령정보센터 > 시행예정법령",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "search_page": {
-                "url": TARGET_URL,
-                "success": False,
-                "message": ""
-            },
-            "tab_move": {
-                "success": False,
-                "message": ""
-            },
-            "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
-            },
-            "detail_page": {
-                "url": None,
-                "success": False,
-                "content_length": 0
-            }
-        },
-        "error": None
-    }
+    result = base_health_output(
+        auth_src="법제처 > 국가법령정보센터 > 시행예정법령",
+        scraper_id="LAW_LEGNOTICE",
+        target_url=TARGET_URL,
+    )
 
     driver = None
 
@@ -1022,13 +1011,35 @@ def law_legnotice_health_check() -> dict:
         driver = scraper._create_webdriver(chrome_options)
         driver.get(TARGET_URL)
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
+        # result["checks"]["search_page"]["success"] = True
+        # result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
 
         # =================================================
         # 2. 시행예정법령 탭 이동 (tab3)
         # =================================================
         try:
+            # ======================================================
+            # HTTP 접근성 사전 체크
+            # ======================================================
+            http_result = check_url_status(
+                TARGET_URL,
+                use_selenium=True,
+                allow_fallback=False,
+            )
+
+            result["checks"]["http"] = {
+                "ok": http_result["status"] == URLStatus.OK,
+                "status": http_result["status"].name,
+                "status_code": http_result["http_code"],
+            }
+
+            if http_result["status"] != URLStatus.OK:
+                raise HealthCheckError(
+                    map_urlstatus_to_health_error(http_result["status"]),
+                    "목록 페이지 HTTP 접근 실패",
+                    target=TARGET_URL,
+                )
+                    
             tab_elem = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "tab3"))
             )
@@ -1042,12 +1053,17 @@ def law_legnotice_health_check() -> dict:
             )
             time.sleep(1)
 
-            result["checks"]["tab_move"]["success"] = True
-            result["checks"]["tab_move"]["message"] = "시행예정법령 탭 이동 성공"
+            # result["checks"]["tab_move"]["success"] = True
+            # result["checks"]["tab_move"]["message"] = "시행예정법령 탭 이동 성공"
 
         except Exception as e:
-            result["checks"]["tab_move"]["message"] = str(e)
-            return result
+            # result["checks"]["tab_move"]["message"] = str(e)
+            # return result
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "시행예정법령 탭 이동 실패",
+                ""
+            )        
 
         # =================================================
         # 3. 목록 1건 추출
@@ -1055,7 +1071,7 @@ def law_legnotice_health_check() -> dict:
         first_link = driver.find_element(By.CSS_SELECTOR, "td.tl a")
         title = first_link.text.strip()
 
-        result["checks"]["list_page"] = {
+        result["checks"]["list"] = {
             "success": True,
             "count": 1,
             "title": title
@@ -1087,23 +1103,42 @@ def law_legnotice_health_check() -> dict:
         content = scraper.extract_law_detail(soup)
         content_length = len(content) if content else 0
 
-        result["checks"]["detail_page"] = {
+        result["checks"]["detail"] = {
             "url": detail_url,
             "success": True,
             "content_length": content_length
         }
 
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
         return result
-
+    
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
+    
     except Exception as e:
-        result["error"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e)
+            )
+        )
         return result
 
     finally:
         if driver:
             driver.quit()
 
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    main()
 
 if __name__ == "__main__":
     import json

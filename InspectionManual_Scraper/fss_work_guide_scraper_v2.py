@@ -1,3 +1,7 @@
+# fss_work_guide_scraper_v2.py
+
+import os
+import sys
 import argparse
 import csv
 import json
@@ -11,6 +15,15 @@ import requests
 from bs4 import BeautifulSoup
 import sys
 from datetime import datetime
+
+# ==================================================
+# 프로젝트 루트 등록
+# ==================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 
 BASE_URL = "https://www.fss.or.kr"
 LIST_PATH = "/fss/bbs/B0000167/list.do"
@@ -680,62 +693,64 @@ def main() -> None:
 # -------------------------------------------------
 from datetime import datetime
 from time import perf_counter
+from common.constants import URLStatus
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from urllib.parse import urljoin
 
 def fss_menual_health_check() -> Dict:
     check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     start_time_total = perf_counter()
 
-    result = {
-        "org_name": "FSS",
-        "target": "금융감독원 > 검사업무 매뉴얼",
-        "check_time": check_time,
-        "status": "FAIL",
-        "elapsed": 0,
-        "checks": {
-            "selenium": {
-                "success": True,  # FSS는 Selenium 없이 처리 가능
-                "elapsed": 0,
-                "message": "Selenium 사용 없음"
-            },
-            "search_page": {
-                "success": False,
-                "url": urljoin(BASE_URL, LIST_PATH),
-                "elapsed": 0
-            },
-            "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None,
-                "elapsed": 0
-            },
-            "detail_page": {
-                "success": False,
-                "url": None,
-                "content_length": 0,
-                "elapsed": 0
-            }
-        },
-        "error": None
-    }
+    LIST_URL = "https://www.fss.or.kr/fss/bbs/B0000167/list.do?menuNo=200177"
+
+    result = base_health_output(
+        auth_src="금융감독원 > 검사업무 매뉴얼",
+        scraper_id="INSPECTIONMANUAL",
+        target_url=LIST_URL,
+    )
 
     session = requests.Session()
 
+
     try:
-        # -----------------------------
+
+        # ======================================================
+        # 0️⃣ HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(LIST_URL)
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"].name == "OK",
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+
+
         # 1. 목록 페이지 접근
-        # -----------------------------
         t0 = perf_counter()
         params = {"menuNo": "200177", "pageIndex": "1"}
-        soup = fetch_soup(session, urljoin(BASE_URL, LIST_PATH), params=params)
+        try:
+            soup = fetch_soup(session, urljoin(BASE_URL, LIST_PATH), params=params)
+        except ScraperError:
+            raise HealthCheckError(
+                HealthErrorType.HTTP_ERROR,
+                f"목록 페이지 접근 실패: {urljoin(BASE_URL, LIST_PATH)}"
+            )
         t1 = perf_counter()
-        result["checks"]["search_page"].update({
-            "success": True,
-            "elapsed": round(t1 - t0, 3)
-        })
+#        result["checks"]["search_page"].update({"success": True, "elapsed": round(t1 - t0, 3)})
 
-        # -----------------------------
         # 2. 목록 파싱
-        # -----------------------------
         t0 = perf_counter()
         bd_list = soup.select_one(".bd-list, [class*='bd-list'], div.bd-list, table.bd-list")
         rows = []
@@ -758,42 +773,109 @@ def fss_menual_health_check() -> Dict:
                 rows = [parse_list_row(tr) for tr in table.find("tbody").find_all("tr")]
         rows = [r for r in rows if r]
         t1 = perf_counter()
-        result["checks"]["list_page"].update({
-            "success": bool(rows),
+        # result["checks"]["list"].update({
+        #     # "success": bool(rows),
+        #     # "count": len(rows),
+        #     # "title": rows[0].get("제목") if rows else None,
+        #     # "elapsed": round(t1 - t0, 3)
+        # })
+        result["checks"]["list"] = {
+            "ok": True,
             "count": len(rows),
-            "title": rows[0].get("제목") if rows else None,
-            "elapsed": round(t1 - t0, 3)
-        })
+             "title": rows[0].get("제목") if rows else None,   
+        }        
 
         if not rows:
-            raise Exception("목록 데이터 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 없음",
+                selector=".bd-list, table"
+            )
 
-        # -----------------------------
-        # 3. 상세 페이지 접근 (첫 번째 게시글)
-        # -----------------------------
+        # 3. 상세 페이지 접근
         t0 = perf_counter()
         first_post = rows[0]
-        detail_url = first_post.get("상세URL")
-        detail_soup = fetch_soup(session, urljoin(BASE_URL, detail_url))
+        detail_url = first_post.get("상세페이지URL") or first_post.get("상세URL")
+        if not detail_url:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 링크 누락",
+                record=first_post
+            )
+
+        try:
+            detail_soup = fetch_soup(session, urljoin(BASE_URL, detail_url))
+        except ScraperError:
+            raise HealthCheckError(
+                HealthErrorType.HTTP_ERROR,
+                f"상세 페이지 접근 실패: {detail_url}"
+            )
+
         content_length = len(detail_soup.get_text(strip=True))
         t1 = perf_counter()
-
-        result["checks"]["detail_page"].update({
-            "success": True,
+        # result["checks"]["detail"].update({
+        #     "success": True,
+        #     "url": detail_url,
+        #     "content_length": content_length,
+        #     "elapsed": round(t1 - t0, 3)
+        # })
+        result["checks"]["detail"] = {
+            "ok": True,
             "url": detail_url,
-            "content_length": content_length,
-            "elapsed": round(t1 - t0, 3)
-        })
+            "content_length": content_length
+        }        
 
+        if content_length == 0:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 내용 비어 있음",
+                url=detail_url
+            )
+
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
+        return result
+    
+    # except HealthCheckError as exc:
+    #     result["error_type"] = exc.error_type
+    #     result["error_message"] = str(exc)
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
+    
+    # except Exception as exc:
+    #     result["error_type"] = HealthErrorType.UNEXPECTED_ERROR
+    #     result["error_message"] = str(exc)
 
-    except Exception as exc:
-        result["error"] = str(exc)
-
+    except Exception as e:
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e)
+            )
+        )
+    
     finally:
         result["elapsed"] = round(perf_counter() - start_time_total, 3)
 
     return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    session = requests.Session()
+    results = scrape_all(session)
+
+    print(f"[정보] 총 {len(results)}건 수집 완료")
+
+    json_path, csv_path = save_results(results)
+    print(f"[정보] JSON 저장: {json_path}")
+    print(f"[정보] CSV 저장: {csv_path}")
 
 if __name__ == "__main__":
     # -------------------------------------------------

@@ -205,90 +205,128 @@ def scrape_all(start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-def fsc_legnotice_health_check() -> dict:
-    start_time = time.perf_counter()
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from typing import Dict
+import time
+from datetime import datetime
 
-    result = {
-        "org_name": ORG_NAME,
-        "target": "금융위원회 > 입법예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": BASE_URL,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-            "detail_page": {
-                "url": None,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-        },
-        "error": None,
-        "elapsed": None,
-    }
+from common.common_http import check_url_status
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
+
+def fsc_legnotice_health_check() -> Dict:
+    start_ts = time.perf_counter()
+
+    result = base_health_output(
+        auth_src="금융위원회-입법예고",
+        scraper_id="FSC_LEGNOTICE",
+        target_url=BASE_URL,
+    )
 
     driver = create_driver()
 
     try:
-        logger.info("[HEALTH] FSC 입법예고 Health Check 시작")
+        # ==================================================
+        # 1️⃣ HTTP 접근 체크
+        # ==================================================
+        http_result = check_url_status(BASE_URL)
+        url_status = http_result["status"]
 
-        # ----------------------
-        # 1️⃣ 목록 페이지 체크
-        # ----------------------
-        t0 = time.perf_counter()
+        result["checks"]["http"] = {
+            "ok": url_status == URLStatus.OK,
+            "status_code": http_result.get("status_code"),
+            "verify_ssl": http_result.get("verify_ssl", True),
+        }
 
-        if check_url_status(BASE_URL)["status"] != URLStatus.OK:
-            raise RuntimeError("목록 페이지 접근 실패")
+        if url_status != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(url_status),
+                "입법예고 목록 페이지 접근 실패",
+                BASE_URL,
+            )
 
+        # ==================================================
+        # 2️⃣ 목록 페이지 체크
+        # ==================================================
         driver.get(BASE_URL)
+        items = extract_list(driver)
 
-        list_items = extract_list(driver)
-        if not list_items:
-            raise RuntimeError("목록 로딩 실패 또는 게시글 없음")
+        if not items:
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "입법예고 목록 데이터 없음",
+                "div.board-wrap li",
+            )
 
-        first_item = list_items[0]
+        first_item = items[0]
+        detail_url = first_item.get("detail_url")
 
-        result["checks"]["list_page"].update({
-            "status": "OK",
-            "message": f"목록 1건 추출 성공 ({first_item['title']})",
-            "elapsed": round(time.perf_counter() - t0, 3),
-        })
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(items),
+        }
 
-        # ----------------------
-        # 2️⃣ 상세 페이지 체크
-        # ----------------------
-        t1 = time.perf_counter()
+        if not detail_url:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락",
+                "a[href]",
+            )
 
-        detail_url = first_item["detail_url"]
-        result["checks"]["detail_page"]["url"] = detail_url
+        # ==================================================
+        # 3️⃣ 상세 페이지 체크
+        # ==================================================
+        content = extract_detail(driver, detail_url)
 
-        detail_text = extract_detail(driver, detail_url)
-        if not detail_text:
-            raise RuntimeError("상세 페이지 본문 추출 실패")
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 비어 있음",
+                "div.board-view-wrap div.cont",
+            )
 
-        result["checks"]["detail_page"].update({
-            "status": "OK",
-            "message": "상세 페이지 접근 및 본문 영역 확인",
-            "elapsed": round(time.perf_counter() - t1, 3),
-        })
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": detail_url,
+            "content_length": len(content),
+        }
 
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
-        return result
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except Exception as e:
-        result["error"] = str(e)
-        return result
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e),
+            ),
+        )
 
     finally:
-        result["elapsed"] = round(time.perf_counter() - start_time, 3)
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_ts) * 1000
+        )
         driver.quit()
-        logger.info("[HEALTH] 드라이버 종료")
 
+    return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
+    
 # ==================================================
 # CLI
 # ==================================================

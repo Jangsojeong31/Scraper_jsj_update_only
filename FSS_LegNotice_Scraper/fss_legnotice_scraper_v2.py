@@ -28,7 +28,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from common.common_logger import get_logger
-from common.constants import LegalDocProvided
+from common.constants import URLStatus, LegalDocProvided
 from common.base_scraper import BaseScraper
 
 ORG_NAME = LegalDocProvided.FSS
@@ -196,87 +196,125 @@ def scrape_all(start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-def fss_legnotice_health_check() -> dict:
+from typing import Dict
+
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+
+
+def fss_legnotice_health_check() -> Dict:
     start_time = time.perf_counter()
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    result = {
-        "org_name": ORG_NAME,
-        "target": "금융감독원 > 금융감독법규정보 > 금융감독법규정 > 세칙 제·개정 예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": LIST_URL,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-            "detail_page": {
-                "url": None,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-        },
-        "error": None,
-        "elapsed": None,
-    }
+    result = base_health_output(
+        auth_src="금융감독원-세칙 제·개정 예고",
+        scraper_id="FSS_LEGNOTICE",
+        target_url=LIST_URL,
+    )
 
-    driver = create_driver(headless=HEADLESS)
+    driver = None
 
     try:
-        logger.info("[HEALTH] FSS 세칙 제·개정 예고 Health Check 시작")
+        # ======================================================
+        # 0️⃣ HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(LIST_URL)
 
-        # ----------------------
-        # 1️⃣ 목록 페이지 체크
-        # ----------------------
-        t0 = time.perf_counter()
+        result["checks"]["http"] = {
+            "ok": http_result["status"].name == "OK",
+            "status_code": http_result["http_code"],
+        }
 
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+
+        # ======================================================
+        # 1️⃣ Selenium 목록 페이지 체크
+        # ======================================================
+        driver = create_driver(headless=HEADLESS)
         driver.get(LIST_URL)
-        page_items = parse_list_page(driver)
 
-        if not page_items:
-            raise RuntimeError("목록 페이지 접근 실패 또는 공고 없음")
+        rows = parse_list_page(driver)
+        if not rows:
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 없음",""
+#                selector="table tbody tr"
+            )
 
-        first_item = page_items[0]
+        first = rows[0]
 
-        result["checks"]["list_page"].update({
-            "status": "OK",
-            "message": f"목록 1건 추출 성공 ({first_item['title']})",
-            "elapsed": round(time.perf_counter() - t0, 3),
-        })
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(rows),
+            "title": first["title"]
+        }
 
-        # ----------------------
+        # ======================================================
         # 2️⃣ 상세 페이지 체크
-        # ----------------------
-        t1 = time.perf_counter()
+        # ======================================================
+        detail_url = first.get("detail_url")
+        if not detail_url:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락"
+            )
 
-        detail_url = first_item["detail_url"]
-        result["checks"]["detail_page"]["url"] = detail_url
+        content = parse_detail(detail_url)
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 비어 있음",
+                url=detail_url
+            )
 
-        detail_text = parse_detail(detail_url)
-        if not detail_text:
-            raise RuntimeError("상세 페이지 본문 추출 실패")
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": detail_url,
+            "content_length": len(content)
+        }
 
-        result["checks"]["detail_page"].update({
-            "status": "OK",
-            "message": "상세 페이지 접근 및 본문 영역 확인",
-            "elapsed": round(time.perf_counter() - t1, 3),
-        })
-
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
         return result
 
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
+
     except Exception as e:
-        result["error"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e)
+            )
+        )
         return result
 
     finally:
-        result["elapsed"] = round(time.perf_counter() - start_time, 3)
-        driver.quit()
-        logger.info("[HEALTH] 드라이버 종료")
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_time) * 1000
+        )
+        if driver:
+            driver.quit()
 
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
+    
 # ==================================================
 # CLI 실행
 # ==================================================

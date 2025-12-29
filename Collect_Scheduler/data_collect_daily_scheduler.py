@@ -16,7 +16,7 @@ os.chdir(BASE_DIR)
 # ======================================================
 
 # 한국은행
-from BOK_LegNotice_Scraper.bok_legnotice_scraper_v2 import run as bok_legnotice_run
+from Bnk_Scraper_Dev.BOK_LegNotice_Scraper.bok_legnotice_scraper_v2 import run as bok_legnotice_run
 from BOK_Scraper.bok_scraper_v2 import run as bok_scraper_run
 
 # 여신금융협회
@@ -158,5 +158,3 @@ if __name__ == "__main__":
 
     print("⏰ Scheduler started (EVERY DAY 05:00)")
     scheduler.start()
-
-

@@ -1,5 +1,5 @@
 # kfb_scraper_v2.py
-# 공시·자료실>법규·규제>[탭]자율규제
+# 은행연합회-공시·자료실>법규·규제>[탭]자율규제
 
 """
 은행연합회 스크래퍼
@@ -1548,216 +1548,237 @@ class KfbScraper(BaseScraper):
 # ==================================================
 # Health Check
 # ==================================================
+# ==================================================
+# WebDriver 생성
+# ==================================================
+from selenium.webdriver.chrome.options import Options
+def create_driver():
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()    
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--window-size=1920x1080")
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return scraper._create_webdriver(options)
+
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+
 def kfb_health_check() -> dict:
     """
-    은행연합회 자율규제 Health Check
-    출력 형식: Health Checker v2 (BOK 표준)
+    은행연합회 자율규제 Health Check (v2)
+    - HealthErrorType 명시적 raise
+    - Alert 연계 가능
     """
 
-    from datetime import datetime
-    import os
-    import time
-    import re
-    from bs4 import BeautifulSoup
+    start_time = time.perf_counter()
 
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    result = {
-        "org_name": "KFB",
-        "target": "은행연합회 > 공시·자료실 > 법규·규제 > 자율규제",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "search_page": {
-                "url": "https://www.kfb.or.kr/publicdata/reform_info.php",
-                "success": False,
-                "message": ""
-            },
-            "list_page": {
-                "success": False,
-                "count": 0,
-                "title": ""
-            },
-            "detail_page": {
-                "url": "",
-                "success": False,
-                "content_length": 0
-            },
-            "file_download": {
-                "success": False,
-                "file_path": ""
-            }
-        },
-        "error": None
-    }
+    result = base_health_output(
+        auth_src="은행연합회 > 공시·자료실 > 법규·규제 > 자율규제",
+        scraper_id="KFB",
+        target_url="https://www.kfb.or.kr/publicdata/reform_info.php",
+    )
 
     scraper = KfbScraper(delay=1.0)
-    base_url = "https://www.kfb.or.kr/publicdata/reform_info.php"
     driver = None
+    base_url = result["target_url"]
 
     try:
-        # ==============================
-        # 1️⃣ 검색(목록) 페이지 접근
-        # ==============================
-        from selenium.webdriver.chrome.options import Options
+        # ======================================================
+        # 0️⃣ HTTP 접근성 체크
+        # ======================================================
+        http = check_url_status(base_url, use_selenium=True, allow_fallback=False)
 
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--lang=ko-KR")
-
-        prefs = {
-            "download.default_directory": os.path.abspath(str(scraper.current_dir)),
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "safebrowsing.enabled": True
+        result["checks"]["http"] = {
+            "ok": http["status"] == URLStatus.OK,
+            "status": http["status"].name,
+            "status_code": http["http_code"],
         }
-        chrome_options.add_experimental_option("prefs", prefs)
 
-        driver = scraper._create_webdriver(chrome_options)
+        if http["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http["status"]),
+                "검색 페이지 HTTP 접근 실패",
+                target=base_url,
+            )
+
+        # ======================================================
+        # 1️⃣ 검색 / 목록 페이지
+        # ======================================================
+        driver = create_driver()
         driver.get(base_url)
         time.sleep(2)
 
         soup = BeautifulSoup(driver.page_source, "lxml")
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
+        items = scraper.extract_table_data(soup, scraper.BASE_URL)
+        if not items:
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 추출 실패",
+                target="table.list",
+            )
 
-    except Exception:
-        soup = scraper.fetch_page(base_url, use_selenium=False)
-        if soup:
-            result["checks"]["search_page"]["success"] = True
-            result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공 (requests)"
-        else:
-            result["checks"]["search_page"]["message"] = "검색 페이지 접근 실패"
-            return result
+        first = items[0]
 
-    # ==============================
-    # 2️⃣ 목록 1건 추출
-    # ==============================
-    items = scraper.extract_table_data(soup, scraper.BASE_URL)
-    if not items:
-        result["error"] = "목록 데이터 추출 실패"
-        return result
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(items),
+            "title": first.get("title"),
+        }
 
-    first_item = items[0]
+        # ======================================================
+        # 2️⃣ 상세 페이지
+        # ======================================================
+        detail_link = first.get("detail_link")
+        if not detail_link:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 링크 없음",
+                target="detail_link",
+            )
 
-    result["checks"]["list_page"]["success"] = True
-    result["checks"]["list_page"]["count"] = 1
-    result["checks"]["list_page"]["title"] = first_item.get("title", "")
+        detail_soup = None
 
-    # ==============================
-    # 3️⃣ 상세 페이지 접근
-    # ==============================
-    detail_link = first_item.get("detail_link", "")
-    if not detail_link:
-        result["error"] = "상세 페이지 링크 없음"
-        return result
-
-    detail_soup = None
-
-    try:
         if detail_link.lower().startswith("javascript"):
             if not driver:
-                result["error"] = "JavaScript 링크 - Selenium 필요"
-                return result
+                raise HealthCheckError(
+                    HealthErrorType.DRIVER_ERROR,
+                    "JavaScript 링크 처리에 Selenium 필요",
+                )
 
-            match = re.search(r"readRun\((\d+)\)", detail_link, re.IGNORECASE)
-            if not match:
-                result["error"] = "JavaScript 함수 파싱 실패"
-                return result
+            m = re.search(r"readRun\((\d+)\)", detail_link)
+            if not m:
+                raise HealthCheckError(
+                    HealthErrorType.PARSE_ERROR,
+                    "JavaScript 함수 파싱 실패",
+                    target=detail_link,
+                )
 
-            driver.execute_script(f"readRun({match.group(1)});")
+            driver.execute_script(f"readRun({m.group(1)});")
             time.sleep(2)
             detail_soup = BeautifulSoup(driver.page_source, "lxml")
 
         else:
-            result["checks"]["detail_page"]["url"] = detail_link
-            if driver:
-                driver.get(detail_link)
-                time.sleep(2)
-                detail_soup = BeautifulSoup(driver.page_source, "lxml")
-            else:
-                detail_soup = scraper.fetch_page(detail_link, use_selenium=False)
+            driver.get(detail_link)
+            time.sleep(2)
+            detail_soup = BeautifulSoup(driver.page_source, "lxml")
 
-    except Exception as e:
-        result["error"] = f"상세 페이지 접근 오류: {e}"
-        return result
-
-    if not detail_soup:
-        result["error"] = "상세 페이지 접근 실패"
-        return result
-
-    content_length = len(detail_soup.get_text(strip=True))
-
-    result["checks"]["detail_page"]["success"] = True
-    result["checks"]["detail_page"]["content_length"] = content_length
-
-    # ==============================
-    # 4️⃣ 파일 다운로드 가능 여부
-    # ==============================
-    download_link = first_item.get("download_link", "")
-    if download_link:
-        try:
-            regulation_name = first_item.get("title", "kfb_health_check")
-            file_name = first_item.get("file_name") or regulation_name
-
-            comparison = scraper._download_and_compare_file(
-                download_link,
-                file_name,
-                regulation_name=regulation_name,
-                use_selenium=(driver is not None),
-                driver=driver
+        if not detail_soup:
+            raise HealthCheckError(
+                HealthErrorType.HTTP_ERROR,
+                "상세 페이지 접근 실패",
+                target=detail_link,
             )
 
-            file_path = comparison.get("file_path") if comparison else None
+        content = detail_soup.get_text(strip=True)
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 비어 있음",
+                target=detail_link,
+            )
 
-            if file_path and os.path.exists(file_path):
-                result["checks"]["file_download"]["success"] = True
-                result["checks"]["file_download"]["file_path"] = file_path
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": detail_link,
+            "content_length": len(content),
+        }
 
-        except Exception:
-            pass  # 파일 실패는 전체 FAIL로 보지 않음 (정책 유지 가능)
+        # ======================================================
+        # 4️⃣ 파일 다운로드 가능 여부 (비치명)
+        # ======================================================
+        download_link = first.get("download_link")
 
-    # ==============================
-    # ✅ 최종 성공 처리
-    # ==============================
-    result["status"] = "OK"
-    result["error"] = None
+        result["checks"]["file_download"] = {
+            "ok": False,
+            "url": download_link,
+            "file_path": None,
+        }
 
-    if driver:
-        try:
+        if download_link:
+            try:
+                regulation_name = first.get("title", "kfb_health_check")
+                file_name = first.get("file_name") or regulation_name
+
+                comparison = scraper._download_and_compare_file(
+                    download_link,
+                    file_name,
+                    regulation_name=regulation_name,
+                    use_selenium=(driver is not None),
+                    driver=driver,
+                )
+
+                file_path = comparison.get("file_path") if comparison else None
+
+                if file_path and os.path.exists(file_path):
+                    result["checks"]["file_download"].update({
+                        "ok": True,
+                        "file_path": file_path,
+                    })
+                else:
+                    result["checks"]["file_download"].update({
+                        "error_type": HealthErrorType.FILE_DOWNLOAD_FAIL.name,
+                        "error_message": "파일 다운로드 결과 없음",
+                    })
+
+            except Exception as e:
+                # ❗ 전체 Health FAIL로 만들지 않음
+                # result["checks"]["file_download"].update({
+                #     "error_type": HealthErrorType.FILE_DOWNLOAD_FAIL.name,
+                #     "error_message": str(e),
+                # })
+                raise HealthCheckError(
+                    HealthErrorType.FILE_DOWNLOAD_FAIL,
+                    "첨부파일 다운로드 실패",
+                    target=file_path,
+                )                
+
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
+        result["status"] = "OK"
+        return result
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
+
+    except Exception as e:
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e),
+            )
+        )
+        return result
+
+    finally:
+        result["elapsed"] = round(time.perf_counter() - start_time, 3)
+        if driver:
             driver.quit()
-        except:
-            pass
-
-    return result
 
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description='은행연합회 자율규제 스크래퍼')
-    parser.add_argument('--limit', type=int, default=0, help='가져올 개수 제한 (0=전체)')
-    parser.add_argument('--no-download', action='store_true', help='HWP 파일 다운로드 및 내용 추출 건너뛰기')
-    parser.add_argument('--content', type=int, default=0, help='본문 길이 제한 (0=제한 없음, 문자 수)')
-
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="은행연합회 자율규제 Health Check 실행"
-    )
-
-    args = parser.parse_args()
-
-    if args.check:
-        health_result = kfb_health_check()
-        print(json.dumps(health_result, ensure_ascii=False, indent=2))
-        sys.exit(0)
-
+# ==================================================
+# scheduler call
+# ==================================================
+def run(csv_path=None, limit=0):
     crawler = KfbScraper()
-    results = crawler.crawl_self_regulation(limit=args.limit, download_files=not args.no_download, content_limit=args.content)
+    results = crawler.crawl_self_regulation()
     
     print(f"\n=== 최종 결과 ===")
     print(f"추출된 데이터: {len(results)}개")
@@ -1842,4 +1863,123 @@ if __name__ == "__main__":
                 writer.writerow(csv_item)
         
         print(f"CSV 저장 완료: {csv_path}")
+
+def main(limit: int = 0, download_files: bool = True, content_limit: int = 0):
+
+    crawler = KfbScraper()
+    # results = crawler.crawl_self_regulation(limit=args.limit, download_files=not args.no_download, content_limit=args.content)
+    results = crawler.crawl_self_regulation(limit=limit, download_files=not download_files, content_limit=content)
+    
+    print(f"\n=== 최종 결과 ===")
+    print(f"추출된 데이터: {len(results)}개")
+    
+    if results:
+        print("\n=== 추출된 데이터 (처음 5개) ===")
+        for i, item in enumerate(results[:5], 1):
+            print(f"\n{i}. 번호: {item.get('no', 'N/A')}")
+            print(f"   제목: {item.get('title', 'N/A')}")
+            print(f"   상세링크: {item.get('detail_link', 'N/A')}")
+            print(f"   다운로드링크: {item.get('download_link', 'N/A')}")
+            if item.get('file_content'):
+                content = item.get('file_content', '')
+                print(f"   파일내용: {content[:100]}... ({len(content)}자)")
+            if item.get('file_path'):
+                print(f"   파일경로: {item.get('file_path', 'N/A')}")
+    
+    # 결과 저장
+    if results:
+        import json
+        import os
+        os.makedirs('output', exist_ok=True)
+        
+        # 날짜 정규화를 위한 scraper 인스턴스
+        scraper = KfbScraper()
+        
+        # 법규 정보 데이터 정리 (CSV와 동일한 한글 필드명으로 정리)
+        law_results = []
+        for item in results:
+            law_item = {
+                '번호': item.get('no', ''),
+                '규정명': item.get('regulation_name', item.get('title', '')),
+                '기관명': '은행연합회',  # 항상 은행연합회
+                '본문': item.get('content', ''),
+                '제정일': scraper.normalize_date_format(item.get('enactment_date', '')),
+                '최근 개정일': scraper.normalize_date_format(item.get('revision_date', '')),
+                '소관부서': item.get('department', ''),
+                '파일 다운로드 링크': item.get('file_download_link', item.get('download_link', '')),
+                '파일 이름': item.get('file_name', '')
+            }
+            law_results.append(law_item)
+        
+        # JSON 저장 (법규 정보만) - output/json 디렉토리에 저장
+        json_dir = os.path.join('output', 'json')
+        os.makedirs(json_dir, exist_ok=True)
+        
+        law_json_data = {
+            'crawled_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'url': 'https://www.kfb.or.kr/publicdata/reform_info.php',
+            'total_count': len(law_results),
+            'results': law_results
+        }
+        
+        json_path = os.path.join(json_dir, 'kfb_scraper.json')
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(law_json_data, f, ensure_ascii=False, indent=2)
+        print(f"\nJSON 저장 완료: {json_path}")
+        
+        # CSV 저장 (법규 정보만: 번호, 규정명, 기관명, 본문, 제정일, 최근 개정일) - output/csv 디렉토리에 저장
+        import csv
+        csv_dir = os.path.join('output', 'csv')
+        os.makedirs(csv_dir, exist_ok=True)
+        csv_path = os.path.join(csv_dir, 'kfb_scraper.csv')
+        
+        # 헤더 정의 (번호, 규정명, 기관명, 본문, 제정일, 최근 개정일, 소관부서, 파일 다운로드 링크, 파일 이름)
+        headers = ["번호", "규정명", "기관명", "본문", "제정일", "최근 개정일", "소관부서", "파일 다운로드 링크", "파일 이름"]
+        
+        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            
+            for law_item in law_results:
+                # 본문 내용 처리 (개행 유지, 4000자 제한)
+                content = law_item.get('본문', '') or ''
+                # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                if len(content) > 4000:
+                    content = content[:4000]
+                
+                csv_item = law_item.copy()
+                csv_item['본문'] = content
+                writer.writerow(csv_item)
+        
+        print(f"CSV 저장 완료: {csv_path}")
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    main()
+    
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='은행연합회 자율규제 스크래퍼')
+    parser.add_argument('--limit', type=int, default=0, help='가져올 개수 제한 (0=전체)')
+    parser.add_argument('--no-download', action='store_true', help='HWP 파일 다운로드 및 내용 추출 건너뛰기')
+    parser.add_argument('--content', type=int, default=0, help='본문 길이 제한 (0=제한 없음, 문자 수)')
+
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="은행연합회 자율규제 Health Check 실행"
+    )
+
+    args = parser.parse_args()
+
+    if args.check:
+        health_result = kfb_health_check()
+        print(json.dumps(health_result, ensure_ascii=False, indent=2))
+        sys.exit(0)
+    
+    # self, limit: int = 0, download_files: bool = True, content_limit: int = 0
+    main(limit=args.limit, download_files=not args.no_download, content_limit=args.content)
 

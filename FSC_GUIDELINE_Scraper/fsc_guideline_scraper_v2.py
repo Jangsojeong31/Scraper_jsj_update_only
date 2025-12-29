@@ -713,89 +713,146 @@ class FSCGuidelineScraper(BaseScraper):
 # ==================================================
 # Health Check (표준 출력 양식)
 # ==================================================
-def fsc_guideline_health_check() -> Dict:
-    start_time = time.time()
+from common.common_logger import get_logger
+from common.common_http import check_url_status
+from common.constants import URLStatus, LegalDocProvided
+from common.base_scraper import BaseScraper
 
-    result = {
-        "org_name": "FSC",
-        "target": "금융위원회 > 행정지도",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {},
-        "error": None,
-    }
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+
+def fsc_guideline_health_check() -> Dict:
+    start = time.perf_counter()
+
+    result = base_health_output(
+        auth_src="금융위원회-행정지도",
+        scraper_id="FSC_GUIDELINE",
+        target_url="https://better.fsc.go.kr",
+    )
 
     scraper = FSCGuidelineScraper(delay=0.5)
 
     try:
-        # -------------------------------------------------
-        # 1️⃣ 목록 페이지 1건 추출
-        # -------------------------------------------------
+        # ==================================================
+        # 0️⃣ HTTP
+        # ==================================================
+        http = check_url_status(
+            result["target_url"],
+            use_selenium=True,
+            allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http["status"] == URLStatus.OK,
+            "status_code": http.get("http_code"),
+            "verify_ssl": True,
+        }
+
+        if http["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http["status"]),
+                "URL 접근 실패",
+            )
+
+        # ==================================================
+        # 1️⃣ LIST
+        # ==================================================
         items = scraper.scrape_list_page(page_index=1)
         if not items:
-            raise RuntimeError("목록에서 항목을 찾지 못함")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 없음",
+            )
+
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(items),
+        }
 
         item = items[0]
-        title = item.get("제목", "")
         detail_url = item.get("_상세페이지URL")
-
-        result["checks"]["list_page"] = {
-            "success": True,
-            "title": title,
-        }
-
         if not detail_url:
-            raise RuntimeError("상세 페이지 URL 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 URL 누락",
+            )
 
-        # -------------------------------------------------
-        # 2️⃣ 상세 페이지 접근
-        # -------------------------------------------------
-        detail_info = scraper.get_detail_data(detail_url)
+        # ==================================================
+        # 2️⃣ DETAIL
+        # ==================================================
+        detail = scraper.get_detail_data(detail_url)
+        content = detail.get("내용", "")
 
-        result["checks"]["detail_page"] = {
-            "success": True,
-            "has_content": bool(detail_info.get("내용")),
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": detail_url,
+            "content_length": len(content),
         }
 
-        # -------------------------------------------------
-        # 3️⃣ 첨부파일 다운로드 가능 여부
-        # -------------------------------------------------
-        file_links = detail_info.get("첨부파일링크", "")
-        file_names = detail_info.get("첨부파일명", "")
+        # ==================================================
+        # 3️⃣ FILE (있을 때만)
+        # ==================================================
+        file_links = detail.get("첨부파일링크", "")
+        file_names = detail.get("첨부파일명", "")
 
-        if not file_links:
-            raise RuntimeError("첨부파일 링크 없음")
+        if file_links:
+            file_url = file_links.split("|")[0].strip()
+            if file_url.startswith("/"):
+                file_url = urljoin(scraper.url_config["base_url"], file_url)
 
-        first_file_url = file_links.split("|")[0].strip()
-        first_file_name = file_names.split("|")[0].strip()
+            resp = requests.get(file_url, timeout=20, verify=False)
+            if resp.status_code == 200 and len(resp.content) > 1024:
+                result["checks"]["file_download"] = {
+                    "url": file_url,
+                    "success": True,
+                    "message": "첨부파일 다운로드 가능",
+                }
 
-        # 상대경로 보정
-        if first_file_url.startswith("/"):
-            first_file_url = urljoin(scraper.url_config["base_url"], first_file_url)
-
-        resp = requests.get(first_file_url, timeout=20, verify=False)
-
-        if resp.status_code != 200:
-            raise RuntimeError(f"파일 다운로드 실패 (HTTP {resp.status_code})")
-
-        if len(resp.content) < 1024:
-            raise RuntimeError("다운로드 파일 크기 비정상")
-
-        result["checks"]["file_download"] = {
-            "success": True,
-            "file_name": first_file_name,
-            "file_size": len(resp.content),
-        }
-
+        result["ok"] = True
         result["status"] = "OK"
 
+    except HealthCheckError as e:
+        apply_health_error(result, e)
+
     except Exception as e:
-        result["error"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN_ERROR,
+                str(e),
+            ),
+        )
 
     finally:
-        result["elapsed_sec"] = round(time.time() - start_time, 2)
+        result["elapsed_ms"] = int((time.perf_counter() - start) * 1000)
 
     return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    logger.info("=" * 60)
+    logger.info("스크래퍼 시작")
+    logger.info("=" * 60)
+    
+    scraper = FSCGuidelineScraper()
+    results = scraper.scrape_all()
+    scraper.save_results()
+    
+    logger.info("=" * 60)
+    logger.info("스크래핑 완료!")
+    logger.info(f"총 {len(results)}개 데이터 수집")
+    logger.info("=" * 60)
+    
+    print("\n" + "=" * 60)
+    print("스크래핑 완료!")
+    print(f"총 {len(results)}개 데이터 수집")
+    print("=" * 60)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

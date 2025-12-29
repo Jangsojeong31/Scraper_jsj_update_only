@@ -563,21 +563,24 @@ def save_committee_results(records: List[Dict]):
 # =================================================
 # Health Check Function (추가)
 # =================================================
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+
 def kfb_committee_health_check() -> Dict:
     start_time = time.time()
-
-    result: Dict = {
-        "org_name": "KFB",
-        "target": "은행연합회 > 공공자료 > 제도개선",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "elapsed": None,
-        "checks": {},
-        "error": None,
-    }
-
     scraper = KfbCommitteeScraper()
     driver = None
+
+    result = base_health_output(
+        auth_src="은행연합회-규제심의위원회",
+        scraper_id="KFB_COMMITTEE",
+        target_url=KfbCommitteeScraper.LIST_URL,
+    )    
 
     try:
         # ==================================================
@@ -616,6 +619,26 @@ def kfb_committee_health_check() -> Dict:
                 "message": f"Selenium 생성 실패: {exc}",
             }
 
+        # ======================================================
+        # 0️⃣ HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(scraper.LIST_URL,
+                                       use_selenium=True,      # 핵심
+                                       allow_fallback=False,
+                                       )
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                scraper.LIST_URL,
+            )
+        
         # ==================================================
         # 2. 검색 페이지 접근
         # ==================================================
@@ -629,7 +652,7 @@ def kfb_committee_health_check() -> Dict:
         if not soup:
             raise RuntimeError("검색 페이지 접근 실패")
 
-        result["checks"]["search_page"] = {
+        result["checks"]["search"] = {
             "success": True,
             "url": scraper.LIST_URL,
             "elapsed": round(time.time() - t0, 3),
@@ -645,7 +668,7 @@ def kfb_committee_health_check() -> Dict:
 
         first = items[0]
 
-        result["checks"]["list_page"] = {
+        result["checks"]["list"] = {
             "success": True,
             "count": 1,
             "title": first.get("title", ""),
@@ -683,7 +706,7 @@ def kfb_committee_health_check() -> Dict:
         if not detail_soup:
             raise RuntimeError("상세 페이지 접근 실패")
 
-        result["checks"]["detail_page"] = {
+        result["checks"]["detail"] = {
             "success": True,
             "url": detail_link,
             "content_length": len(detail_soup.get_text(strip=True)),
@@ -693,6 +716,7 @@ def kfb_committee_health_check() -> Dict:
         # ==================================================
         # FINISH
         # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
 
     except Exception as exc:
@@ -706,6 +730,19 @@ def kfb_committee_health_check() -> Dict:
         result["elapsed"] = round(time.time() - start_time, 3)
 
     return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    # -------------------------------------------------
+    # 일반 스크래핑 모드
+    # -------------------------------------------------        
+    scraper = KfbCommitteeScraper()
+    results = scraper.crawl_committee()
+
+    print(f"\n총 {len(results)}개의 위원회 결과를 수집했습니다.")
+    save_committee_results(results)
 
 if __name__ == "__main__":
     import argparse

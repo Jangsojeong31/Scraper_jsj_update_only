@@ -185,74 +185,108 @@ def scrape_all(start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+
+# -------------------------------------------------
+# Health Check 모드 (수정본)
+# -------------------------------------------------
 def kofia_legnotice_health_check() -> dict:
     """
     KOFIA 규정 제·개정 예고 Health Check (v2)
-    - 목록 페이지 접근 및 1건 추출
-    - 상세 페이지 접근 및 본문 영역 확인
+    - 명시적 HealthErrorType raise 패턴 적용
     """
 
     start_time = time.perf_counter()
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    result = {
-        "org_name": ORG_NAME,
-        "target": "금융투자협회 > 법규정보시스템 > 규정 제·개정 예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": LIST_URL,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-            "detail_page": {
-                "url": None,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-        },
-        "error": None,
-        "elapsed": None,
-    }
+    
+    # 1. 표준 출력 스키마 초기화
+    result = base_health_output(
+        auth_src="금융투자협회 > 법규정보시스템 > 규정 제·개정 예고",
+        scraper_id="KOFIA_LEGNOTICE",
+        target_url=LIST_URL,
+    )
 
     driver = None
     try:
+
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            LIST_URL,
+            use_selenium=True,
+            allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=LIST_URL,
+            )
+                
         # ---------------------------------
         # 1️⃣ 목록 페이지 체크
         # ---------------------------------
         t0 = time.perf_counter()
-
-        driver = create_driver()
-        wait = WebDriverWait(driver, 20)
-
-        logger.info(f"[HEALTH] KOFIA 목록 접근: {LIST_URL}")
-        driver.get(LIST_URL)
-
-        wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "table.brdComList")
+        
+        try:
+            driver = create_driver()
+            wait = WebDriverWait(driver, 20)
+            logger.info(f"[HEALTH] KOFIA 목록 접근: {LIST_URL}")
+            driver.get(LIST_URL)
+        except Exception as e:
+            raise HealthCheckError(
+                HealthErrorType.DRIVER_ERROR, 
+                f"드라이버 생성 또는 페이지 로드 실패: {str(e)}", 
+                LIST_URL
             )
-        )
 
-        rows = driver.find_elements(
-            By.CSS_SELECTOR,
-            "table.brdComList tbody tr"
-        )
+        try:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.brdComList")))
+        except:
+            raise HealthCheckError(
+                HealthErrorType.TIMEOUT, 
+                "목록 테이블 로딩 시간 초과", 
+                "table.brdComList"
+            )
+
+        rows = driver.find_elements(By.CSS_SELECTOR, "table.brdComList tbody tr")
         if not rows:
-            raise RuntimeError("목록 데이터 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA, 
+                "목록 데이터가 비어 있음", 
+                "table.brdComList tbody tr"
+            )
 
         row = rows[0]
-        link = row.find_element(By.CSS_SELECTOR, "td:nth-child(2) a")
-        title = link.text.strip()
+        try:
+            link = row.find_element(By.CSS_SELECTOR, "td:nth-child(2) a")
+            title = link.text.strip()
+        except:
+            raise HealthCheckError(
+                HealthErrorType.TAG_MISMATCH, 
+                "목록 내 제목/링크 태그 구조 변경됨", 
+                "td:nth-child(2) a"
+            )
 
-        result["checks"]["list_page"].update({
+        result["checks"]["list"] = {
             "status": "OK",
+            "success": True,
             "message": f"목록 1건 추출 성공 ({title})",
             "elapsed": round(time.perf_counter() - t0, 3),
-        })
+        }
 
         # ---------------------------------
         # 2️⃣ 상세 페이지 체크
@@ -262,36 +296,68 @@ def kofia_legnotice_health_check() -> dict:
         logger.info(f"[HEALTH] 상세 접근: {title}")
         driver.execute_script("arguments[0].click();", link)
 
-        wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "div.storyIn")
+        try:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.storyIn")))
+        except:
+            raise HealthCheckError(
+                HealthErrorType.TIMEOUT, 
+                "상세 페이지 본문 로딩 실패", 
+                "div.storyIn"
             )
-        )
 
         _, _, _, content = parse_detail_page(driver)
         if not content:
-            raise RuntimeError("상세 페이지 본문 추출 실패")
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY, 
+                "상세 페이지 본문 내용이 비어 있음", 
+                "div.storyIn.text"
+            )
 
-        result["checks"]["detail_page"].update({
-            "url": DETAIL_BASE_URL,
+        result["checks"]["detail"] = {
+            "url": driver.current_url,
             "status": "OK",
+            "success": True,
             "message": "상세 페이지 접근 및 본문 영역 확인",
             "elapsed": round(time.perf_counter() - t1, 3),
-        })
+        }
 
+        # 전체 성공 시 상태 업데이트
+        result["ok"] = True
         result["status"] = "OK"
-        return result
 
+    except HealthCheckError as he:
+        # 명시적으로 발생시킨 에러 처리
+        logger.error(f"[HEALTH] [{he.error_type}] {he.message}")
+        result["ok"] = False
+        result["status"] = "FAIL"
+        result["error"] = {
+            "type": he.error_type,
+            "message": he.message,
+            "target": he.target
+        }
     except Exception as e:
-        logger.exception("[HEALTH] KOFIA Health Check 실패")
-        result["error"] = str(e)
-        return result
+        # 예상치 못한 일반 예외 처리
+        logger.exception("[HEALTH] 알 수 없는 오류 발생")
+        result["ok"] = False
+        result["status"] = "FAIL"
+        result["error"] = {
+            "type": HealthErrorType.UNEXPECTED_ERROR,
+            "message": str(e),
+            "target": "kofia_legnotice_health_check_unknown"
+        }
 
     finally:
-        result["elapsed"] = round(time.perf_counter() - start_time, 3)
+        result["elapsed_ms"] = int((time.perf_counter() - start_time) * 1000)
         if driver:
             driver.quit()
-
+        return result
+    
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
+    
 # ==================================================
 # main
 # ==================================================
