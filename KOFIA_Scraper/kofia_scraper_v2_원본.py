@@ -1,5 +1,3 @@
-# kofia_scraper_v2.py
-
 """
 금융투자협회 - 법규정보시스템 스크래퍼
 """
@@ -2007,278 +2005,113 @@ def save_kofia_results(records: List[Dict], crawler: Optional[KofiaScraper] = No
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-# import os
-# import time
-# import json
-# from datetime import datetime
-# from typing import Dict, Optional
-# from selenium import webdriver
-# from selenium.webdriver.chrome.options import Options
-# from selenium.webdriver.common.by import By
-# from bs4 import BeautifulSoup
-from common.common_http import check_url_status
-from common.health_exception import HealthCheckError
-from common.health_error_type import HealthErrorType
-from common.health_schema import base_health_output
-from common.health_mapper import apply_health_error
-from common.constants import URLStatus
-from common.url_health_mapper import map_urlstatus_to_health_error
+import os
+import time
+import json
+from datetime import datetime
+from typing import Dict, Optional
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from bs4 import BeautifulSoup
 
 def kofia_health_check() -> Dict:
     """
-    금융투자협회 - 법규정보시스템 Health Check (v2)
-    - HealthErrorType 명시적 raise
-    - alert 엔진 연동 가능
+    금융투자협회 - 법규정보시스템 스크래퍼 Health Check
+    출력: JSON 구조
     """
-
-    start_time = time.perf_counter()
-
+    BASE_URL = "https://law.kofia.or.kr"
     LIST_URL = "https://law.kofia.or.kr/service/law/lawCurrentMain.do"
+    CURRENT_DIR = "output"
 
-    result = base_health_output(
-        auth_src="금융투자협회 > 법규정보시스템",
-        scraper_id="KOFIA_LAW",
-        target_url=LIST_URL,
-    )
+    os.makedirs(CURRENT_DIR, exist_ok=True)
+
+    output: Dict = {
+        "org_name": "KOFIA",
+        "target": "금융투자협회 - 법규정보시스템 스크래퍼",
+        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "FAIL",
+        "checks": {
+            "list_page": {"success": False, "count": 0, "title": None},
+            "detail_page": {"url": None, "success": False, "content_length": 0},
+        },
+        "error": None
+    }
+
+    # === WebDriver 생성 ===
+    def _create_webdriver() -> webdriver.Chrome:
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--lang=ko-KR")
+        prefs = {
+            "download.default_directory": os.path.abspath(CURRENT_DIR),
+            "download.prompt_for_download": False,
+            "plugins.always_open_pdf_externally": True
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
+        return webdriver.Chrome(options=chrome_options)
 
     driver: Optional[webdriver.Chrome] = None
 
     try:
-        # ======================================================
-        # 0️⃣ HTTP 접근성 사전 체크
-        # ======================================================
-        http_result = check_url_status(
-            LIST_URL,
-            use_selenium=True,
-            allow_fallback=False,
-        )
-
-        result["checks"]["http"] = {
-            "ok": http_result["status"] == URLStatus.OK,
-            "status": http_result["status"].name,
-            "status_code": http_result["http_code"],
-        }
-
-        if http_result["status"] != URLStatus.OK:
-            raise HealthCheckError(
-                map_urlstatus_to_health_error(http_result["status"]),
-                "목록 페이지 HTTP 접근 실패",
-                target=LIST_URL,
-            )
-
-        # ======================================================
-        # 1️⃣ WebDriver 생성
-        # ======================================================
-        try:
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--lang=ko-KR")
-
-            driver = webdriver.Chrome(options=chrome_options)
-        except Exception as e:
-            raise HealthCheckError(
-                HealthErrorType.DRIVER_ERROR,
-                "웹드라이버 생성 실패",
-                target="webdriver.Chrome",
-                detail=str(e),
-            )
-
-        # ======================================================
-        # 2️⃣ 목록 페이지 접근
-        # ======================================================
-        t0 = time.perf_counter()
-
+        driver = _create_webdriver()
+        # 1. 목록 페이지 접근
         driver.get(LIST_URL)
         time.sleep(3)
+        output["checks"]["list_page"]["success"] = True
 
+        # 2. 목록 1건 추출
+        tree_links = []
         try:
-            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-        except Exception:
-            raise HealthCheckError(
-                HealthErrorType.TAG_MISMATCH,
-                "목록 iframe(tree01) 탐색 실패",
-                target="iframe#tree01",
-            )
+            tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
+            driver.switch_to.frame(tree_iframe)
+            soup = BeautifulSoup(driver.page_source, "lxml")
+            driver.switch_to.default_content()
+            nodes = soup.select("a")
+            if nodes:
+                first_node = nodes[0]
+                tree_links.append({
+                    "title": first_node.get_text(strip=True),
+                    "href": first_node.get("href")
+                })
+                output["checks"]["list_page"]["count"] = 1
+                output["checks"]["list_page"]["title"] = first_node.get_text(strip=True)
+        except:
+            pass
 
-        driver.switch_to.frame(iframe)
-        soup = BeautifulSoup(driver.page_source, "lxml")
-        driver.switch_to.default_content()
+        # 3. 상세 페이지 접근
+        if tree_links:
+            item = tree_links[0]
+            try:
+                tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
+                driver.switch_to.frame(tree_iframe)
+                link_elem = driver.find_element(By.LINK_TEXT, item["title"])
+                link_elem.click()
+                time.sleep(2)
+                content_soup = BeautifulSoup(driver.page_source, "lxml")
+                driver.switch_to.default_content()
+                output["checks"]["detail_page"]["url"] = item["href"]
+                output["checks"]["detail_page"]["success"] = True
+                content_text = content_soup.get_text(strip=True)
+                output["checks"]["detail_page"]["content_length"] = len(content_text)
+            except Exception as e:
+                output["error"] = f"상세 페이지 접근 실패: {e}"
 
-        nodes = soup.select("a")
-        if not nodes:
-            raise HealthCheckError(
-                HealthErrorType.NO_LIST_DATA,
-                "목록 노드 없음",
-                target="iframe#tree01 a",
-            )
-
-        first = nodes[0]
-        title = first.get_text(strip=True)
-        href = first.get("href")
-
-        result["checks"]["list"] = {
-            "ok": True,
-            "count": 1,
-            "title": title,
-            "elapsed": round(time.perf_counter() - t0, 3),
-        }
-
-        if not href:
-            raise HealthCheckError(
-                HealthErrorType.NO_DETAIL_URL,
-                "상세 페이지 링크 누락",
-                target="iframe#tree01 a[href]",
-            )
-
-        # ======================================================
-        # 3️⃣ 상세 페이지 접근
-        # ======================================================
-        t1 = time.perf_counter()
-
-        driver.switch_to.frame(iframe)
-        try:
-            link_el = driver.find_element(By.LINK_TEXT, title)
-            link_el.click()
-        except Exception as e:
-            raise HealthCheckError(
-                HealthErrorType.HTTP_ERROR,
-                "상세 페이지 클릭 실패",
-                target=title,
-                detail=str(e),
-            )
-
-        time.sleep(2)
-        detail_soup = BeautifulSoup(driver.page_source, "lxml")
-        driver.switch_to.default_content()
-
-        content = detail_soup.get_text(strip=True)
-        if not content:
-            raise HealthCheckError(
-                HealthErrorType.CONTENT_EMPTY,
-                "상세 페이지 본문 비어 있음",
-                target=href,
-            )
-
-        result["checks"]["detail"] = {
-            "ok": True,
-            "url": href,
-            "content_length": len(content),
-            "elapsed": round(time.perf_counter() - t1, 3),
-        }
-
-        # ======================================================
-        # File download
-        # ======================================================
-         # ======================================================
-        # 파일 다운로드 가능 여부 (PDF 우선)
-        # ======================================================
-        # t2 = time.perf_counter()
-
-        # # 파일 링크 / 버튼 탐색
-        # file_buttons = detail_soup.select("a[href$='.pdf'], a[href$='.hwp']")
-        # if file_buttons:
-        #     # PDF 우선
-        #     selected_btn = None
-        #     for btn in file_buttons:
-        #         href = btn.get("href", "").lower()
-        #         if href.endswith(".pdf"):
-        #             selected_btn = btn
-        #             file_type = "pdf"
-        #             break
-        #     if not selected_btn:
-        #         selected_btn = file_buttons[0]
-        #         file_type = "hwp"
-
-        #     try:
-        #         download_url = selected_btn.get("href")
-        #         if not download_url:
-        #             raise HealthCheckError(
-        #                 HealthErrorType.TAG_MISMATCH,
-        #                 "파일 다운로드 링크 누락",
-        #                 target="a[href$='.pdf|.hwp']",
-        #             )
-
-        #         # 절대경로 보정
-        #         if download_url.startswith("/"):
-        #             download_url = urljoin(LIST_URL, download_url)
-
-        #         # 실제 다운로드 시도 (requests 기반 단순 체크)
-        #         resp = requests.get(download_url, timeout=20)
-        #         if resp.status_code != 200 or not resp.content:
-        #             raise HealthCheckError(
-        #                 HealthErrorType.FILE_DOWNLOAD_FAIL,
-        #                 "첨부파일 다운로드 실패",
-        #                 target=download_url,
-        #             )
-
-        #         result["checks"]["file_download"] = {
-        #             "ok": True,
-        #             "file_type": file_type,
-        #             "url": download_url,
-        #             "size": len(resp.content),
-        #             "elapsed": round(time.perf_counter() - t2, 3),
-        #         }
-
-        #     except HealthCheckError:
-        #         raise
-
-        #     except Exception as e:
-        #         raise HealthCheckError(
-        #             HealthErrorType.FILE_DOWNLOAD_FAIL,
-        #             "첨부파일 다운로드 중 예외 발생",
-        #             target=download_url,
-        #             detail=str(e),
-        #         )
-
-        # else:
-        #     # 파일이 원래 없는 경우 → 정상
-        #     result["checks"]["file_download"] = {
-        #         "ok": True,
-        #         "message": "첨부파일 없음",
-        #         "elapsed": round(time.perf_counter() - t2, 3),
-        #     }
-
-
-        # ======================================================
-        # SUCCESS
-        # ======================================================
-        result["ok"] = True
-        result["status"] = "OK"
-        return result
-
-    except HealthCheckError as he:
-        apply_health_error(result, he)
-        return result
+        # 최종 상태
+        if output["checks"]["list_page"]["success"] and output["checks"]["detail_page"]["success"]:
+            output["status"] = "OK"
 
     except Exception as e:
-        apply_health_error(
-            result,
-            HealthCheckError(
-                HealthErrorType.UNKNOWN,
-                str(e),
-            )
-        )
-        return result
+        output["error"] = str(e)
 
     finally:
-        result["elapsed_ms"] = int(
-            (time.perf_counter() - start_time) * 1000
-        )
         if driver:
             driver.quit()
 
-# ==================================================
-# scheduler call
-# ==================================================
-def run():
-    crawler = KofiaScraper()
-    results = crawler.crawl_law_info()
-
-    print(f"\n총 {len(results)}개의 법규정보를 수집했습니다.")
-    save_kofia_results(results, crawler=crawler)
+    return output
 
 if __name__ == "__main__":
     import argparse

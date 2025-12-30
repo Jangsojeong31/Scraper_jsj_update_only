@@ -1,3 +1,5 @@
+# law_scraper_v2.py
+
 """
 법제처 - 국가법령정보센터 스크래퍼
 """
@@ -3482,7 +3484,13 @@ from typing import Dict
 from datetime import datetime
 from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
-
+from common.health_schema import base_health_output
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_mapper import apply_health_error
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.constants import URLStatus
 
 def law_health_check() -> Dict:
     """
@@ -3491,24 +3499,27 @@ def law_health_check() -> Dict:
 
     BASE_URL = "https://www.law.go.kr"
     SEARCH_URL = (
-        "https://www.law.go.kr/LSW/lsSc.do"
-        "?section=&menuId=1&subMenuId=15&tabMenuId=81"
-        "&eventGubun=060101&query="
+        "https://www.law.go.kr/LSW/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query="
     )
 
-    result = {
-        "org_name": "LAW",
-        "target": "법제처 > 국가법령정보센터",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "search_page": {},
-            "list_page": {},
-            "detail_page": {},
-            "attachment": {}
-        },
-        "error": None
-    }
+    # result = {
+    #     "org_name": "LAW",
+    #     "target": "법제처 > 국가법령정보센터",
+    #     "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    #     "status": "FAIL",
+    #     "checks": {
+    #         "search_page": {},
+    #         "list_page": {},
+    #         "detail_page": {},
+    #         "attachment": {}
+    #     },
+    #     "error": None
+    # }
+    result = base_health_output(
+        auth_src="법제처 > 국가법령정보센터",
+        scraper_id="LAW_LEGNOTICE",
+        target_url=SEARCH_URL,
+    )
 
     crawler = None
     driver = None
@@ -3527,6 +3538,28 @@ def law_health_check() -> Dict:
         crawler = LawGoKrScraper(delay=0.5)
         driver = crawler._create_webdriver(chrome_options)
 
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            SEARCH_URL,
+             use_selenium=True,
+             allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=SEARCH_URL,
+            )
+        
         # ===============================
         # 1. 검색 페이지 접근
         # ===============================
@@ -3558,7 +3591,7 @@ def law_health_check() -> Dict:
         items = search_results.get("results", [])
 
         if not items:
-            result["checks"]["list_page"] = {
+            result["checks"]["list"] = {
                 "success": False,
                 "count": 0,
                 "title": None
@@ -3569,7 +3602,7 @@ def law_health_check() -> Dict:
         title = first_item.get("law_name")
         link = first_item.get("link")
 
-        result["checks"]["list_page"] = {
+        result["checks"]["list"] = {
             "success": True,
             "count": 1,
             "title": title
@@ -3588,7 +3621,7 @@ def law_health_check() -> Dict:
             )
 
         if not detail_soup:
-            result["checks"]["detail_page"] = {
+            result["checks"]["detail"] = {
                 "url": link,
                 "success": False,
                 "content_length": 0
@@ -3597,7 +3630,7 @@ def law_health_check() -> Dict:
 
         content = crawler.extract_law_detail(detail_soup) or ""
 
-        result["checks"]["detail_page"] = {
+        result["checks"]["detail"] = {
             "url": link,
             "success": True,
             "content_length": len(content)
@@ -3606,21 +3639,31 @@ def law_health_check() -> Dict:
         # ===============================
         # 4. 첨부파일 다운로드 가능 여부
         # ===============================
-        file_info = crawler._extract_file_links(detail_soup, link)
+        # file_info = crawler._extract_file_links(detail_soup, link)
 
-        result["checks"]["attachment"] = {
-            "download_available": bool(file_info.get("download_links"))
-        }
+        # result["checks"]["attachment"] = {
+        #     "download_available": bool(file_info.get("download_links"))
+        # }
 
-        # ===============================
-        # 최종 상태
-        # ===============================
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
         return result
 
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
+    
     except Exception as e:
-        result["error"] = str(e)
-        result["status"] = "FAIL"
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e)
+            )
+        )
         return result
 
     finally:
@@ -3630,6 +3673,11 @@ def law_health_check() -> Dict:
             except Exception:
                 pass
 
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    main()
 
 if __name__ == "__main__":
     import argparse

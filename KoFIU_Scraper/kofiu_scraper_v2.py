@@ -1,3 +1,5 @@
+# kofiu_scraper_v2.py
+
 """
 금융정보분석원(KoFIU) 제재공시 스크래퍼 v2
 - common/file_extractor.py의 FileExtractor를 사용하여 PDF 추출
@@ -37,12 +39,9 @@ except ImportError:
 # common 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.file_extractor import FileExtractor
-#from extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
-from .extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
-#from ocr_extractor import OCRExtractor
-from .ocr_extractor import OCRExtractor
-#from post_process_ocr import process_ocr_text, clean_content_symbols
-from .post_process_ocr import process_ocr_text, clean_content_symbols
+from KoFIU_Scraper.extract_metadata import extract_metadata_from_content, extract_sanction_details, extract_incidents, format_date_to_iso
+from KoFIU_Scraper.ocr_extractor import OCRExtractor
+from KoFIU_Scraper.post_process_ocr import process_ocr_text, clean_content_symbols
 
 try:
     from selenium import webdriver
@@ -97,7 +96,8 @@ class KoFIUScraperV2:
         self.ocr_extractor = OCRExtractor()  # 하이브리드 OCR 사용
         
         if SELENIUM_AVAILABLE:
-            self._init_selenium()
+            # 기본은 headless로 동작
+            self._init_selenium(headless=True)
     
     def _load_industry_classification(self):
         """금융회사별 업종분류 CSV 파일 로드"""
@@ -170,11 +170,12 @@ class KoFIUScraperV2:
         
         return '기타'
     
-    def _init_selenium(self):
+    def _init_selenium(self, headless=True):
         """Selenium 드라이버 초기화"""
         try:
             chrome_options = Options()
-            chrome_options.add_argument('--headless')
+            if headless:
+                chrome_options.add_argument('--headless')
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
@@ -279,13 +280,15 @@ class KoFIUScraperV2:
 
         return f"attachment_{int(time.time()*1000)}.pdf"
 
-    def download_file_from_list(self, file_id, file_list_id, filename='', page_index=1):
+    def download_file_from_list(self, file_id=None, file_list_id=None, li_num=None, pdf_url=None, filename='', page_index=1):
         """
         리스트 페이지에서 첨부파일 버튼 클릭하여 리스트 확장 후 전체다운로드 버튼 클릭하여 파일 다운로드
         
         Args:
             file_id: fileId 파라미터
             file_list_id: file_list ID
+            li_num: li_num 텍스트 (번호) - 리스트에서 안정적으로 항목 찾기용
+            pdf_url: 직접 다운로드 시도할 PDF 절대경로 URL
             filename: 파일명
             page_index: 페이지 인덱스
         
@@ -296,7 +299,8 @@ class KoFIUScraperV2:
             if not SELENIUM_AVAILABLE or not self.driver:
                 return False, None
             
-            if not file_id:
+            # li_num이 없으면 안정적으로 찾기 어려움
+            if not li_num:
                 return False, None
             
             # 파일명 추출 또는 생성
@@ -306,59 +310,105 @@ class KoFIUScraperV2:
             if not filename.lower().endswith('.pdf'):
                 filename += '.pdf'
             
-            # 파일명 정리 (특수문자 제거)
+            # 파일명 정리 (특수문자 제거) + li_num prefix로 식별성 확보
             safe_filename = filename
             invalid_chars = '<>:"/\\|?*'
             for char in invalid_chars:
                 safe_filename = safe_filename.replace(char, '_')
+            if li_num:
+                safe_filename = f"n{li_num}_{safe_filename}"
             
             # 파일 저장 경로
             file_path = os.path.join(self.download_dir, safe_filename)
             
-            # 이미 파일이 있으면 재다운로드하지 않음
+            # 이미 파일이 있으면 크기 검사 후 재다운로드 여부 결정
             if os.path.exists(file_path):
-                print(f"  기존 파일 발견: {safe_filename}")
-                return True, file_path
+                existing_size = os.path.getsize(file_path)
+                # 10KB 미만이면 HTML 등 실패로 간주하고 재다운로드 시도
+                if existing_size < 10 * 1024:
+                    print(f"  기존 파일이 너무 작아 재다운로드 시도: {safe_filename} ({existing_size} bytes)")
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                else:
+                    print(f"  기존 파일 발견: {safe_filename}")
+                    return True, file_path
             
             print(f"  파일 다운로드 시도: {filename}")
-            
-            # 현재 페이지에 있지 않으면 목록 페이지로 이동
-            current_url = self.driver.current_url
-            if self.list_url not in current_url:
+
+            # 항상 대상 페이지로 이동 (마지막에 머무른 페이지가 다를 수 있음)
+            try:
+                self.driver.get(self.list_url)
+                time.sleep(2)
                 if page_index and page_index > 1:
-                    try:
-                        self.driver.get(self.list_url)
-                        time.sleep(2)
-                        self.driver.execute_script(f"goPaging_PagingView('{page_index}');")
-                        time.sleep(2)
-                    except:
-                        self.driver.get(self.list_url)
-                        time.sleep(2)
-                else:
-                    self.driver.get(self.list_url)
+                    self.driver.execute_script(f"goPaging_PagingView('{page_index}');")
                     time.sleep(2)
+            except Exception:
+                pass
             
             # 다운로드 전 파일 수 확인
             before_files = set(os.listdir(self.download_dir)) if os.path.exists(self.download_dir) else set()
             
-            # file_list_id로 직접 찾기 (가장 정확하고 빠름)
+            # 대상 li 찾기 우선순위: li_num -> file_list_id -> href(file_id) -> data-fileid
             download_success = False
-            if file_list_id:
+            target_li = None
+
+            # 0) li_num으로 찾기 (가장 안정적)
+            if li_num:
                 try:
-                    # file_list 요소 찾기
+                    target_li = self.driver.find_element(
+                        By.XPATH,
+                        f"//li[contains(@class,'bo_li')][.//span[contains(@class,'li_num') and normalize-space(text())='{li_num}']]"
+                    )
+                except Exception:
+                    target_li = None
+
+            # 1) file_list_id로 찾기
+            if not target_li and file_list_id:
+                try:
                     file_list_element = self.driver.find_element(By.ID, file_list_id)
-                    parent_div = file_list_element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'hidden_file_g')]")
-                    
-                    # 부모 li 요소 찾기
-                    parent_li = parent_div.find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
-                    
+                    target_li = file_list_element.find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
+                except Exception as e:
+                    print(f"  ⚠ file_list_id로 찾기 실패: {e}")
+                    target_li = None
+
+            # 2) href에 file_id가 포함된 링크로 찾기
+            if not target_li and file_id:
+                try:
+                    link_matches = self.driver.find_elements(
+                        By.XPATH, f"//a[contains(@href, '{file_id}')]"
+                    )
+                    if link_matches:
+                        target_li = link_matches[0].find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
+                except Exception:
+                    target_li = None
+
+            # 3) data-fileid로 찾기
+            if not target_li and file_id:
+                try:
+                    candidates = self.driver.find_elements(By.XPATH, "//li[@data-fileid]")
+                    for li in candidates:
+                        data_id = li.get_attribute('data-fileid') or ""
+                        if file_id == data_id:
+                            target_li = li.find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
+                            break
+                except Exception as e:
+                    print(f"  ⚠ data-fileid 검색 실패: {e}")
+                    target_li = None
+
+            if target_li:
+                try:
+                    parent_div = target_li.find_element(By.XPATH, ".//div[contains(@class, 'hidden_file_g')]")
+                    parent_li = target_li
+
                     # 먼저 "첨부파일" 버튼 찾아서 클릭 (리스트 확장)
                     attach_btn = None
                     try:
-                        # 여러 패턴으로 첨부파일 버튼 찾기
                         attach_buttons = parent_li.find_elements(By.XPATH, 
                             ".//a[contains(text(), '첨부파일')] | "
                             ".//button[contains(text(), '첨부파일')] | "
+                            ".//a[contains(@class, 'btn_file_open')] | "
                             ".//span[contains(text(), '첨부파일')]/parent::* | "
                             ".//*[contains(@class, 'attach')] | "
                             ".//*[contains(@onclick, 'file')]")
@@ -366,7 +416,7 @@ class KoFIUScraperV2:
                         if attach_buttons:
                             attach_btn = attach_buttons[0]
                     except:
-                        pass
+                        attach_btn = None
                     
                     # 첨부파일 버튼을 찾지 못한 경우, 더 넓은 범위에서 찾기
                     if not attach_btn:
@@ -378,7 +428,7 @@ class KoFIUScraperV2:
                                     attach_btn = link
                                     break
                         except:
-                            pass
+                            attach_btn = None
                     
                     # 첨부파일 버튼 클릭 (리스트 확장)
                     if attach_btn:
@@ -388,8 +438,51 @@ class KoFIUScraperV2:
                             print(f"  ✓ 첨부파일 버튼 클릭 (리스트 확장)")
                         except Exception as e:
                             print(f"  ⚠ 첨부파일 버튼 클릭 실패: {e}")
-                    
-                    # 전체다운로드 버튼 찾기 및 클릭
+
+                    # 방법1: 확장된 영역에서 PDF href를 새로 읽어 GET 시도
+                    fresh_pdf_url = None
+                    try:
+                        pdf_link = parent_div.find_element(By.XPATH, ".//a[contains(@class, 'pdf')]")
+                        href = pdf_link.get_attribute("href") or ""
+                        if href:
+                            if href.startswith("http"):
+                                fresh_pdf_url = href
+                            elif href.startswith("/"):
+                                fresh_pdf_url = f"{self.base_url}{href}"
+                            else:
+                                fresh_pdf_url = f"{self.base_url}/{href.lstrip('/')}"
+                    except Exception:
+                        fresh_pdf_url = None
+
+                    target_pdf_url = fresh_pdf_url or pdf_url
+
+                    if target_pdf_url:
+                        try:
+                            headers = {
+                                'Referer': self.list_url,
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                            }
+                            r = self.session.get(target_pdf_url, headers=headers, timeout=30, stream=True, verify=False)
+                            ct = r.headers.get('Content-Type', '').lower()
+                            content_length = int(r.headers.get('Content-Length') or 0)
+                            if r.status_code == 200 and ('pdf' in ct or 'application/octet-stream' in ct) and content_length > 0:
+                                with open(file_path, 'wb') as f:
+                                    for chunk in r.iter_content(chunk_size=8192):
+                                        f.write(chunk)
+                                final_size = os.path.getsize(file_path)
+                                if final_size < 10 * 1024 or 'html' in ct:
+                                    print(f"  ⚠ 방법1(GET) 응답이 HTML/소용량({final_size} bytes), 방법2로 폴백")
+                                    try:
+                                        os.remove(file_path)
+                                    except Exception:
+                                        pass
+                                else:
+                                    print(f"  ✓ 방법1(GET) 성공: {final_size} bytes")
+                                    return True, file_path
+                        except Exception as e:
+                            print(f"  ⚠ 방법1(GET) 실패: {e}")
+
+                    # 방법2: 전체다운로드 버튼 찾기 및 클릭
                     all_download = parent_div.find_elements(By.XPATH, ".//a[contains(@class, 'all_download')]")
                     if all_download:
                         self.driver.execute_script("arguments[0].click();", all_download[0])
@@ -398,66 +491,11 @@ class KoFIUScraperV2:
                     else:
                         print(f"  ⚠ 전체다운로드 버튼을 찾을 수 없습니다")
                 except Exception as e:
-                    print(f"  ⚠ file_list_id로 찾기 실패: {e}")
-            
-            # file_list_id로 못 찾은 경우, data-fileid로 찾기
-            if not download_success:
-                try:
-                    candidates = self.driver.find_elements(By.XPATH, "//li[@data-fileid]")
-                    target_li = None
-                    for li in candidates:
-                        data_id = li.get_attribute('data-fileid') or ""
-                        if file_id == data_id:
-                            target_li = li
-                            break
-                    
-                    if target_li:
-                        try:
-                            parent_div = target_li.find_element(By.XPATH, "./ancestor::div[contains(@class, 'hidden_file_g')]")
-                            parent_li = target_li.find_element(By.XPATH, "./ancestor::li[contains(@class, 'bo_li')]")
-                            
-                            # 먼저 "첨부파일" 버튼 찾아서 클릭 (리스트 확장)
-                            attach_btn = None
-                            try:
-                                attach_buttons = parent_li.find_elements(By.XPATH,
-                                    ".//a[contains(text(), '첨부파일')] | "
-                                    ".//button[contains(text(), '첨부파일')] | "
-                                    ".//span[contains(text(), '첨부파일')]/parent::*")
-                                if attach_buttons:
-                                    attach_btn = attach_buttons[0]
-                            except:
-                                pass
-                            
-                            if not attach_btn:
-                                try:
-                                    all_links = parent_li.find_elements(By.TAG_NAME, "a")
-                                    for link in all_links:
-                                        link_text = link.text.strip()
-                                        if '첨부' in link_text or '파일' in link_text:
-                                            attach_btn = link
-                                            break
-                                except:
-                                    pass
-                            
-                            # 첨부파일 버튼 클릭 (리스트 확장)
-                            if attach_btn:
-                                try:
-                                    self.driver.execute_script("arguments[0].click();", attach_btn)
-                                    time.sleep(1.5)  # 리스트 확장 대기
-                                    print(f"  ✓ 첨부파일 버튼 클릭 (리스트 확장)")
-                                except Exception as e:
-                                    print(f"  ⚠ 첨부파일 버튼 클릭 실패: {e}")
-                            
-                            # 전체다운로드 버튼 찾기 및 클릭
-                            all_download = parent_div.find_elements(By.XPATH, ".//a[contains(@class, 'all_download')]")
-                            if all_download:
-                                self.driver.execute_script("arguments[0].click();", all_download[0])
-                                download_success = True
-                                print(f"  ✓ 전체다운로드 버튼 클릭")
-                        except Exception as e:
-                            print(f"  ⚠ data-fileid로 찾기 실패: {e}")
-                except Exception as e:
-                    print(f"  ⚠ data-fileid 검색 실패: {e}")
+                    print(f"  ⚠ 대상 li 처리 실패: {e}")
+
+            if not target_li:
+                print("  ⚠ 대상 li를 찾지 못했습니다")
+                return False, None
             
             if not download_success:
                 return False, None
@@ -752,6 +790,10 @@ class KoFIUScraperV2:
                     if date_spans:
                         post_date = date_spans[0].get_text(strip=True)
                     
+                    # 번호(span.li_num) 추출 (목록 위치 구분용)
+                    li_num_span = li.find('span', class_='li_num')
+                    li_num_text = li_num_span.get_text(strip=True) if li_num_span else ''
+
                     # 첨부파일 링크 찾기 - href와 fileId 추출
                     hidden_file_div = li.find('div', class_='hidden_file_g')
                     pdf_url = None
@@ -797,6 +839,7 @@ class KoFIUScraperV2:
                         '_pdf_filename': pdf_filename,
                         '_pdf_download_url': pdf_url,  # 다운로드 URL 저장
                         '_file_list_id': file_list_id,  # file_list ID 저장
+                        '_li_num': li_num_text,  # li_num 저장 (안정적 식별자)
                         '_link_text': title,
                         '_post_date': post_date,
                         '_institution_from_title': institution_from_title,  # 목록에서 추출한 금융회사명
@@ -1027,6 +1070,7 @@ class KoFIUScraperV2:
             institution_from_title = item.pop('_institution_from_title', '')  # 목록에서 추출한 금융회사명
             file_id = item.pop('_file_id', None)  # fileId 추출
             file_list_id = item.pop('_file_list_id', None)  # file_list_id 추출
+            li_num = item.pop('_li_num', None)  # li_num 추출 (안정적 식별자)
             page_index = item.pop('_page_index', 1)  # 페이지 인덱스 추출
             pdf_download_url = item.pop('_pdf_download_url', None)  # 다운로드 URL 추출
             
@@ -1034,16 +1078,19 @@ class KoFIUScraperV2:
             
             # 파일 다운로드 (별도 처리)
             saved_file_path = None
-            if file_id:
+            if file_id or li_num:
                 print(f"  파일 다운로드 중...")
                 download_success, saved_file_path = self.download_file_from_list(
                     file_id=file_id,
                     file_list_id=file_list_id,
+                    li_num=li_num,
+                    pdf_url=pdf_download_url,
                     filename=pdf_filename or link_text,
                     page_index=page_index
                 )
                 if download_success and saved_file_path:
                     item['저장된파일경로'] = saved_file_path
+                    item['파일경로'] = saved_file_path  # DB 매핑용 컬럼
                     print(f"  ✓ 파일 다운로드 완료: {os.path.basename(saved_file_path)}")
                 else:
                     print(f"  ⚠ 파일 다운로드 실패")
@@ -1052,7 +1099,6 @@ class KoFIUScraperV2:
             # 다운로드된 파일이 있으면 그 파일에서 내용 추출, 없으면 기존 로직 사용
             attachment_content = None
             doc_type = None
-            file_download_url = None
             
             if saved_file_path and os.path.exists(saved_file_path):
                 # 다운로드된 파일에서 내용 추출
@@ -1073,21 +1119,14 @@ class KoFIUScraperV2:
                 file_download_url = item.get('첨부파일URL', '')
             elif item.get('첨부파일URL'):
                 # 기존 로직: URL에서 다운로드하여 내용 추출
-                attachment_content, doc_type, file_download_url = self.extract_attachment_content(
+                attachment_content, doc_type, _ = self.extract_attachment_content(
                     item['첨부파일URL'], 
                     pdf_filename or link_text
                 )
-                # extract_attachment_content가 파일 경로를 반환하는 경우 저장
-                if file_download_url and os.path.exists(file_download_url):
-                    saved_file_path = file_download_url
-                    item['저장된파일경로'] = saved_file_path
             
             if attachment_content:
-                # file_download_url이 파일 경로인 경우 그대로 사용, URL인 경우 URL 사용
-                if file_download_url and os.path.exists(file_download_url):
-                    item['파일다운로드URL'] = file_download_url
-                else:
-                    item['파일다운로드URL'] = file_download_url if file_download_url else item.get('첨부파일URL', '')
+                if saved_file_path:
+                    item['파일경로'] = saved_file_path  # DB 매핑용 컬럼
                 item['제재조치내용'] = attachment_content
                 
                 # OCR 추출 여부 설정
@@ -1177,80 +1216,71 @@ class KoFIUScraperV2:
                         len(attachment_content.strip()) > 0 and
                         not attachment_content.startswith('[')):
                         print(f"  ⚠ 메타데이터 추출 실패 - OCR 재시도 중...")
-                        # 파일을 다시 다운로드하여 OCR 시도
-                        ocr_retry_url = item['첨부파일URL'] if self.is_pdf_url(item['첨부파일URL']) else file_download_url
+                        # 1순위: 이미 다운로드한 파일(saved_file_path)로 OCR 재시도
+                        ocr_source_path = saved_file_path if saved_file_path and os.path.exists(saved_file_path) else None
+                        # 2순위: URL 재다운로드 (fallback)
+                        if not ocr_source_path:
+                            ocr_retry_url = item['첨부파일URL'] if self.is_pdf_url(item['첨부파일URL']) else file_download_url
+                            if ocr_retry_url and self.is_pdf_url(ocr_retry_url):
+                                filename = self.derive_filename(ocr_retry_url, pdf_filename or link_text)
+                                ocr_source_path, _ = self.file_extractor.download_file(
+                                    url=ocr_retry_url,
+                                    filename=filename,
+                                    referer=self.list_url if self.is_pdf_url(item['첨부파일URL']) else item['첨부파일URL']
+                                )
                         
-                        if ocr_retry_url and self.is_pdf_url(ocr_retry_url):
-                            filename = self.derive_filename(ocr_retry_url, pdf_filename or link_text)
-                            file_path, actual_filename = self.file_extractor.download_file(
-                                url=ocr_retry_url,
-                                filename=filename,
-                                referer=self.list_url if self.is_pdf_url(item['첨부파일URL']) else item['첨부파일URL']
-                            )
-                            
-                            if file_path and os.path.exists(file_path) and self.ocr_extractor.is_available():
-                                ocr_text = self.ocr_extractor.extract_text(file_path, mode='auto')
-                                if ocr_text:
-                                    # OCR 결과 후처리
-                                    ocr_content = process_ocr_text(ocr_text, preserve_spacing=True)
-                                    item['제재조치내용'] = ocr_content
-                                    item['OCR추출여부'] = '예'
-                                    doc_type = 'PDF-OCR'
-                                    is_ocr = True
-                                    
-                                    print(f"  ✓ OCR 재시도 성공 ({len(ocr_content)}자)")
-                                    
-                                    # OCR 텍스트로 메타데이터 재추출
-                                    institution, sanction_date = extract_metadata_from_content(ocr_content)
-                                    
-                                    if institution_from_title:
-                                        item['금융회사명'] = institution_from_title
-                                    elif institution:
-                                        institution = institution.rstrip('*@')
-                                        item['금융회사명'] = institution
-                                    
-                                    final_institution = item.get('금융회사명', '')
-                                    if final_institution:
-                                        industry = self.get_industry(final_institution)
-                                        item['업종'] = industry
-                                    else:
-                                        item['업종'] = '기타'
-                                    
-                                    if sanction_date:
-                                        item['제재조치일'] = sanction_date
-                                    
-                                    try:
-                                        sanction_details = extract_sanction_details(ocr_content)
-                                        if sanction_details:
-                                            item['제재내용'] = sanction_details
-                                    except Exception as e:
-                                        item['제재내용'] = ''
-                                    
-                                    try:
-                                        incidents = extract_incidents(ocr_content)
-                                        if incidents:
-                                            for key in list(incidents.keys()):
-                                                if key.startswith('내용'):
-                                                    processed = process_ocr_text(incidents[key], preserve_spacing=True)
-                                                    incidents[key] = clean_content_symbols(processed)
-                                            item.update(incidents)
-                                    except Exception as e:
-                                        incidents = {}
-                                    
-                                    # 임시 파일 삭제
-                                    try:
-                                        os.remove(file_path)
-                                    except:
-                                        pass
+                        if ocr_source_path and os.path.exists(ocr_source_path) and self.ocr_extractor.is_available():
+                            ocr_text = self.ocr_extractor.extract_text(ocr_source_path, mode='auto')
+                            if ocr_text:
+                                # OCR 결과 후처리
+                                ocr_content = process_ocr_text(ocr_text, preserve_spacing=True)
+                                item['제재조치내용'] = ocr_content
+                                item['OCR추출여부'] = '예'
+                                doc_type = 'PDF-OCR'
+                                is_ocr = True
+                                
+                                print(f"  ✓ OCR 재시도 성공 ({len(ocr_content)}자)")
+                                
+                                # OCR 텍스트로 메타데이터 재추출
+                                institution, sanction_date = extract_metadata_from_content(ocr_content)
+                                
+                                if institution_from_title:
+                                    item['금융회사명'] = institution_from_title
+                                elif institution:
+                                    institution = institution.rstrip('*@')
+                                    item['금융회사명'] = institution
+                                
+                                final_institution = item.get('금융회사명', '')
+                                if final_institution:
+                                    industry = self.get_industry(final_institution)
+                                    item['업종'] = industry
                                 else:
-                                    print(f"  ✗ OCR 재시도 실패 (결과 없음)")
-                                    # 임시 파일 삭제
-                                    try:
-                                        os.remove(file_path)
-                                    except:
-                                        pass
+                                    item['업종'] = '기타'
+                                
+                                if sanction_date:
+                                    item['제재조치일'] = sanction_date
+                                
+                                try:
+                                    sanction_details = extract_sanction_details(ocr_content)
+                                    if sanction_details:
+                                        item['제재내용'] = sanction_details
+                                except Exception as e:
+                                    item['제재내용'] = ''
+                                
+                                try:
+                                    incidents = extract_incidents(ocr_content)
+                                    if incidents:
+                                        for key in list(incidents.keys()):
+                                            if key.startswith('내용'):
+                                                processed = process_ocr_text(incidents[key], preserve_spacing=True)
+                                                incidents[key] = clean_content_symbols(processed)
+                                        item.update(incidents)
+                                except Exception as e:
+                                    incidents = {}
                             else:
-                                print(f"  ✗ OCR 재시도 불가 (파일 다운로드 실패 또는 OCR 사용 불가)")
+                                print(f"  ✗ OCR 재시도 실패 (결과 없음)")
+                        else:
+                            print(f"  ✗ OCR 재시도 불가 (파일 경로 없음 또는 OCR 사용 불가)")
             else:
                 item['제재조치내용'] = "[첨부파일 URL이 없습니다]"
                 # 목록에서 추출한 금융회사명이 있으면 사용
@@ -1428,7 +1458,7 @@ class KoFIUScraperV2:
                 '업종': item.get('업종', '기타'),
                 '제재조치일': sanction_date,
                 '제재내용': processed_sanction_content,
-                '파일다운로드URL': item.get('파일다운로드URL', ''),
+                '파일경로': item.get('파일경로', item.get('저장된파일경로', '')),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
             
@@ -1488,8 +1518,8 @@ class KoFIUScraperV2:
             csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
-                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
+                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일경로, OCR추출여부
+                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일경로', 'OCR추출여부']
 
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
@@ -1513,119 +1543,211 @@ class KoFIUScraperV2:
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-import os
-import time
-from datetime import datetime
-from typing import Dict, Optional
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
-import json
+from typing import Dict
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.base_scraper import BaseScraper
+from KoFIU_Scraper.extractor.pdf_extractor import PDFExtractor
+from KoFIU_Scraper.extractor.ocr_extractor import OCRExtractor
 
 def kofiu_health_check() -> Dict:
-    """
-    금융투자협회(KOFIA) 제재조치 현황 Health Check
-    출력 JSON 양식은 BOK Health Check 구조와 동일
-    """
-    BASE_URL = "https://law.kofia.or.kr"
-    LIST_URL = "https://law.kofia.or.kr/service/law/lawCurrentMain.do"
-    CURRENT_DIR = "output"
 
-    os.makedirs(CURRENT_DIR, exist_ok=True)
-
-    result: Dict = {
-        "org_name": "KOFIA",
-        "target": "금융투자협회 > 제재조치 현황",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "search_page": {"url": LIST_URL, "success": False, "message": None},
-            "list_page": {"success": False, "count": 0, "title": None},
-            "detail_page": {"url": None, "success": False, "content_length": 0}
-        },
-        "error": None
-    }
-
-    def _create_webdriver() -> webdriver.Chrome:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--lang=ko-KR")
-        prefs = {
-            "download.default_directory": os.path.abspath(CURRENT_DIR),
-            "download.prompt_for_download": False,
-            "plugins.always_open_pdf_externally": True
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
-        return webdriver.Chrome(options=chrome_options)
-
-    driver: Optional[webdriver.Chrome] = None
-    try:
-        driver = _create_webdriver()
-        # 1. 검색/목록 페이지 접근
-        driver.get(LIST_URL)
-        time.sleep(3)
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
-
-        # 2. 목록 1건 추출
-        tree_links = []
+    def safe_remove(path: str):
         try:
-            tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-            driver.switch_to.frame(tree_iframe)
-            soup = BeautifulSoup(driver.page_source, "lxml")
-            driver.switch_to.default_content()
-            nodes = soup.select("a")
-            if nodes:
-                first_node = nodes[0]
-                tree_links.append({
-                    "title": first_node.get_text(strip=True),
-                    "href": first_node.get("href")
-                })
-                result["checks"]["list_page"]["success"] = True
-                result["checks"]["list_page"]["count"] = 1
-                result["checks"]["list_page"]["title"] = first_node.get_text(strip=True)
+            if path and os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    BASE_URL = "https://www.kofiu.go.kr"
+    LIST_URL = "https://www.kofiu.go.kr/kor/notification/sanctions.do"
+    OUTPUT_DIR = "output/downloads"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    start_time = time.perf_counter()
+    result = base_health_output(
+        auth_src="금융위원회-금융정보분석원 > 제재공시",
+        scraper_id="KOFIU",
+        target_url=LIST_URL,
+    )
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--lang=ko-KR")
+    prefs = {
+        "download.default_directory": os.path.abspath(OUTPUT_DIR),
+        "download.prompt_for_download": False,
+        "plugins.always_open_pdf_externally": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+
+    driver = None
+    try:
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            LIST_URL,
+            use_selenium=True,
+            allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=LIST_URL,
+            )
+                
+        baseScraper = BaseScraper()
+        # driver = webdriver.Chrome(options=chrome_options)        
+        driver = baseScraper._create_webdriver(chrome_options)
+        # Headless 모드에서 다운로드 허용 설정 (중요)
+        driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": os.path.abspath(OUTPUT_DIR)
+        })        
+        driver.get(LIST_URL)
+        wait = WebDriverWait(driver, 15)
+
+        # 1. 첫 번째 게시물 선택
+        first_li = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "li.bo_li")))
+        title = first_li.find_element(By.CSS_SELECTOR, "p.li_subject").text.strip()
+        result["checks"]["list"] = {
+            "success": True,
+            "count": 1,
+            "title": title
+        }
+
+        # 2. 첨부파일 처리용 기본 구조
+        file_check = {
+            "download_ok": False,
+            "selenium_required": True,
+            "text_extract_ok": False,
+            "ocr_available": False,
+            "reason": None,
+            "message": None,
+            "download_url": None,
+            "path": None
+        }
+
+        try:
+            # 첨부파일 버튼 클릭
+            btn_file_open = first_li.find_element(By.CSS_SELECTOR, "a.btn_file_open")
+            driver.execute_script("arguments[0].click();", btn_file_open)
+
+            # PDF 링크 대기 및 클릭
+            pdf_link_selector = "ul.file_list a.pdf"
+            pdf_link_elem = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, f"li.bo_li {pdf_link_selector}")
+            ))
+            href = pdf_link_elem.get_attribute("href")
+            download_url = urljoin(BASE_URL, href)
+            file_check["download_url"] = download_url
+
+            # ======================================================
+            # 4-1. 다운로드 클릭
+            # ======================================================
+            driver.execute_script("arguments[0].click();", pdf_link_elem)
+
+            # 다운로드 완료 대기
+            timeout = 20
+            save_path = None
+            start_wait = time.time()
+            while time.time() - start_wait < timeout:
+                files = [f for f in os.listdir(OUTPUT_DIR) if f.lower().endswith(".pdf")]
+                if files:
+                    potential_path = os.path.join(OUTPUT_DIR, files[-1])
+                    if os.path.getsize(potential_path) > 0:
+                        save_path = potential_path
+                        break
+                time.sleep(1)
+
+            if save_path:
+                file_check.update(download_ok=True, path=save_path)
+                # PDF 본문 추출 시도
+                try:
+                    text = PDFExtractor.extract_text(save_path)
+                    if text.strip():
+                        result["checks"]["pdf_parse"] = {
+                            "success": True,
+                            "message": "PDF 본문 파싱 가능"
+                        }
+                        file_check["text_extract_ok"] = True
+                except Exception as e:
+                    # PDF 파싱 실패 시 OCR 추출 시도
+                    try:
+                        ocr_text = OCRExtractor().extract_text(save_path)
+                        if ocr_text.strip():
+                            result["checks"]["ocr_parse"] = {
+                                "success": True,
+                                "message": "OCR 본문 파싱 가능"
+                            }
+                            file_check["ocr_available"] = True
+                    except Exception as e2:
+                        result["checks"]["ocr_parse"] = {
+                            "success": False,
+                            "message": f"[OCR_FAIL] {e2}"
+                        }
+            else:
+                file_check.update(reason="DOWNLOAD_FAIL", message="PDF 다운로드 실패 또는 타임아웃")
+
         except Exception as e:
-            result["error"] = f"목록 추출 오류: {e}"
+            file_check.update(reason="ELEMENT_NOT_FOUND", message=str(e))
 
-        # 3. 상세 페이지 접근
-        if tree_links:
-            item = tree_links[0]
-            try:
-                tree_iframe = driver.find_element(By.CSS_SELECTOR, "iframe#tree01")
-                driver.switch_to.frame(tree_iframe)
-                link_elem = driver.find_element(By.LINK_TEXT, item["title"])
-                link_elem.click()
-                time.sleep(2)
-                content_soup = BeautifulSoup(driver.page_source, "lxml")
-                driver.switch_to.default_content()
+        # FSS 스타일 출력
+        result["checks"]["file_download"] = {
+            "url": file_check.get("download_url"),
+            "success": file_check.get("download_ok", False),
+            "message": "첨부파일 다운로드 가능" if file_check.get("download_ok") else file_check.get("message")
+        }
 
-                result["checks"]["detail_page"]["url"] = item["href"]
-                result["checks"]["detail_page"]["success"] = True
-                content_text = content_soup.get_text(strip=True)
-                result["checks"]["detail_page"]["content_length"] = len(content_text)
+        # 헬스 체크 최종 상태
+        result["ok"] = file_check["download_ok"]
+        result["status"] = "OK" if result["ok"] else "FAIL"
+        result["elapsed_ms"] = int((time.perf_counter() - start_time) * 1000)
 
-            except Exception as e:
-                result["error"] = f"상세 페이지 접근 실패: {e}"
-
-        # 최종 상태 결정
-        if all([
-            result["checks"]["search_page"]["success"],
-            result["checks"]["list_page"]["success"],
-            result["checks"]["detail_page"]["success"]
-        ]):
-            result["status"] = "OK"
+        return result
 
     except Exception as e:
-        result["error"] = str(e)
+        raise HealthCheckError(HealthErrorType.UNKNOWN_ERROR, str(e), "kofiu_health_check")
+
     finally:
+        # ===============================
+        # ✅ 기능 완료 후 파일 삭제
+        # ===============================
+        safe_remove(save_path)
+
         if driver:
             driver.quit()
 
-    return result
+# ==================================================
+# scheduler call
+# ==================================================
+def run(csv_path=None, limit=0):
+    scraper = KoFIUScraperV2()
+    results = scraper.scrape_all()
+    scraper.save_results()
+
+    print("\n" + "=" * 60)
+    print("스크래핑 완료!")
+    print(f"총 {len(results)}개 제재 건 수집 (사건별로 분리되어 저장됨)")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)

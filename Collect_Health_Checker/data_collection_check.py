@@ -27,6 +27,8 @@ import ast
 import traceback
 from datetime import datetime
 
+from error_classifier import classify_health_error
+
 # ==================================================
 # 날짜 / 로그 경로
 # ==================================================
@@ -178,67 +180,199 @@ from PressReleases_Scraper.scrape_fss_press_releases_v2 import fss_press_release
 # Health Check 목록
 # ==================================================
 HEALTH_CHECKS = [
-    bok_legnotice_health_check,
-    bok_law_regulations_health_check,
-    crefia_legnotice_health_check,
-    crefia_health_check,
-    fsb_health_check,
-    fsc_guideline_health_check,
-    fsc_legnotice_health_check,
-    fss_admin_guidance_health_check,
-    fss_admin_health_check,
-    fss_guideline_check,
-    fss_legnotice_health_check,
-    fss_mngtnotice_check,
-    fss_sanctions_check,
-    fss_menual_health_check,
-    kfb_committee_health_check,
-    kfb_finlaw_health_check,
-    kfb_legnotice_health_check,
-    kfb_health_check,
-    kofia_legnotice_health_check,
-    kofia_health_check,
-    kofiu_health_check,
-    krx_legnotice_health_check,
-    krx_health_check,
-    law_legnotice_health_check,
-    law_health_check,
-    moleg_health_check,
-    fss_press_releases_health_check,
+    {
+        "title": "한국은행-운영 및 법규→ 법규정보→ 규정 예고",
+        "type": "BOK_LEGNOTICE",
+        "func_check": bok_legnotice_health_check,
+    },
+    {
+        "title": "한국은행 > 운영 및 법규 > 법규정보 > 법령 검색 > [탭] 규정",
+        "type": "BOK",
+        "func_check": bok_law_regulations_health_check,
+    },
+
+    {
+        "title": "여신금융협회 > 정보센터 > 자율규제 제·개정 공고",
+        "type": "CREFIA_LEGNOTICE",
+        "func_check": crefia_legnotice_health_check,
+    },
+    {
+        "title": "여신금융협회 > 정보센터 > 규제개선 > 자율규제 현황",
+        "type": "CREFIA",
+        "func_check": crefia_health_check,
+    },
+
+    {
+        "title": "저축은행중앙회 > 소비자포탈 > 모범규준",
+        "type": "FSB",
+        "func_check": fsb_health_check,
+    },
+
+    {
+        "title": "금융위원회 > 행정지도·행정감독 > 금융위 행정지도 > 시행",
+        "type": "FSC_GUIDELINE",
+        "func_check": fsc_guideline_health_check,
+    },
+    {
+        "title": "금융위원회 > 입법예고",
+        "type": "FSC_LEGNOTICE",
+        "func_check": fsc_legnotice_health_check,
+    },
+
+    {
+        "title": "금융감독원 > 금융행정지도 > 행정지도 내역",
+        "type": "FSS_ADMIN_GUIDANCE",
+        "func_check": fss_admin_guidance_health_check,
+    },
+    {
+        "title": "금융감독원 > 감독행정작용 내역",
+        "type": "FSS_ADMIN",
+        "func_check": fss_admin_health_check,
+    },
+    {
+        "title": "금융감독원 행정지도 및 행정작용",
+        "type": "FSS_GUIDELINE",
+        "func_check": fss_guideline_check,
+    },
+    {
+        "title": "금융감독원 > 세칙 제·개정 예고",
+        "type": "FSS_LEGNOTICE",
+        "func_check": fss_legnotice_health_check,
+    },
+    {
+        "title": "금융감독원 경영유의사항 공시",
+        "type": "FSS_MANAGEMENTNOTICES",
+        "func_check": fss_mngtnotice_check,
+    },
+    {
+        "title": "금융감독원 제재조치 현황",
+        "type": "FSS_SANCTIONS",
+        "func_check": fss_sanctions_check,
+    },
+
+    {
+        "title": "검사업무 안내서",
+        "type": "InspectionManual",
+        "func_check": fss_menual_health_check,
+    },
+
+    {
+        "title": "은행연합회 규제심의위원회 결과",
+        "type": "KFB_COMMITTEE",
+        "func_check": kfb_committee_health_check,
+    },
+    {
+        "title": "은행연합회 금융관련법규",
+        "type": "KFB_FINLAW",
+        "func_check": kfb_finlaw_health_check,
+    },
+    {
+        "title": "은행연합회 자율규제 제정·개정예고",
+        "type": "KFB_LegNotice",
+        "func_check": kfb_legnotice_health_check,
+    },
+    {
+        "title": "은행연합회 자율규제",
+        "type": "KFB",
+        "func_check": kfb_health_check,
+    },
+
+    {
+        "title": "금융투자협회 규정 제·개정 예고",
+        "type": "KOFIA_LegNotice",
+        "func_check": kofia_legnotice_health_check,
+    },
+    {
+        "title": "금융투자협회 법규정보시스템",
+        "type": "KOFIA",
+        "func_check": kofia_health_check,
+    },
+
+    {
+        "title": "금융정보분석원(KoFIU) 제재공시",
+        "type": "KoFIU",
+        "func_check": kofiu_health_check,
+    },
+
+    {
+        "title": "한국거래소 규정 제·개정 예고",
+        "type": "KRX_LegNotice",
+        "func_check": krx_legnotice_health_check,
+    },
+    {
+        "title": "한국거래소 KRX 법무포탈",
+        "type": "KRX",
+        "func_check": krx_health_check,
+    },
+
+    {
+        "title": "법제처 시행예정법령",
+        "type": "Law_LegNotice",
+        "func_check": law_legnotice_health_check,
+    },
+    {
+        "title": "국가법령정보센터",
+        "type": "Law",
+        "func_check": law_health_check,
+    },
+    {
+        "title": "법제처 입법예고",
+        "type": "Moleg",
+        "func_check": moleg_health_check,
+    },
+
+    {
+        "title": "금융감독원 보도자료",
+        "type": "PressReleases",
+        "func_check": fss_press_releases_health_check,
+    },
 ]
+
 
 # ==================================================
 # Health Check 실행
 # ==================================================
 def run_data_collection_health_check():
     print("\n" + "=" * 80)
-    print("🚀 자료 수집 Health Check 시작")
+    print("자료 수집 Health Check 시작")
     print("=" * 80)
 
     results = []
     start_time = datetime.now()
 
-    for check_func in HEALTH_CHECKS:
-        module_name = check_func.__module__.split(".")[0]
+    for item in HEALTH_CHECKS:
+        title = item["title"]
+        check_type = item["type"]
+        check_func = item["func_check"]
+
         func_name = check_func.__name__
+        module_name = check_func.__module__.split(".")[0]
+
+        print(f"\n[CHECK] {title}")
+        print(f"        ({check_type} | {module_name}.{func_name})")
 
         log_path = (
             JSON_ROOT
-            / module_name
+            / check_type
             / f"{func_name}.{RUN_DATE}.json"
         )
-
-        print(f"[CHECK] {module_name}.{func_name}")
 
         try:
             result = check_func()
         except Exception as e:
             result = {
-                "org_name": func_name,
+                "org_name": check_type,
+                "title": title,
                 "status": "ERROR",
                 "error": str(e),
                 "traceback": traceback.format_exc(),
             }
+
+        # ✅ 실패 유형 자동 분류
+        if result.get("status") != "OK":
+            error_type = classify_health_error(result)
+            result["error_type"] = error_type.name
+            result["error_type_desc"] = error_type.value
 
         write_json(log_path, result)
         results.append(result)

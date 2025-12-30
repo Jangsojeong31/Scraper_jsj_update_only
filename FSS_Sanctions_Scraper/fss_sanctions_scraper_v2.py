@@ -884,118 +884,198 @@ class FSSScraperV2:
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.constants import URLStatus
+
+from datetime import datetime
+import time
+
+
 def fss_sanctions_check() -> dict:
     """
     금융감독원(FSS) 제재조치 현황 헬스체크
-    - 목록 1건 추출
-    - 상세 페이지 접근
-    - 첨부파일 다운로드 가능 여부
-    - PDF/OCR 본문 파싱 가능 여부
+    - HealthErrorType 명시적 raise
+    - Alert 연동 가능 구조
     """
-    check_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    result = {
-        "org_name": "FSS",
-        "target": "금융감독원 > 제재조치 현황",
-        "check_time": check_time,
-        "status": "OK",
-        "checks": {},
-        "error": None
-    }
+
+    LIST_URL = "https://www.fss.or.kr/fss/job/openInfo/list.do?menuNo=200476&pageIndex=1"
+
+    start_ts = time.perf_counter()
+
+    result = base_health_output(
+        auth_src="금융감독원-제재조치",
+        scraper_id="FSS_SANCTIONS",
+        target_url=LIST_URL,
+    )
 
     try:
-        # ===============================
-        # 스크래퍼 객체 생성
-        # ===============================
-#        from fss_sanctions_scraper_v2 import FSSScraperV2
         scraper = FSSScraperV2()
+        session = scraper.session
 
-        # ===============================
-        # 1️⃣ 목록 페이지 1건 확인
-        # ===============================
+        # ==================================================
+        # 1️⃣ HTTP 접근 체크
+        # ==================================================
+        http_result = check_url_status(LIST_URL)
+        url_status = http_result["status"]
+
+        result["checks"]["http"] = {
+            "ok": url_status == URLStatus.OK,
+            "status_code": http_result.get("status_code"),
+            "verify_ssl": http_result.get("verify_ssl", True),
+        }
+
+        if url_status != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(url_status),
+                "목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+
+        # ==================================================
+        # 2️⃣ 목록 1건 확인
+        # ==================================================
         items = scraper.scrape_list_page(page_index=1)
+
         if not items:
-            raise Exception("목록 1건 추출 실패")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "제재조치 목록 데이터 없음",
+                "table > tbody > tr",
+            )
 
-        first_item = items[0]
-        result["checks"]["list_page"] = {
-            "url": scraper.list_url_template.format(page=1, sdate='', edate=''),
-            "success": True,
+        first = items[0]
+
+        result["checks"]["list"] = {
+            "ok": True,
             "count": 1,
-            "title": first_item.get('제재대상기관', '')
+            "title": first.get("제재대상기관", ""),
         }
 
-        # ===============================
-        # 2️⃣ 상세 페이지 접근 확인
-        # ===============================
-        detail_url = first_item.get("상세페이지URL")
+        # ==================================================
+        # 3️⃣ 상세 페이지 + 첨부파일 파싱
+        # ==================================================
+        detail_url = first.get("상세페이지URL")
         if not detail_url:
-            raise Exception("상세 페이지 URL 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락",
+                "상세페이지URL",
+            )
 
-        content, doc_type, file_url = scraper.extract_attachment_content(detail_url, first_item.get('_link_text', ''))
-        result["checks"]["detail_page"] = {
+        content, doc_type, file_url = scraper.extract_attachment_content(
+            detail_url,
+            first.get("_link_text", ""),
+        )
+
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문/첨부 내용 비어 있음",
+                detail_url,
+            )
+
+        result["checks"]["detail"] = {
+            "ok": True,
             "url": detail_url,
-            "success": True,
-            "content_length": len(content) if content else 0,
-            "doc_type": doc_type
+            "content_length": len(content),
         }
 
-        # ===============================
-        # 3️⃣ 파일 다운로드 가능 여부
-        # ===============================
+        # ==================================================
+        # 4️⃣ 첨부파일 다운로드 체크 (있을 때만)
+        # ==================================================
         if file_url:
             try:
-                head = scraper.session.head(file_url, timeout=15, allow_redirects=True)
-                file_success = head.status_code < 400
+                head = session.head(
+                    file_url,
+                    timeout=15,
+                    allow_redirects=True,
+                    verify=False,
+                )
+                if head.status_code >= 400:
+                    raise HealthCheckError(
+                        HealthErrorType.FILE_DOWNLOAD_FAILED,
+                        f"첨부파일 접근 실패 (HTTP {head.status_code})",
+                        file_url,
+                    )
+
+                result["checks"]["file_download"] = {
+                    "url": file_url,
+                    "success": True,
+                    "message": "첨부파일 다운로드 가능",
+                }
+
+            except HealthCheckError:
+                raise
+
             except Exception as e:
-                file_success = False
-                file_error = str(e)
+                raise HealthCheckError(
+                    HealthErrorType.FILE_DOWNLOAD_FAILED,
+                    str(e),
+                    file_url,
+                )
 
-            result["checks"]["file_download"] = {
-                "url": file_url,
-                "success": file_success,
-                "message": "첨부파일 다운로드 가능" if file_success else file_error
-            }
-        else:
-            result["checks"]["file_download"] = {
-                "url": None,
+        # ==================================================
+        # 5️⃣ PDF / OCR 파싱 가능 여부
+        # ==================================================
+        if doc_type in ("PDF-텍스트", "PDF-OCR"):
+            result["checks"]["content_parse"] = {
                 "success": True,
-                "message": "첨부파일 없음"
+                "doc_type": doc_type,
+                "message": f"{doc_type} 본문 파싱 가능",
             }
+        elif doc_type in ("PDF-OCR필요", "오류"):
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "PDF/OCR 본문 파싱 실패",
+                file_url or detail_url,
+            )
 
-        # ===============================
-        # 4️⃣ PDF/OCR 본문 파싱 가능 여부
-        # ===============================
-        if doc_type in ('PDF-텍스트', 'PDF-OCR'):
-            result["checks"]["content_parse"] = {
-                "doc_type": doc_type,
-                "success": True,
-                "message": f"{doc_type} 본문 파싱 가능"
-            }
-        elif doc_type in ('첨부없음', '기타첨부파일'):
-            result["checks"]["content_parse"] = {
-                "doc_type": doc_type,
-                "success": True,
-                "message": "PDF 파싱 대상 아님"
-            }
-        else:
-            result["checks"]["content_parse"] = {
-                "doc_type": doc_type,
-                "success": False,
-                "message": content[:200] if content else "첨부파일 처리 중 오류"
-            }
-            result["status"] = "FAIL"
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
+        result["status"] = "OK"
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except Exception as e:
-        result["status"] = "FAIL"
-        result["error"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e),
+            )
+        )
 
     finally:
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_ts) * 1000
+        )
         try:
             scraper.close()
         except:
             pass
 
     return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scraper = FSSScraperV2()
+    results = scraper.scrape_all()
+    scraper.save_results()
+
+    print("\n" + "=" * 60)
+    print("스크래핑 완료!")
+    print(f"총 {len(results)}개 제재 건 수집 (사건별로 분리되어 저장됨)")
+    print("=" * 60)
 
 if __name__ == "__main__":
     # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)

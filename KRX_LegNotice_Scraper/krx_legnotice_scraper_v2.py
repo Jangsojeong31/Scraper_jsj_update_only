@@ -234,50 +234,62 @@ def scrape_all(keyword=None, start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+
 def krx_legnotice_health_check() -> dict:
     """
-    KRX 규정 제·개정 예고 Health Check (v2)
-    - 목록 1건 추출
-    - 상세 페이지 접근 및 본문 영역 확인
+    KRX 규정 제·개정 예고 Health Check (v3)
+    - HealthErrorType 스크래퍼 내부 명시적 raise
+    - URLStatus → HealthErrorType 매핑 흐름 준수
     """
 
     start_time = time.perf_counter()
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    result = {
-        "org_name": ORG_NAME,
-        "target": "한국거래소 > 법무포탈 > 규정 제·개정 예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": BASE_URL,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-            "detail_page": {
-                "url": DETAIL_BASE_URL,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-        },
-        "error": None,
-        "elapsed": None,
-    }
+    result = base_health_output(
+        auth_src="한국거래소-법무포탈",
+        scraper_id="KRX_LEGNOTICE",
+        target_url=BASE_URL,
+    )
 
     driver = None
+
     try:
         driver = create_driver()
         wait = WebDriverWait(driver, 20)
 
-        # ---------------------------------
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            BASE_URL,
+            use_selenium=True,
+            allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=BASE_URL,
+            )
+        
+        # ==================================================
         # 1️⃣ 목록 페이지 체크
-        # ---------------------------------
+        # ==================================================
         t0 = time.perf_counter()
 
-        logger.info(f"[HEALTH] KRX 메인 접근: {BASE_URL}")
         driver.get(BASE_URL)
         time.sleep(1)
 
@@ -295,59 +307,94 @@ def krx_legnotice_health_check() -> dict:
             EC.frame_to_be_available_and_switch_to_it((By.ID, "workPage"))
         )
 
-        # 목록 로딩 확인
-        wait.until(
+        rows = wait.until(
             EC.presence_of_all_elements_located(
                 (By.CSS_SELECTOR, "div.x-grid3-row")
             )
         )
 
-        rows = driver.find_elements(By.CSS_SELECTOR, "div.x-grid3-row")
         if not rows:
-            raise RuntimeError("목록 데이터 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 없음",
+                "div.x-grid3-row"
+            )
 
         row = rows[0]
+
         title = row.find_element(
             By.CSS_SELECTOR, "div.x-grid3-col-1"
         ).text.strip()
 
-        result["checks"]["list_page"].update({
+        result["checks"]["list"] = {
+            "url": BASE_URL,
             "status": "OK",
             "message": f"목록 1건 추출 성공 ({title})",
             "elapsed": round(time.perf_counter() - t0, 3),
-        })
+        }
 
-        # ---------------------------------
+        # ==================================================
         # 2️⃣ 상세 페이지 체크
-        # ---------------------------------
+        # ==================================================
         t1 = time.perf_counter()
 
-        logger.info(f"[HEALTH] 상세 접근: {title}")
         ActionChains(driver).move_to_element(row).click().perform()
         time.sleep(1)
 
-        detail_title, content = parse_detail_page(driver, wait)
-        if not content:
-            raise RuntimeError("상세 페이지 본문 추출 실패")
+        try:
+            detail_title, content = parse_detail_page(driver, wait)
+        except Exception:
+            raise HealthCheckError(
+                HealthErrorType.TAG_MISMATCH,
+                "상세 페이지 HTML 구조 불일치",
+                "//th[text()='제목']/following-sibling::td"
+            )
 
-        result["checks"]["detail_page"].update({
+        if not content.strip():
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 내용 비어 있음",
+                "#conts"
+            )
+
+        result["checks"]["detail"] = {
+            "url": DETAIL_BASE_URL,
             "status": "OK",
             "message": "상세 페이지 접근 및 본문 영역 확인",
             "elapsed": round(time.perf_counter() - t1, 3),
-        })
+        }
 
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
         return result
 
+    except HealthCheckError as he:
+        # ✔ HealthErrorType 기반 표준 매핑
+        apply_health_error(result, he)
+        return result
+
     except Exception as e:
-        logger.exception("[HEALTH] KRX Health Check 실패")
-        result["error"] = str(e)
+        # ✔ 예외 미분류 → UNEXPECTED_ERROR
+        he = HealthCheckError(
+            HealthErrorType.UNEXPECTED_ERROR,
+            str(e)
+        )
+        apply_health_error(result, he)
         return result
 
     finally:
         result["elapsed"] = round(time.perf_counter() - start_time, 3)
         if driver:
             driver.quit()
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
 
 # ==================================================
 # main

@@ -1,3 +1,5 @@
+# krx_scraper_v2.py
+
 """
 한국거래소 스크래퍼
 """
@@ -1173,12 +1175,14 @@ class KrxScraper(BaseScraper):
 # Health Check 모드
 # -------------------------------------------------
 import traceback
-from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from common.health_schema import base_health_output
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_mapper import apply_health_error
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.constants import URLStatus
 
 def krx_health_check() -> Dict:
     """
@@ -1195,21 +1199,54 @@ def krx_health_check() -> Dict:
 
     check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    result: Dict = {
-        "org_name": "KRX",
-        "target": "한국거래소 > KRX 법무포탈",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {},
-        "error": None,
-    }
+    result = base_health_output(
+        auth_src="한국거래소 > KRX 법무포탈",
+        scraper_id="KRX_LEGNOTICE",
+        target_url=BASE_URL,
+    )
 
     driver = None
 
     try:
-        # ===============================
+        # ==================================================
+        # 0️⃣ URL 상태 사전 점검 (HTTP)
+        # ==================================================
+        # url_status = check_url_status(BASE_URL)
+        # health_error = map_urlstatus_to_health_error(url_status)
+
+        # if health_error:
+        #     raise HealthCheckError(
+        #         health_error,
+        #         f"URL 상태 이상: {url_status.name}",
+        #         MAIN_URL
+        #     )
+
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            MAIN_URL,
+            use_selenium=True,
+            allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=MAIN_URL,
+            )
+        
+        # ==================================================
         # Selenium 설정
-        # ===============================
+        # ==================================================
+        scraper = BaseScraper()
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
@@ -1223,12 +1260,12 @@ def krx_health_check() -> Dict:
             },
         )
 
-        driver = webdriver.Chrome(options=chrome_options)
+        driver = scraper._create_webdriver(chrome_options)
         wait = WebDriverWait(driver, 15)
 
-        # ===============================
+        # ==================================================
         # 1️⃣ 메인 페이지 접근
-        # ===============================
+        # ==================================================
         driver.get(MAIN_URL)
         wait.until(EC.presence_of_element_located((By.ID, "mainSchTxt")))
 
@@ -1238,30 +1275,32 @@ def krx_health_check() -> Dict:
             "message": "메인 페이지 접근 성공",
         }
 
-        # ===============================
-        # 2️⃣ 키워드 검색 (임의 키워드 1개)
-        # ===============================
+        # ==================================================
+        # 2️⃣ 키워드 검색
+        # ==================================================
         keyword = "규정"
         search_input = driver.find_element(By.ID, "mainSchTxt")
         search_input.clear()
         search_input.send_keys(keyword)
         driver.find_element(By.ID, "mainSchBtn").click()
 
-        # 검색 결과 페이지 진입
         wait.until(lambda d: "search.do" in d.current_url)
 
-        # iframe 전환
         driver.switch_to.default_content()
         wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "workPage")))
 
-        # ===============================
+        # ==================================================
         # 3️⃣ 목록 1건 추출
-        # ===============================
+        # ==================================================
         wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "#law_rule li dl")))
         entries = driver.find_elements(By.CSS_SELECTOR, "#law_rule li dl")
 
         if not entries:
-            raise Exception("검색 결과 목록 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "검색 결과 목록 없음",
+                "#law_rule li dl"
+            )
 
         entry = entries[0]
         title_el = entry.find_element(By.CSS_SELECTOR, "dt")
@@ -1274,33 +1313,48 @@ def krx_health_check() -> Dict:
             "title": title,
         }
 
-        # ===============================
+        # ==================================================
         # 4️⃣ 상세 페이지(goToView) 접근
-        # ===============================
+        # ==================================================
+        if "goToView" not in onclick:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "goToView 상세 페이지 링크 없음",
+                "dt[onclick]"
+            )
+
         handles_before = set(driver.window_handles)
-
-        if "goToView" in onclick:
-            driver.execute_script(onclick)
-        else:
-            driver.execute_script("arguments[0].click();", title_el)
-
+        driver.execute_script(onclick)
         time.sleep(3)
 
         handles_after = set(driver.window_handles)
         new_windows = handles_after - handles_before
-        if not new_windows:
-            raise Exception("상세 페이지 창 열기 실패")
 
-        detail_handle = new_windows.pop()
-        driver.switch_to.window(detail_handle)
+        if not new_windows:
+            raise HealthCheckError(
+                HealthErrorType.TAG_MISMATCH,
+                "상세 페이지 새 창 생성 실패",
+                "window_handles"
+            )
+
+        driver.switch_to.window(new_windows.pop())
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
-        # 본문 추출
+        # ==================================================
+        # 5️⃣ 본문 추출
+        # ==================================================
         try:
             content_elem = driver.find_element(By.ID, "regulCont")
             content_text = content_elem.text.strip()
         except Exception:
             content_text = driver.find_element(By.TAG_NAME, "body").text.strip()
+
+        if not content_text:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 비어 있음",
+                "#regulCont / body"
+            )
 
         result["checks"]["detail_page"] = {
             "url": driver.current_url,
@@ -1308,9 +1362,9 @@ def krx_health_check() -> Dict:
             "content_length": len(content_text),
         }
 
-        # ===============================
-        # 5️⃣ 파일 / PDF / OCR 파싱 가능 여부
-        # ===============================
+        # ==================================================
+        # 6️⃣ PDF / OCR 가능 여부 (존재성 체크)
+        # ==================================================
         attachment = {
             "file_download": {"success": False, "message": "첨부파일 없음"},
             "pdf_parse": {"success": False, "message": "PDF 파싱 불가"},
@@ -1319,47 +1373,58 @@ def krx_health_check() -> Dict:
 
         pdf_links = driver.find_elements(By.CSS_SELECTOR, "a[href$='.pdf'], #webprint")
         if pdf_links:
-            attachment["file_download"] = {
-                "success": True,
-                "message": "PDF 다운로드 경로 확인",
-            }
+            attachment["file_download"]["success"] = True
+            attachment["file_download"]["message"] = "PDF 링크 존재"
 
             try:
                 import pdfplumber  # noqa
-                attachment["pdf_parse"] = {
-                    "success": True,
-                    "message": "PDF 본문 파싱 가능",
-                }
+                attachment["pdf_parse"]["success"] = True
+                attachment["pdf_parse"]["message"] = "PDF 파싱 가능"
             except Exception:
                 pass
 
             try:
                 import pytesseract  # noqa
-                attachment["ocr_parse"] = {
-                    "success": True,
-                    "message": "OCR 본문 파싱 가능",
-                }
+                attachment["ocr_parse"]["success"] = True
+                attachment["ocr_parse"]["message"] = "OCR 가능"
             except Exception:
                 pass
 
         result["checks"]["attachment"] = attachment
 
-        # ===============================
-        # 최종 성공
-        # ===============================
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
+        return result
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
 
     except Exception as e:
-        result["status"] = "FAIL"
-        result["error"] = str(e)
-        traceback.print_exc()
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e)
+            )
+        )
+        return result
 
     finally:
         if driver:
             driver.quit()
 
-    return result
 
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    crawler = KrxScraper()
+    results = crawler.crawl_krx_legal_portal()
+    print(f"추출된 데이터: {len(results)}개")
 
 if __name__ == "__main__":
     import argparse

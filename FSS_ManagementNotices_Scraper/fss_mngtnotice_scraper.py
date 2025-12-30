@@ -459,7 +459,7 @@ class FSSManagementNoticesScraperV2:
         첨부파일 내용 추출 (FileExtractor 사용)
         
         Returns:
-            tuple: (추출된 내용, 문서유형, 파일다운로드URL)
+            tuple: (추출된 내용, 문서유형, 파일다운로드URL, 파일명)
         """
         try:
             # PDF URL인 경우 직접 다운로드
@@ -511,11 +511,11 @@ class FSSManagementNoticesScraperV2:
                     
                     if content and content.strip():
                         print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                        return content, doc_type, file_url
+                        return content, doc_type, file_url, filename
                     else:
-                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', file_url
+                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', file_url, filename
                 else:
-                    return "[파일 다운로드 실패]", '오류', file_url
+                    return "[파일 다운로드 실패]", '오류', file_url, filename
             
             # 일반 페이지에서 첨부파일 링크 찾기
             response = self.get_page(detail_url)
@@ -597,25 +597,25 @@ class FSSManagementNoticesScraperV2:
                             
                             if content and content.strip():
                                 print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                                return content, doc_type, file_url
+                                return content, doc_type, file_url, filename
                             else:
-                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url
+                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url, filename
                         else:
                             # 임시 파일 삭제
                             try:
                                 os.remove(file_path)
                             except:
                                 pass
-                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_url
+                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_url, filename
                     break
             
-            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', ''
+            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', '', ''
             
         except Exception as e:
             print(f"  첨부파일 추출 중 오류: {e}")
             import traceback
             traceback.print_exc()
-            return f"[오류: {str(e)}]", '오류', ''
+            return f"[오류: {str(e)}]", '오류', '', ''
     
     def scrape_list_page(self, page_index, sdate='', edate=''):
         """목록 페이지 스크래핑"""
@@ -815,13 +815,14 @@ class FSSManagementNoticesScraperV2:
             print(f"\n[{idx}/{len(all_items)}] {institution_from_list or link_text or 'N/A'} 처리 중...")
             
             if item.get('상세페이지URL'):
-                attachment_content, doc_type, file_download_url = self.extract_attachment_content(
+                attachment_content, doc_type, file_download_url, file_name = self.extract_attachment_content(
                     item['상세페이지URL'], 
                     link_text
                 )
                 item['제재조치내용'] = attachment_content
                 item['문서유형'] = doc_type
                 item['파일다운로드URL'] = file_download_url
+                item['파일명'] = file_name
                 
                 # OCR 추출 여부 설정
                 is_ocr = doc_type == 'PDF-OCR'
@@ -888,6 +889,7 @@ class FSSManagementNoticesScraperV2:
                 item['문서유형'] = 'URL없음'
                 item['OCR추출여부'] = '아니오'
                 item['파일다운로드URL'] = ''
+                item['파일명'] = ''
                 if institution_from_list:
                     item['금융회사명'] = institution_from_list
                     item['업종'] = self.get_industry(institution_from_list)
@@ -1083,6 +1085,7 @@ class FSSManagementNoticesScraperV2:
                 '제재조치일': sanction_date,
                 '제재내용': processed_sanction_content,  # 후처리 적용
                 '파일다운로드URL': item.get('파일다운로드URL', ''),
+                '파일명': item.get('파일명', ''),
                 'OCR추출여부': item.get('OCR추출여부', '아니오')
             }
             
@@ -1143,8 +1146,8 @@ class FSSManagementNoticesScraperV2:
             csv_filepath = os.path.join(output_dir, csv_filename)
             
             if split_results:
-                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, OCR추출여부
-                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', 'OCR추출여부']
+                # 필드 순서: 구분, 출처, 업종, 금융회사명, 제목, 내용, 제재내용, 제재조치일, 파일다운로드URL, 파일명, OCR추출여부
+                fieldnames = ['구분', '출처', '업종', '금융회사명', '제목', '내용', '제재내용', '제재조치일', '파일다운로드URL', '파일명', 'OCR추출여부']
                 
                 with open(csv_filepath, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
@@ -1165,6 +1168,135 @@ class FSSManagementNoticesScraperV2:
             import traceback
             traceback.print_exc()
 
+# -------------------------------------------------
+# Health Check 모드
+# -------------------------------------------------
+def fss_mngtnotice_check() -> dict:
+    """
+    금융감독원 경영유의사항(행정지도·행정작용) 헬스체크
+    - 목록 1건 추출
+    - 상세 페이지 접근
+    - 첨부파일 다운로드 가능 여부
+    - PDF/OCR 본문 파싱 가능 여부
+    """
+    check_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    result = {
+        "org_name": "FSS",
+        "target": "금융감독원 > 행정지도 · 행정작용(경영유의사항)",
+        "check_time": check_time,
+        "status": "OK",
+        "checks": {},
+        "error": None
+    }
+
+    try:
+        # ===============================
+        # 스크래퍼 객체 생성
+        # ===============================
+        scraper = FSSManagementNoticesScraperV2()
+
+        session = scraper.session
+        list_url_template = scraper.list_url_template
+
+        # ===============================
+        # 1️⃣ 목록 페이지 1건 확인
+        # ===============================
+        items = scraper.scrape_list_page(page_index=1, sdate='', edate='')
+        if not items:
+            raise Exception("목록 1건 추출 실패")
+
+        first = items[0]
+        result["checks"]["list_page"] = {
+            "url": list_url_template.format(page=1, sdate='', edate=''),
+            "success": True,
+            "count": 1,
+            "title": first.get('제재대상기관', '')
+        }
+
+        # ===============================
+        # 2️⃣ 상세 페이지 접근 확인
+        # ===============================
+        detail_url = first.get("상세페이지URL")
+        if not detail_url:
+            raise Exception("상세 페이지 URL 없음")
+
+        resp = session.get(detail_url, timeout=15)
+        resp.raise_for_status()
+
+        result["checks"]["detail_page"] = {
+            "url": detail_url,
+            "success": True,
+            "content_length": len(resp.text)
+        }
+
+        # ===============================
+        # 3️⃣ 파일 다운로드 및 PDF/OCR 파싱
+        # ===============================
+        # fss_scraper_v2.py는 4개 값을 반환하므로 filename도 받음 (사용하지 않지만 unpacking 오류 방지)
+        content, doc_type, file_url, filename = scraper.extract_attachment_content(detail_url, first.get('_link_text', ''))
+
+        # 파일 다운로드 체크
+        if file_url:
+            try:
+                head = session.head(file_url, timeout=15, allow_redirects=True)
+                file_success = head.status_code < 400
+                file_error = None
+            except Exception as e:
+                file_success = False
+                file_error = str(e)
+
+            result["checks"]["file_download"] = {
+                "url": file_url,
+                "success": file_success,
+                "message": "첨부파일 다운로드 가능" if file_success else file_error
+            }
+        else:
+            result["checks"]["file_download"] = {
+                "url": None,
+                "success": True,
+                "message": "첨부파일 없음"
+            }
+
+        # PDF/OCR 본문 파싱 가능 여부 체크
+        if doc_type in ('PDF-텍스트', 'PDF-OCR'):
+            result["checks"]["content_parse"] = {
+                "doc_type": doc_type,
+                "success": True,
+                "message": f"{doc_type} 본문 파싱 가능"
+            }
+        elif doc_type in ('첨부없음', '기타첨부파일'):
+            result["checks"]["content_parse"] = {
+                "doc_type": doc_type,
+                "success": True,
+                "message": "PDF 파싱 대상 아님"
+            }
+        elif doc_type == 'PDF-OCR필요':
+            result["checks"]["content_parse"] = {
+                "doc_type": doc_type,
+                "success": False,
+                "message": "PDF 텍스트 추출 실패 및 OCR 실패"
+            }
+            result["status"] = "FAIL"
+        else:  # 오류 또는 알 수 없는 상태
+            result["checks"]["content_parse"] = {
+                "doc_type": doc_type,
+                "success": False,
+                "message": content[:200] if content else "첨부파일 처리 중 오류"
+            }
+            result["status"] = "FAIL"
+
+    except Exception as e:
+        result["status"] = "FAIL"
+        result["error"] = str(e)
+
+    finally:
+        # 스크래퍼 리소스 정리
+        try:
+            scraper.close()
+        except:
+            pass
+
+    return result
 
 if __name__ == "__main__":
     # 기본 검색 기간 설정 (오늘 날짜 기준 일주일 전 ~ 오늘)
@@ -1180,7 +1312,21 @@ if __name__ == "__main__":
     parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
     parser.add_argument('--output', type=str, default='fss_results.json', help='출력 파일명 (기본: fss_results.json)')
     
+    parser.add_argument(
+        '--check',
+        action='store_true',
+        help='헬스체크 모드 실행 (스크래핑 미수행)'
+    )
+
     args = parser.parse_args()
+    
+    # ===============================
+    # 헬스체크 모드
+    # ===============================
+    if args.check:
+        health_result = fss_mngtnotice_check()
+        print(json.dumps(health_result, ensure_ascii=False, indent=2))
+        sys.exit(0)
     
     scraper = FSSManagementNoticesScraperV2()
     results = scraper.scrape_all(

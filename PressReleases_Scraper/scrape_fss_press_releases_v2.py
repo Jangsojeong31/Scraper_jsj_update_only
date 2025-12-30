@@ -1,7 +1,12 @@
+# scrape_fss_press_releases_v2.py
+
 """
 금융감독원 보도자료 목록에서 첨부파일(HWP, PDF 등)을 모두 추출하고,
 보도일을 HWP에서만 추출하는 스크립트 (CSV/Excel/JSON 저장)
 """
+
+import os
+import sys
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -22,6 +27,13 @@ except ImportError:
     PDF_AVAILABLE = False
     print("⚠️ pdfplumber가 설치되지 않았습니다. PDF 파일 처리가 제한됩니다.")
 
+# ==================================================
+# 프로젝트 루트 경로 등록
+# ==================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 # -----------------------------------------------------------
 # HWPX 파일에서 텍스트 추출 (ZIP 기반 XML)
@@ -1272,6 +1284,14 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import re
 
+from common.health_schema import base_health_output
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_mapper import apply_health_error
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.constants import URLStatus
+
 def fss_press_releases_health_check() -> Dict:
     """
     금융감독원 보도자료 Health Check
@@ -1282,17 +1302,23 @@ def fss_press_releases_health_check() -> Dict:
     BASE_URL = "https://www.fss.or.kr"
     LIST_URL = "https://www.fss.or.kr/fss/bbs/B0000188/list.do?menuNo=200218&pageIndex=1"
 
-    result = {
-        "org_name": "FSS",
-        "target": "금융감독원 > 보도자료",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "list_page": {},
-            "detail_page": {}
-        },
-        "error": None
-    }
+    # result = {
+    #     "org_name": "FSS",
+    #     "target": "금융감독원 > 보도자료",
+    #     "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    #     "status": "FAIL",
+    #     "checks": {
+    #         "list_page": {},
+    #         "detail_page": {}
+    #     },
+    #     "error": None
+    # }
+
+    result = base_health_output(
+        auth_src="금융감독원 > 보도자료",
+        scraper_id="FSS_PRESS",
+        target_url=LIST_URL,
+    )
 
     session = requests.Session()
     session.headers.update({
@@ -1300,6 +1326,29 @@ def fss_press_releases_health_check() -> Dict:
     })
 
     try:
+
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            LIST_URL,
+             use_selenium=True,
+             allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=LIST_URL,
+            )
+                
         # ===============================
         # 1. 목록 페이지 접근
         # ===============================
@@ -1370,13 +1419,32 @@ def fss_press_releases_health_check() -> Dict:
             "content_length": content_length
         }
 
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
         return result
 
-    except Exception as e:
-        result["error"] = str(e)
-        result["status"] = "FAIL"
+    except HealthCheckError as he:
+        apply_health_error(result, he)
         return result
+    
+    except Exception as e:
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e)
+            )
+        )
+        return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    main()
 
 if __name__ == "__main__":
     import json

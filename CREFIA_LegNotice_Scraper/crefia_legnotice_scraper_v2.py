@@ -227,46 +227,82 @@ def scrape_all(start_date=None, end_date=None):
 # ==================================================
 # Health Check
 # ==================================================
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
+from time import perf_counter
+import time
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.constants import URLStatus
+
+
 def crefia_legnotice_health_check() -> dict:
-    start_time = time.perf_counter()
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """
+    CREFIA 자율규제 제·개정 공고 Health Check
+    - HTTP 접근
+    - 목록 1건 확인
+    - 상세 페이지 접근
+    """
 
-    result = {
-        "org_name": ORG_NAME,
-        "target": "여신금융협회 > 정보센터 > 자율규제 제·개정 공고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": BASE_LIST_URL,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-            "detail_page": {
-                "url": None,
-                "status": "FAIL",
-                "message": "",
-                "elapsed": None,
-            },
-        },
-        "error": None,
-        "elapsed": None,
-    }
+    start_ts = perf_counter()
 
-    driver = create_driver(HEADLESS)
-    wait = WebDriverWait(driver, WAIT_TIMEOUT)
+    result = base_health_output(
+        auth_src="여신금융협회-자율규제",
+        scraper_id="CREFIA_LEGNOTICE",
+        target_url=BASE_LIST_URL,
+    )
+
+    driver = None
+    wait = None
 
     try:
-        # ----------------------
-        # 1. 목록 페이지 체크
-        # ----------------------
-        t0 = time.perf_counter()
+        # ==================================================
+        # 1️⃣ HTTP 접근 체크 (common_http)
+        # ==================================================
+        http_result = check_url_status(BASE_LIST_URL)
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status_code": http_result["http_code"],
+            "verify_ssl": True,
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                BASE_LIST_URL,
+            )
+
+        # ==================================================
+        # 2️⃣ Selenium 목록 체크
+        # ==================================================
+        driver = create_driver(HEADLESS)
+        wait = WebDriverWait(driver, WAIT_TIMEOUT)
 
         driver.get(BASE_LIST_URL)
 
         if not wait_for_list(driver, wait):
-            raise RuntimeError("목록 페이지 로딩 실패")
+            raise HealthCheckError(
+                HealthErrorType.TIMEOUT,
+                "목록 테이블 로딩 실패",
+                "div.list_table_wrap table tbody tr",
+            )
 
         rows = driver.find_elements(
             By.CSS_SELECTOR,
@@ -274,22 +310,24 @@ def crefia_legnotice_health_check() -> dict:
         )
 
         if not rows:
-            raise RuntimeError("목록 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "자율규제 공고 목록이 비어 있음",
+                "div.list_table_wrap table tbody tr",
+            )
 
         first_row = rows[0]
         title = first_row.find_element(By.CSS_SELECTOR, "td.align_L a").text.strip()
 
-        result["checks"]["list_page"].update({
-            "status": "OK",
-            "message": f"목록 1건 추출 성공 ({title})",
-            "elapsed": round(time.perf_counter() - t0, 3),
-        })
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(rows),
+            "title": title,
+        }
 
-        # ----------------------
-        # 2. 상세 페이지 체크
-        # ----------------------
-        t1 = time.perf_counter()
-
+        # ==================================================
+        # 3️⃣ 상세 페이지 체크
+        # ==================================================
         link = first_row.find_element(By.CSS_SELECTOR, "td.align_L a")
         driver.execute_script("arguments[0].click();", link)
         time.sleep(0.8)
@@ -299,26 +337,53 @@ def crefia_legnotice_health_check() -> dict:
         detail = parse_detail_html(detail_html, detail_url)
 
         if not detail.get("content"):
-            raise RuntimeError("상세 페이지 본문 추출 실패")
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문이 비어 있음",
+                "div.cont_area",
+            )
 
-        result["checks"]["detail_page"].update({
+        result["checks"]["detail"] = {
+            "ok": True,
             "url": detail_url,
-            "status": "OK",
-            "message": "상세 페이지 접근 및 본문 영역 확인",
-            "elapsed": round(time.perf_counter() - t1, 3),
-        })
+            "content_length": len(detail["content"]),
+        }
 
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
-        return result
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except Exception as e:
-        result["error"] = str(e)
-        return result
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e),
+            ),
+        )
 
     finally:
-        result["elapsed"] = round(time.perf_counter() - start_time, 3)
-        driver.quit()
+        result["elapsed_ms"] = int((perf_counter() - start_ts) * 1000)
 
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
+    
 # ==================================================
 # CLI
 # ==================================================

@@ -1,4 +1,7 @@
 # fsb_scraper_v2.py
+# 저축은행중앙회-소비자포탈>모범규준
+# 	참고 : [SBLAW포탈] 저축은행중앙회 SBLAW 표준규정·약관 연혁관리시스템
+
 
 """
 저축은행중앙회-소비자포탈>모범규준 스크래퍼
@@ -39,6 +42,7 @@ import time
 import os
 import re
 import json
+import argparse
 
 # .env 파일 로드 (python-dotenv가 없어도 직접 파싱)
 def load_env_file():
@@ -2828,133 +2832,163 @@ def save_fsb_results(records: List[Dict], crawler: Optional[FsbScraper] = None):
 # ==================================================
 # Health Check (표준 출력 양식)
 # ==================================================
+import time
+from selenium.webdriver.chrome.options import Options
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
 def fsb_health_check() -> dict:
     """
-    FSB(저축은행중앙회) Health Check
-    출력 포맷: BOK Health Check와 완전 동일
+    FSB(저축은행중앙회) 모범규준 Health Check
+    - BOK Health Check 출력 포맷과 완전 동일
     """
+    start_ts = time.perf_counter()
 
-    import time
-    from datetime import datetime
-    import json
-    from selenium.webdriver.chrome.options import Options
-
-    result = {
-        "org_name": "FSB",
-        "target": "저축은행중앙회 > 소비자포탈 > 모범규준",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "search_page": {
-                "url": "http://sblaw.fsb.or.kr/lmxsrv/law/lawListManager.do?LAWGROUP=3",
-                "success": False,
-                "message": ""
-            },
-            "list_page": {
-                "success": False,
-                "count": 0,
-                "title": ""
-            },
-            "detail_page": {
-                "url": "SBLAW 트리 > 상세 iframe",
-                "success": False,
-                "content_length": 0
-            }
-        },
-        "error": None
-    }
+    result = base_health_output(
+        auth_src="저축은행중앙회-모범규준",
+        scraper_id="FSB_LAW",
+        target_url="http://sblaw.fsb.or.kr/lmxsrv/law/lawListManager.do?LAWGROUP=3",
+    )
 
     driver = None
     scraper = None
 
     try:
-        # ===============================
-        # Scraper 인스턴스 생성
-        # ===============================
+        # ==================================================
+        # 1️⃣ Scraper 생성
+        # ==================================================
         scraper = FsbScraper(delay=1.0)
 
-        # ===============================
-        # Selenium Driver 생성
-        # ===============================
+        # ==================================================
+        # 2️⃣ Selenium Driver 생성
+        # ==================================================
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")
 
-        driver = scraper._create_webdriver(chrome_options)
+        try:
+            driver = scraper._create_webdriver(chrome_options)
+        except Exception as e:
+            raise HealthCheckError(
+                HealthErrorType.DRIVER_ERROR,
+                f"Selenium 드라이버 생성 실패: {e}",
+            )
 
-        # ===============================
-        # 로그인
-        # ===============================
+        # ==================================================
+        # 3️⃣ 로그인
+        # ==================================================
         if not scraper._login(driver):
-            raise RuntimeError("FSB 로그인 실패")
+            raise HealthCheckError(
+                HealthErrorType.AUTH_ERROR,
+                "FSB 로그인 실패",
+                "login()",
+            )
 
-        # ===============================
-        # 검색(목록) 페이지 접근
-        # ===============================
-        list_url = result["checks"]["search_page"]["url"]
+        # ==================================================
+        # 4️⃣ 목록(검색) 페이지 접근
+        # ==================================================
+        list_url = result["target_url"]
         driver.get(list_url)
         time.sleep(3)
 
-        result["checks"]["search_page"].update({
-            "success": True,
-            "message": "규정 목록 페이지 접근 성공"
-        })
+        result["checks"]["http"] = {
+            "ok": True,
+            "status_code": 200,
+            "verify_ssl": False,
+        }
 
-        # ===============================
-        # 트리 iframe에서 목록 1건 추출
-        # ===============================
+        # ==================================================
+        # 5️⃣ 트리 목록 1건 추출
+        # ==================================================
         tree_links = scraper.extract_tree_links(driver)
+
         if not tree_links:
-            raise RuntimeError("트리에서 규정 목록 추출 실패")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "FSB 규정 트리 목록이 비어 있음",
+                "extract_tree_links()",
+            )
 
         item = tree_links[0]
         title = item.get("title") or item.get("regulation_name", "")
 
-        result["checks"]["list_page"].update({
-            "success": True,
-            "count": 1,
-            "title": title
-        })
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(tree_links),
+            "title": title,
+        }
 
-        # ===============================
-        # 상세 페이지 접근
-        # ===============================
+        # ==================================================
+        # 6️⃣ 상세 페이지 접근
+        # ==================================================
         detail_soup = scraper.click_tree_link_and_extract(driver, item)
+
         if not detail_soup:
-            raise RuntimeError("상세 페이지 접근 실패")
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 접근 실패",
+                "click_tree_link_and_extract()",
+            )
 
-        content_length = len(detail_soup.get_text(strip=True))
+        content = detail_soup.get_text(strip=True)
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문이 비어 있음",
+                "detail iframe",
+            )
 
-        result["checks"]["detail_page"].update({
-            "success": True,
-            "content_length": content_length
-        })
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": "SBLAW 트리 > 상세 iframe",
+            "content_length": len(content),
+        }
 
-        # ===============================
-        # 최종 상태 판정
-        # ===============================
-        if (
-            result["checks"]["search_page"]["success"]
-            and result["checks"]["list_page"]["success"]
-            and result["checks"]["detail_page"]["success"]
-        ):
-            result["status"] = "OK"
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
+        result["status"] = "OK"
 
-        return result
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except Exception as e:
-        result["error"] = str(e)
-        return result
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e),
+            ),
+        )
 
     finally:
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_ts) * 1000
+        )
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
+    return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    crawler = FsbScraper()
+    results = crawler.crawl_sblaw_portal()
+    
+    print(f"\n총 {len(results)}개의 데이터를 수집했습니다.")
+    save_fsb_results(results, crawler=crawler)
 
 if __name__ == "__main__":
-    import argparse
-    
+   
     parser = argparse.ArgumentParser(description='저축은행중앙회 SBLAW 스크래퍼')
     parser.add_argument('--limit', type=int, default=0, help='가져올 개수 제한 (0=전체)')
     parser.add_argument('--no-download', action='store_true', help='파일 다운로드 및 내용 추출 건너뛰기')
@@ -2966,7 +3000,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--check",
         action="store_true",
-        help="CREFIA 자율규제 제·개정 공고 Health Check 실행"
+        help="저축은행중앙회-소비자포탈>모범규준 Health Check 실행"
     )  
 
     args = parser.parse_args()
