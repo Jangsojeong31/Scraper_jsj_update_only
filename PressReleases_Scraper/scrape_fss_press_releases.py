@@ -132,21 +132,136 @@ def extract_date_near_keyword(text, keyword, context_range=150):
     if not text or not keyword:
         return None
     
-    # 키워드 앞뒤 지정된 범위 내에서 날짜 찾기
-    pattern = re.compile(
-        rf'.{{0,{context_range}}}{re.escape(keyword)}.{{0,{context_range}}}',
-        re.IGNORECASE | re.DOTALL
-    )
-    matches = pattern.finditer(text)
-    
+    # 날짜 패턴 정의 (요일 정보 포함 형식 추가)
     date_patterns = [
         r'(\'?\d{2,4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)',
-        r'(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',
+        r'(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',  # 2025.12.23.(화) 형식 포함
         r'(\'?\d{2,4}-\d{1,2}-\d{1,2})',
         r'(\'?\d{2,4}/\d{1,2}/\d{1,2})',
         r'(\d{8})',  # 8자리 숫자
         r'(\d{10})',  # 10자리 숫자 (예: 25032011)
     ]
+    
+    # 표 형식 처리: 키워드와 같은 줄에서 날짜 찾기 (우선 처리)
+    # 표에서는 탭, 공백, 또는 구분자로 셀이 분리됨
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        if keyword in line:
+            # 같은 줄에서 "보도" 키워드 위치 찾기
+            keyword_pos = line.find(keyword)
+            if keyword_pos != -1:
+                # 키워드 이후 부분에서 날짜 찾기 (표 형식: 다음 셀에 날짜가 있을 수 있음)
+                after_keyword = line[keyword_pos + len(keyword):]
+                
+                # 탭, 공백, 또는 구분자로 분리된 다음 필드에서 날짜 찾기
+                # 예: "보도\t2025.12.23.(화) 석간" 또는 "보도 2025.12.23.(화)"
+                parts = re.split(r'[\t\s]+', after_keyword.strip())
+                for part in parts:
+                    if not part:
+                        continue
+                    # 각 부분에서 날짜 패턴 찾기
+                    for date_pattern in date_patterns:
+                        date_match = re.search(date_pattern, part)
+                        if date_match:
+                            date_str = date_match.group(1).strip()
+                            
+                            # 요일 정보 제거 (예: "2025.12.23.(화)" -> "2025.12.23")
+                            date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
+                            
+                            # 10자리 숫자 형식 처리 (예: 25032011 -> 2025-03-20)
+                            if len(date_str) == 10 and date_str.isdigit():
+                                year = int(date_str[:2])
+                                month = int(date_str[2:4])
+                                day = int(date_str[4:6])
+                                if year >= 50:
+                                    full_year = 1900 + year
+                                else:
+                                    full_year = 2000 + year
+                                date_str = f"{full_year}.{month}.{day}"
+                            
+                            # '25 같은 형식을 2025로 변환
+                            date_str = normalize_year_format(date_str)
+                            # 년도가 없으면 현재 년도 추가
+                            date_str = add_year_if_missing(date_str)
+                            return date_str
+                
+                # 키워드 이후 전체 텍스트에서 날짜 찾기 (더 넓은 범위)
+                for date_pattern in date_patterns:
+                    date_match = re.search(date_pattern, after_keyword)
+                    if date_match:
+                        date_str = date_match.group(1).strip()
+                        
+                        # 요일 정보 제거
+                        date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
+                        
+                        if len(date_str) == 10 and date_str.isdigit():
+                            year = int(date_str[:2])
+                            month = int(date_str[2:4])
+                            day = int(date_str[4:6])
+                            if year >= 50:
+                                full_year = 1900 + year
+                            else:
+                                full_year = 2000 + year
+                            date_str = f"{full_year}.{month}.{day}"
+                        
+                        date_str = normalize_year_format(date_str)
+                        date_str = add_year_if_missing(date_str)
+                        return date_str
+            
+            # 같은 줄 전체에서 날짜 찾기 (기존 로직)
+            for date_pattern in date_patterns:
+                date_match = re.search(date_pattern, line)
+                if date_match:
+                    date_str = date_match.group(1).strip()
+                    
+                    # 요일 정보 제거
+                    date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
+                    
+                    if len(date_str) == 10 and date_str.isdigit():
+                        year = int(date_str[:2])
+                        month = int(date_str[2:4])
+                        day = int(date_str[4:6])
+                        if year >= 50:
+                            full_year = 1900 + year
+                        else:
+                            full_year = 2000 + year
+                        date_str = f"{full_year}.{month}.{day}"
+                    
+                    date_str = normalize_year_format(date_str)
+                    date_str = add_year_if_missing(date_str)
+                    return date_str
+            
+            # 다음 줄에서 찾기
+            if i + 1 < len(lines):
+                next_line = lines[i + 1]
+                for date_pattern in date_patterns:
+                    date_match = re.search(date_pattern, next_line)
+                    if date_match:
+                        date_str = date_match.group(1).strip()
+                        
+                        # 요일 정보 제거
+                        date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
+                        
+                        if len(date_str) == 10 and date_str.isdigit():
+                            year = int(date_str[:2])
+                            month = int(date_str[2:4])
+                            day = int(date_str[4:6])
+                            if year >= 50:
+                                full_year = 1900 + year
+                            else:
+                                full_year = 2000 + year
+                            date_str = f"{full_year}.{month}.{day}"
+                        
+                        date_str = normalize_year_format(date_str)
+                        date_str = add_year_if_missing(date_str)
+                        return date_str
+    
+    # 키워드 앞뒤 지정된 범위 내에서 날짜 찾기 (기존 로직 유지)
+    pattern = re.compile(
+        rf'.{{0,{context_range}}}{re.escape(keyword)}.{{0,{context_range}}}',
+        re.IGNORECASE | re.DOTALL
+    )
+    matches = pattern.finditer(text)
     
     for match in matches:
         context = match.group(0)
@@ -155,6 +270,9 @@ def extract_date_near_keyword(text, keyword, context_range=150):
             date_match = re.search(date_pattern, context)
             if date_match:
                 date_str = date_match.group(1).strip()
+                
+                # 요일 정보 제거
+                date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
                 
                 # 10자리 숫자 형식 처리 (예: 25032011 -> 2025-03-20)
                 if len(date_str) == 10 and date_str.isdigit():
@@ -172,49 +290,6 @@ def extract_date_near_keyword(text, keyword, context_range=150):
                 # 년도가 없으면 현재 년도 추가
                 date_str = add_year_if_missing(date_str)
                 return date_str
-    
-    # 표 형식 처리: 키워드 다음 줄이나 같은 줄에 날짜가 있을 수 있음
-    # 예: "보 도\n2025.3.20" 또는 "보도일\t2025.3.20"
-    lines = text.split('\n')
-    for i, line in enumerate(lines):
-        if keyword in line:
-            # 같은 줄에서 찾기
-            for date_pattern in date_patterns:
-                date_match = re.search(date_pattern, line)
-                if date_match:
-                    date_str = date_match.group(1).strip()
-                    if len(date_str) == 10 and date_str.isdigit():
-                        year = int(date_str[:2])
-                        month = int(date_str[2:4])
-                        day = int(date_str[4:6])
-                        if year >= 50:
-                            full_year = 1900 + year
-                        else:
-                            full_year = 2000 + year
-                        date_str = f"{full_year}.{month}.{day}"
-                    date_str = normalize_year_format(date_str)
-                    date_str = add_year_if_missing(date_str)
-                    return date_str
-            
-            # 다음 줄에서 찾기
-            if i + 1 < len(lines):
-                next_line = lines[i + 1]
-                for date_pattern in date_patterns:
-                    date_match = re.search(date_pattern, next_line)
-                    if date_match:
-                        date_str = date_match.group(1).strip()
-                        if len(date_str) == 10 and date_str.isdigit():
-                            year = int(date_str[:2])
-                            month = int(date_str[2:4])
-                            day = int(date_str[4:6])
-                            if year >= 50:
-                                full_year = 1900 + year
-                            else:
-                                full_year = 2000 + year
-                            date_str = f"{full_year}.{month}.{day}"
-                        date_str = normalize_year_format(date_str)
-                        date_str = add_year_if_missing(date_str)
-                        return date_str
     
     return None
 
@@ -234,21 +309,30 @@ def extract_first_date(text):
     # 0단계: "보도시점은 배포시", "보도시점: 배포시", "보 도" 같은 복합 패턴 처리
     # 이 경우 "배포시" 다음에 오는 날짜를 찾아야 함
     complex_patterns = [
-        # "보 도" 패턴 (띄어쓰기 포함) - 문서 상단에 자주 나타나는 형식
-        r'보\s+도\s*[:：]?\s*(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2})',
+        # "보 도" 패턴 (띄어쓰기 포함) - 문서 상단에 자주 나타나는 형식 (표 형식 고려)
+        # 탭이나 공백으로 구분된 다음 셀에 날짜가 있는 경우
+        r'보\s+도\s*[\t\s]+(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',  # 요일 정보 포함
+        r'보\s+도\s*[:：]?\s*(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',
         r'보\s+도\s*[:：]?\s*(\'?\d{2,4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)',
         r'보\s+도\s*[:：]?\s*(\'?\d{2,4}-\d{1,2}-\d{1,2})',
         r'보\s+도\s*[:：]?\s*(\'?\d{2,4}/\d{1,2}/\d{1,2})',
         r'보\s+도\s*[:：]?\s*(\d{10})',  # 10자리 숫자 (예: 25032011)
+        # "보도" 패턴 (띄어쓰기 없음) - 표 형식에서도 사용
+        r'보도\s*[\t\s]+(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',  # 요일 정보 포함
+        r'보도\s*[:：]?\s*(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',
+        r'보도\s*[:：]?\s*(\'?\d{2,4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)',
+        r'보도\s*[:：]?\s*(\'?\d{2,4}-\d{1,2}-\d{1,2})',
+        r'보도\s*[:：]?\s*(\'?\d{2,4}/\d{1,2}/\d{1,2})',
+        r'보도\s*[:：]?\s*(\d{10})',  # 10자리 숫자
         # "보도시점은 배포시" 또는 "보도시점: 배포시" 패턴
-        r'보도\s*시점\s*[은는:：]\s*배포\s*시\s*[:：]?\s*(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2})',
+        r'보도\s*시점\s*[은는:：]\s*배포\s*시\s*[:：]?\s*(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',
         r'보도\s*시점\s*[은는:：]\s*배포\s*시\s*[:：]?\s*(\'?\d{2,4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)',
         r'보도\s*시점\s*[은는:：]\s*배포\s*시\s*[:：]?\s*(\'?\d{2,4}-\d{1,2}-\d{1,2})',
         r'보도\s*시점\s*[은는:：]\s*배포\s*시\s*[:：]?\s*(\'?\d{2,4}/\d{1,2}/\d{1,2})',
         r'보도\s*시점\s*[은는:：]\s*배포\s*시\s*[:：]?\s*(\d{10})',  # 10자리 숫자
         # "보도가 배포 시" 패턴
         r'보도\s*[가와]\s*배포\s*시\s*[:：]?\s*(\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)',
-        r'보도\s*[가와]\s*배포\s*시\s*[:：]?\s*(\d{4}\.\s*\d{1,2}\.\s*\d{1,2})',
+        r'보도\s*[가와]\s*배포\s*시\s*[:：]?\s*(\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',
         r'보도\s*[가와]\s*배포\s*시\s*[:：]?\s*(\d{4}-\d{1,2}-\d{1,2})',
         r'보도\s*[가와]\s*배포\s*시\s*[:：]?\s*(\d{4}/\d{1,2}/\d{1,2})',
         r'보도\s*[가와]\s*배포\s*시\s*[:：]?\s*(\d{10})',  # 10자리 숫자
@@ -257,6 +341,9 @@ def extract_first_date(text):
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             date_str = match.group(1).strip()
+            
+            # 요일 정보 제거 (예: "2025.12.23.(화)" -> "2025.12.23")
+            date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
             
             # 10자리 숫자 형식 처리 (예: 25032011 -> 2025-03-20)
             if len(date_str) == 10 and date_str.isdigit():
@@ -304,7 +391,7 @@ def extract_first_date(text):
     # 3단계: 키워드 주변에서 못 찾으면 전체 텍스트에서 찾기 (2자리 년도 포함)
     date_patterns = [
         r'(\'?\d{2,4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)',
-        r'(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',
+        r'(\'?\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\s*\(?[가-힣]*\)?)',  # 요일 정보 포함 형식
         r'(\'?\d{2,4}-\d{1,2}-\d{1,2})',
         r'(\'?\d{2,4}/\d{1,2}/\d{1,2})',
         r'(\d{8})',  # 8자리 숫자 (예: 20250320)
@@ -315,17 +402,25 @@ def extract_first_date(text):
         if match:
             date_str = match.group(1).strip()
             
+            # 요일 정보 제거 (예: "2025.12.23.(화)" -> "2025.12.23")
+            date_str = re.sub(r'\([가-힣]+\)', '', date_str).strip()
+            
             # 10자리 숫자 형식 처리 (예: 25032011 -> 2025-03-20)
+            # 단, 유효한 날짜인지 확인 (월: 01-12, 일: 01-31)
             if len(date_str) == 10 and date_str.isdigit():
                 year = int(date_str[:2])
                 month = int(date_str[2:4])
                 day = int(date_str[4:6])
-                # 시간 부분은 무시
-                if year >= 50:
-                    full_year = 1900 + year
+                # 유효한 날짜 범위인지 확인
+                if 1 <= month <= 12 and 1 <= day <= 31:
+                    if year >= 50:
+                        full_year = 1900 + year
+                    else:
+                        full_year = 2000 + year
+                    date_str = f"{full_year}.{month}.{day}"
                 else:
-                    full_year = 2000 + year
-                date_str = f"{full_year}.{month}.{day}"
+                    # 유효하지 않은 날짜 형식이면 다음 패턴 시도
+                    continue
             
             # '25 같은 형식을 2025로 변환
             date_str = normalize_year_format(date_str)
@@ -899,7 +994,15 @@ def load_existing_data(json_file="results.json"):
 # -----------------------------------------------------------
 # 보도자료 목록 스크래핑 (모든 페이지)
 # -----------------------------------------------------------
-def scrape_press_releases(base_url, total_pages=2010, resume=True):
+def scrape_press_releases(base_url, total_pages=2010, resume=True, force_cutoff_date=None):
+    """보도자료 스크래핑
+    
+    Args:
+        base_url: 기본 URL
+        total_pages: 총 페이지 수
+        resume: 기존 데이터 이어서 진행 여부
+        force_cutoff_date: 강제 기준일 (datetime 객체, None이면 기존 로직 사용)
+    """
     session = requests.Session()
     session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
 
@@ -907,7 +1010,13 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
     
     # 기준일 설정: 2025년 1월 1일
     default_cutoff_date = datetime(2025, 1, 1)
-    cutoff_date = default_cutoff_date
+    
+    # 강제 기준일이 있으면 사용, 없으면 기본값
+    if force_cutoff_date:
+        cutoff_date = force_cutoff_date
+        resume = False  # 강제 기준일 사용 시 기존 데이터 무시하고 처음부터
+    else:
+        cutoff_date = default_cutoff_date
     
     try:
         # 기존 데이터 로드 및 기준일 설정
@@ -916,7 +1025,8 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
         item_counter = 1
         start_page = 1
         
-        if resume:
+        if resume and not force_cutoff_date:
+            # 강제 기준일이 없을 때만 기존 데이터 로드
             existing_data = load_existing_data("results.json")
             if existing_data:
                 all_results = existing_data
@@ -950,7 +1060,10 @@ def scrape_press_releases(base_url, total_pages=2010, resume=True):
             else:
                 print(f"📅 최초 실행: {default_cutoff_date.strftime('%Y-%m-%d')} 이후 보도자료만 수집합니다.\n")
         else:
-            print(f"📅 최초 실행: {default_cutoff_date.strftime('%Y-%m-%d')} 이후 보도자료만 수집합니다.\n")
+            if force_cutoff_date:
+                print(f"📅 강제 기준일 설정: {force_cutoff_date.strftime('%Y-%m-%d')} 이후 보도자료를 처음부터 수집합니다.\n")
+            else:
+                print(f"📅 최초 실행: {default_cutoff_date.strftime('%Y-%m-%d')} 이후 보도자료만 수집합니다.\n")
         
         print("📢 보도자료 목록 처리 중...")
         print("=" * 70)
@@ -1169,6 +1282,111 @@ def save_results(results, csv_file="results.csv", excel_file="results.xlsx", jso
 
 
 # -----------------------------------------------------------
+# 기존 results.json을 기준일로 필터링하여 갱신
+# -----------------------------------------------------------
+def filter_results_by_date(cutoff_date_str="2023-01-01", json_file="results.json"):
+    """기존 results.json을 기준일 이후 데이터만 남기도록 필터링하여 갱신합니다
+    
+    Args:
+        cutoff_date_str: 기준일 문자열 (예: "2023-01-01")
+        json_file: 필터링할 JSON 파일 경로
+    """
+    import sys
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    
+    print("=" * 70)
+    print(f"📅 results.json 필터링 시작")
+    print(f"📅 기준일: {cutoff_date_str} 이후 데이터만 유지")
+    print("=" * 70)
+    
+    # 기존 데이터 로드
+    try:
+        with open(json_file, 'r', encoding='utf-8') as f:
+            existing_data = json.load(f)
+        print(f"📂 기존 데이터 로드: {len(existing_data)}건")
+    except FileNotFoundError:
+        print(f"❌ {json_file} 파일을 찾을 수 없습니다.")
+        return
+    except Exception as e:
+        print(f"❌ 데이터 로드 실패: {e}")
+        return
+    
+    # 기준일 파싱
+    cutoff_date = parse_date_string(cutoff_date_str)
+    if not cutoff_date:
+        # 날짜 문자열 파싱 시도
+        try:
+            cutoff_date = datetime.strptime(cutoff_date_str, "%Y-%m-%d")
+        except:
+            print(f"❌ 기준일 형식이 올바르지 않습니다: {cutoff_date_str}")
+            print(f"   예: 2023-01-01")
+            return
+    
+    # 필터링: 기준일 이후 데이터만 유지
+    filtered_data = []
+    removed_count = 0
+    no_date_count = 0
+    
+    for item in existing_data:
+        date_str = item.get('보도일')
+        
+        # 보도일이 없는 경우: 일단 포함 (나중에 필터링 가능)
+        if not date_str:
+            filtered_data.append(item)
+            no_date_count += 1
+            continue
+        
+        # 보도일 파싱
+        date_obj = parse_date_string(date_str)
+        
+        if not date_obj:
+            # 파싱 실패: 일단 포함
+            filtered_data.append(item)
+            no_date_count += 1
+            continue
+        
+        # 기준일 이후인지 확인
+        if date_obj >= cutoff_date:
+            filtered_data.append(item)
+        else:
+            removed_count += 1
+    
+    # 번호 재정렬
+    for idx, item in enumerate(filtered_data, start=1):
+        item['번호'] = idx
+    
+    # 필터링 결과 저장
+    print(f"\n📊 필터링 결과:")
+    print(f"  - 원본 데이터: {len(existing_data)}건")
+    print(f"  - 필터링 후: {len(filtered_data)}건")
+    print(f"  - 제거된 데이터: {removed_count}건")
+    print(f"  - 보도일 없음/파싱 실패: {no_date_count}건")
+    
+    # 백업 생성
+    import shutil
+    from datetime import datetime as dt
+    backup_file = f"results_backup_before_filter_{dt.now().strftime('%Y%m%d_%H%M%S')}.json"
+    try:
+        shutil.copy2(json_file, backup_file)
+        print(f"\n💾 백업 파일 생성: {backup_file}")
+    except Exception as e:
+        print(f"⚠️ 백업 파일 생성 실패: {e}")
+    
+    # 필터링된 데이터 저장
+    print(f"\n💾 필터링된 데이터 저장 중...")
+    save_results(filtered_data, 
+                csv_file="results.csv", 
+                excel_file="results.xlsx", 
+                json_file="results.json")
+    
+    print(f"\n✅ 필터링 완료!")
+    print(f"  - results.json, results.csv, results.xlsx가 갱신되었습니다.")
+    print(f"  - 다음 스크래퍼 실행 시 이 데이터를 기준으로 최신 보도자료만 수집합니다.")
+    print("=" * 70)
+
+
+# -----------------------------------------------------------
 # 문제가 있는 항목 리스트업 (보도일 없음 또는 보도시점과 1주 이상 차이)
 # -----------------------------------------------------------
 def list_problematic_items(results):
@@ -1219,17 +1437,52 @@ def list_problematic_items(results):
 # -----------------------------------------------------------
 def main():
     import sys
+    import argparse
+    
     # 출력 버퍼링 비활성화 (실시간 출력을 위해)
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     
+    # 명령줄 인자 파싱
+    parser = argparse.ArgumentParser(description='금융감독원 보도자료 스크래퍼')
+    parser.add_argument('--filter', type=str, metavar='YYYY-MM-DD',
+                       help='results.json을 기준일 이후 데이터만 남기도록 필터링 (예: --filter 2023-01-01)')
+    parser.add_argument('--no-scrape', action='store_true',
+                       help='필터링만 수행하고 스크래핑은 하지 않음')
+    parser.add_argument('--cutoff-date', type=str, metavar='YYYY-MM-DD',
+                       help='강제 기준일 설정 (기존 데이터 무시하고 처음부터 수집, 예: --cutoff-date 2023-01-01)')
+    
+    args = parser.parse_args()
+    
+    # 필터링 옵션이 있으면 필터링만 수행
+    if args.filter:
+        filter_results_by_date(cutoff_date_str=args.filter)
+        if args.no_scrape:
+            print("\n✅ 필터링만 완료했습니다. 스크래핑은 수행하지 않았습니다.")
+            return
+        print("\n" + "=" * 70)
+        print("📢 필터링 완료 후 스크래핑을 시작합니다...")
+        print("=" * 70 + "\n")
+    
+    # 강제 기준일 파싱
+    force_cutoff_date = None
+    if args.cutoff_date:
+        try:
+            force_cutoff_date = datetime.strptime(args.cutoff_date, "%Y-%m-%d")
+            print(f"📅 강제 기준일 설정: {force_cutoff_date.strftime('%Y-%m-%d')} 이후 데이터를 처음부터 수집합니다.")
+            print(f"⚠️ 기존 results.json은 무시하고 새로 수집합니다.\n")
+        except ValueError:
+            print(f"❌ 기준일 형식이 올바르지 않습니다: {args.cutoff_date}")
+            print(f"   예: --cutoff-date 2023-01-01")
+            return
+    
     base_url = "https://www.fss.or.kr/fss/bbs/B0000188/list.do?menuNo=200218&pageIndex=1"
     total_pages = 2010  # 총 페이지 수
-    print("금융감독원 보도자료 스크래핑 시작 (2025년 이후 데이터)")
+    print("금융감독원 보도자료 스크래핑 시작")
     print("=" * 70)
     sys.stdout.flush()
 
-    results, recent_results = scrape_press_releases(base_url, total_pages=total_pages, resume=True)
+    results, recent_results = scrape_press_releases(base_url, total_pages=total_pages, resume=True, force_cutoff_date=force_cutoff_date)
 
     print("=" * 70)
     print(f"총 {len(results)}개 보도자료 처리 완료")
