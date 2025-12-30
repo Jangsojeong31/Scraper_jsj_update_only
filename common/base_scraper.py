@@ -20,6 +20,8 @@ import ssl
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 from urllib3.util.ssl_ import create_urllib3_context
+from datetime import datetime
+from pathlib import Path
 
 # SSL 경고 비활성화
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -49,12 +51,14 @@ class SSLAdapter(HTTPAdapter):
 class BaseScraper:
     """모든 스크래퍼의 기본 클래스"""
     
-    def __init__(self, delay: float = 1.0, selenium_driver_path: Optional[str] = None):
+    def __init__(self, delay: float = 1.0, selenium_driver_path: Optional[str] = None, log_to_file: bool = True, log_dir: Optional[str] = None):
         """
         Args:
             delay: 요청 간 대기 시간 (초)
             selenium_driver_path: 수동으로 설치한 ChromeDriver 경로
                 (미지정 시 환경변수 → PATH 순으로 자동 탐지)
+            log_to_file: 로그를 파일로 저장할지 여부
+            log_dir: 로그 파일 저장 디렉토리 (None이면 output/logs 사용)
         """
         self.delay = delay
         self.selenium_driver_path = self._resolve_driver_path(selenium_driver_path)
@@ -71,6 +75,89 @@ class BaseScraper:
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
         })
+        
+        # 로그 파일 설정
+        self.log_to_file = log_to_file
+        self.log_file = None
+        self.original_print = None
+        if self.log_to_file:
+            self._init_log_file(log_dir)
+    
+    def _init_log_file(self, log_dir: Optional[str] = None):
+        """
+        로그 파일 초기화
+        
+        Args:
+            log_dir: 로그 파일 저장 디렉토리 (None이면 output/logs 사용)
+        """
+        try:
+            if log_dir is None:
+                log_dir = Path('output') / 'logs'
+            else:
+                log_dir = Path(log_dir)
+            
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 크롤러 클래스명 기반으로 로그 파일명 생성
+            crawler_name = self.__class__.__name__.lower().replace('scraper', '').replace('crawler', '')
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = log_dir / f"{crawler_name}_{timestamp}.log"
+            
+            self.log_file = open(log_filename, 'w', encoding='utf-8')
+            self.log_file.write(f"=== 로그 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            self.log_file.flush()
+            
+            print(f"로그 파일: {log_filename}")
+        except Exception as e:
+            print(f"⚠ 로그 파일 초기화 실패: {e}")
+            self.log_to_file = False
+            self.log_file = None
+    
+    def start_logging(self):
+        """
+        print 함수를 래핑하여 로그 파일에도 기록하도록 설정
+        """
+        if self.log_to_file and self.log_file:
+            import builtins
+            self.original_print = builtins.print
+            
+            def wrapped_print(*args, **kwargs):
+                # 터미널에 출력
+                self.original_print(*args, **kwargs)
+                # 파일에도 출력
+                try:
+                    message = ' '.join(str(arg) for arg in args)
+                    if kwargs.get('end', '\n') != '\n':
+                        message += kwargs.get('end', '')
+                    else:
+                        message += '\n'
+                    self.log_file.write(message)
+                    self.log_file.flush()
+                except Exception:
+                    pass
+            
+            builtins.print = wrapped_print
+    
+    def stop_logging(self):
+        """
+        print 함수 래핑 해제 및 로그 파일 닫기
+        """
+        if self.log_to_file and self.log_file:
+            import builtins
+            if self.original_print:
+                builtins.print = self.original_print
+            
+            try:
+                self.log_file.write(f"=== 로그 종료: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                log_file_path = self.log_file.name
+                self.log_file.close()
+                print(f"로그 파일 저장 완료: {log_file_path}")
+            except Exception as e:
+                print(f"로그 파일 닫기 중 오류: {e}")
+    
+    def __del__(self):
+        """소멸자: 로그 파일 닫기"""
+        self.stop_logging()
     
     def fetch_page(self, url: str, use_selenium: bool = False, driver: Optional[webdriver.Chrome] = None) -> Optional[BeautifulSoup]:
         """

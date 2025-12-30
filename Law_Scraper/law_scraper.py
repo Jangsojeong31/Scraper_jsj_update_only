@@ -335,10 +335,10 @@ class LawGoKrScraper(BaseScraper):
             import re
             import os
             
-            # #bdySaveBtn 버튼 찾기 및 클릭 (여러 방법 시도)
+            # #bdySaveBtn 버튼 찾기 및 클릭 (CSS Selector 우선, XPath 차순)
             save_btn = None
             
-            # 방법 1: CSS 셀렉터로 찾기
+            # 1순위: CSS 셀렉터로 찾기
             try:
                 save_btn = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "#bdySaveBtn"))
@@ -347,25 +347,16 @@ class LawGoKrScraper(BaseScraper):
             except:
                 pass
             
-            # 방법 2: XPath로 찾기
+            # CSS 셀렉터로 찾지 못한 경우에만 XPath 시도
+            # 2순위: XPath로 찾기
             if not save_btn:
                 try:
-                    save_btn = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[1]/div[2]/div[1]/div[3]/a[5]"))
-                    )
-                    print(f"  ✓ 버튼 발견 (XPath)")
-                except:
-                    pass
-            
-            # 방법 3: 다른 XPath 패턴 시도
-            if not save_btn:
-                try:
-                    # form[2]가 없을 수도 있으므로 다른 패턴 시도
                     xpath_patterns = [
                         "//a[@id='bdySaveBtn']",
                         "//a[contains(@class, 'btn_c') and @id='bdySaveBtn']",
                         "//a[@title='저장' and @id='bdySaveBtn']",
                         "//a[contains(@onclick, 'bdySavePrint')]",
+                        "/html/body/form[2]/div[1]/div[2]/div[1]/div[3]/a[5]"
                     ]
                     for xpath in xpath_patterns:
                         try:
@@ -483,15 +474,15 @@ class LawGoKrScraper(BaseScraper):
             
             for radio_info in radio_buttons:
                 radio_btn = None
-                # 방법 1: XPath로 찾기
+                # 1순위: CSS 셀렉터로 찾기
                 try:
-                    radio_btn = driver.find_element(By.XPATH, radio_info['xpath'])
-                    print(f"  ✓ {radio_info['name']} 라디오 버튼 발견 (XPath)")
+                    radio_btn = driver.find_element(By.CSS_SELECTOR, radio_info['selector'])
+                    print(f"  ✓ {radio_info['name']} 라디오 버튼 발견 (CSS 셀렉터)")
                 except:
-                    # 방법 2: CSS 셀렉터로 찾기
+                    # 2순위: XPath로 찾기
                     try:
-                        radio_btn = driver.find_element(By.CSS_SELECTOR, radio_info['selector'])
-                        print(f"  ✓ {radio_info['name']} 라디오 버튼 발견 (CSS 셀렉터)")
+                        radio_btn = driver.find_element(By.XPATH, radio_info['xpath'])
+                        print(f"  ✓ {radio_info['name']} 라디오 버튼 발견 (XPath)")
                     except:
                         pass
                 
@@ -547,10 +538,10 @@ class LawGoKrScraper(BaseScraper):
             if not radio_selected:
                 print(f"  ⚠ 라디오 버튼을 찾을 수 없습니다 (계속 진행)")
             
-            # #aBtnOutPutSave 버튼 찾기 (여러 방법 시도)
+            # #aBtnOutPutSave 버튼 찾기 (CSS Selector 우선, XPath 차순)
             download_btn = None
             
-            # 방법 1: CSS 셀렉터
+            # 1순위: CSS 셀렉터
             try:
                 download_btn = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "#aBtnOutPutSave"))
@@ -559,22 +550,13 @@ class LawGoKrScraper(BaseScraper):
             except:
                 pass
             
-            # 방법 2: XPath
-            if not download_btn:
-                try:
-                    download_btn = WebDriverWait(driver, 3).until(
-                        EC.presence_of_element_located((By.XPATH, "/html/body/div[45]/div[2]/div/div/form/fieldset/div[3]/div[2]/a[1]"))
-                    )
-                    print(f"  ✓ 저장 버튼 발견 (XPath)")
-                except:
-                    pass
-            
-            # 방법 3: 다른 XPath 패턴들
+            # 2순위: XPath
             if not download_btn:
                 xpath_patterns = [
                     "//a[@id='aBtnOutPutSave']",
                     "//a[contains(@onclick, 'beforeSavePrint')]",
                     "//a[@href='#AJAX' and @id='aBtnOutPutSave']",
+                    "/html/body/div[45]/div[2]/div/div/form/fieldset/div[3]/div[2]/a[1]"
                 ]
                 for xpath in xpath_patterns:
                     try:
@@ -836,22 +818,32 @@ class LawGoKrScraper(BaseScraper):
                 if is_closed:
                     # 부칙 버튼 클릭하여 열기
                     driver.execute_script("arguments[0].click();", ar_button)
+                    time.sleep(0.5)  # 클릭 후 애니메이션 대기
                     
-                    # 부칙 목록이 열릴 때까지 대기
+                    # 부칙 목록이 열릴 때까지 대기 (시간 증가)
                     if li_id:
                         try:
-                            WebDriverWait(driver, 2).until(
+                            WebDriverWait(driver, 5).until(
                                 lambda d: d.find_element(By.CSS_SELECTOR, f"#{li_id}SpanAr").value_of_css_property('display') != 'none'
                             )
                             print(f"    ✓ 부칙 목록이 열렸습니다")
+                            time.sleep(0.5)  # 목록 렌더링 대기
                         except:
                             print(f"    ⚠ 부칙 목록 열기 대기 시간 초과")
+                            # 재시도
+                            try:
+                                driver.execute_script("arguments[0].click();", ar_button)
+                                time.sleep(1.0)
+                                print(f"    → 부칙 버튼 재클릭 시도")
+                            except:
+                                pass
                     else:
-                        # 대체 대기 (최소화)
+                        # 대체 대기 (시간 증가)
                         try:
-                            WebDriverWait(driver, 2).until(
+                            WebDriverWait(driver, 3).until(
                                 EC.presence_of_element_located((By.CSS_SELECTOR, "[id^='liBgcolor'][id$='SpanAr'] ul li"))
                             )
+                            time.sleep(0.5)
                         except:
                             pass
                 else:
@@ -864,19 +856,22 @@ class LawGoKrScraper(BaseScraper):
                 traceback.print_exc()
                 return result
             
-            # 부칙 목록이 나타날 때까지 대기 (더 확실하게)
+            # 부칙 목록이 나타날 때까지 대기 (더 확실하게, 시간 증가)
             try:
                 if li_id:
-                    WebDriverWait(driver, 3).until(
+                    WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, f"#{li_id}SpanAr ul li"))
                     )
+                    # 목록이 실제로 보이는지 확인
+                    time.sleep(0.5)
                 else:
-                    WebDriverWait(driver, 3).until(
+                    WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "[id^='liBgcolor'][id$='SpanAr'] ul li"))
                     )
+                    time.sleep(0.5)
                 print(f"    ✓ 부칙 목록 로드 완료")
             except Exception as e:
-                print(f"    ⚠ 부칙 목록 로드 대기 시간 초과: {e}")
+                print(f"    ⚠ 부칙 목록 로드 대기 시간 초과")
                 # 계속 진행 (이미 열려있을 수 있음)
             
             # 부칙 목록에서 날짜 링크 추출
@@ -916,7 +911,22 @@ class LawGoKrScraper(BaseScraper):
                     try:
                         display_style = ar_list_area.value_of_css_property('display')
                         if display_style == 'none':
-                            print(f"    ⚠ 부칙 목록이 숨겨져 있습니다 (display: none)")
+                            print(f"    ⚠ 부칙 목록이 숨겨져 있습니다 (display: none), 재시도 중...")
+                            # 다시 버튼 클릭 시도
+                            if ar_button:
+                                try:
+                                    driver.execute_script("arguments[0].click();", ar_button)
+                                    time.sleep(1.0)
+                                    # 다시 확인
+                                    display_style = ar_list_area.value_of_css_property('display')
+                                    if display_style != 'none':
+                                        print(f"    ✓ 부칙 목록 재클릭 후 열림")
+                                    else:
+                                        print(f"    ⚠ 부칙 목록을 열 수 없습니다")
+                                        return result
+                                except:
+                                    print(f"    ⚠ 부칙 버튼 재클릭 실패")
+                                    return result
                     except:
                         pass
                     
@@ -1199,22 +1209,56 @@ class LawGoKrScraper(BaseScraper):
         
         content = ""
         
-        # 법령 본문 영역 찾기 (다양한 선택자 시도)
-        content_selectors = [
-            ('div', {'id': 'pDetail'}),
-            ('div', {'id': 'lawContent'}),
-            ('div', {'class': 'lawContent'}),
-            ('div', {'id': 'conts'}),
-            ('div', {'class': 'conts'}),
-            ('div', {'id': 'content'}),
-            ('div', {'class': 'content'}),
-        ]
+        # 1순위: CSS Selector로 #contentBody 찾기 (가장 정확한 본문 영역)
+        content_div = soup.select_one('#contentBody')
         
-        content_div = None
-        for tag, attrs in content_selectors:
-            content_div = soup.find(tag, attrs) or soup.select_one(f"{tag}[id*='content'], {tag}[class*='content']")
-            if content_div:
-                break
+        if content_div:
+            print(f"  ✓ 본문 영역 발견 (CSS: #contentBody)")
+        
+        # 2순위: XPath 경로로 찾기 (BeautifulSoup은 XPath를 직접 지원하지 않으므로 CSS Selector로 변환)
+        if not content_div:
+            # XPath: /html/body/form[2]/div[1]/div[2]/div[6]/div/div[1]/div
+            # BeautifulSoup 경로 탐색으로 구현
+            try:
+                forms = soup.find_all('form')
+                if len(forms) >= 2:
+                    form2 = forms[1]  # form[2] = 인덱스 1
+                    # div[1]/div[2]/div[6]/div/div[1]/div 경로 탐색
+                    divs = form2.find_all('div', recursive=False)
+                    if divs:
+                        div1 = divs[0]  # div[1]
+                        divs2 = div1.find_all('div', recursive=False)
+                        if len(divs2) >= 2:
+                            div2 = divs2[1]  # div[2]
+                            divs6 = div2.find_all('div', recursive=False)
+                            if len(divs6) >= 6:
+                                div6 = divs6[5]  # div[6] = 인덱스 5
+                                # div/div[1]/div 경로
+                                target = div6.select_one('div > div:nth-child(1) > div')
+                                if target:
+                                    content_div = target
+                                    print(f"  ✓ 본문 영역 발견 (XPath 경로 탐색)")
+            except Exception as e:
+                print(f"  ⚠ XPath 경로 탐색 실패: {e}")
+        
+        # 3순위: 기존 선택자들 시도 (하위 호환성)
+        if not content_div:
+            content_selectors = [
+                ('div', {'id': 'pDetail'}),
+                ('div', {'id': 'lawContent'}),
+                ('div', {'class': 'lawContent'}),
+                ('div', {'id': 'conts'}),
+                ('div', {'class': 'conts'}),
+                ('div', {'id': 'content'}),
+                ('div', {'class': 'content'}),
+            ]
+            
+            for tag, attrs in content_selectors:
+                content_div = soup.find(tag, attrs)
+                if content_div:
+                    selector_info = f"{tag}#{attrs.get('id', '')}" if 'id' in attrs else f"{tag}.{attrs.get('class', [''])[0] if isinstance(attrs.get('class'), list) else attrs.get('class', '')}"
+                    print(f"  ✓ 본문 영역 발견 (fallback: {selector_info})")
+                    break
         
         if content_div:
             # 법령 조문 내용 추출
@@ -1224,6 +1268,23 @@ class LawGoKrScraper(BaseScraper):
                 element.decompose()
             # 전체 텍스트 추출 (개행 유지)
             content = content_div.get_text(separator='\n', strip=True)
+            
+            # 검증: 검색 결과 페이지의 메뉴 텍스트가 포함되어 있는지 확인
+            invalid_indicators = [
+                '본문 바로가기',
+                '이 누리집은 대한민국 공식 전자정부',
+                '마우스 입력기',
+                '법령검색 방법 상세내용',
+                '정렬분류 선택',
+                '소관부처 선택'
+            ]
+            
+            # 여러 지표가 포함되어 있으면 잘못된 페이지로 판단
+            invalid_count = sum(1 for indicator in invalid_indicators if indicator in content)
+            if invalid_count >= 3:
+                print(f"  ⚠ 추출된 본문이 검색 결과 페이지로 보입니다 (지표 {invalid_count}개 발견)")
+                print(f"  → 본문 내용을 비웁니다")
+                content = ""
         
         # 내용이 없으면 본문 영역 전체에서 추출
         if not content:
@@ -1307,11 +1368,11 @@ class LawGoKrScraper(BaseScraper):
             original_window = driver.current_window_handle
             all_windows_before = set(driver.window_handles)
             
-            # #lsRvsDocInfo 버튼 찾기 및 클릭
+            # #lsRvsDocInfo 버튼 찾기 및 클릭 (CSS Selector 우선, XPath 차순)
             button_clicked = False
             button_element = None
             
-            # 방법 1: CSS 셀렉터로 찾기
+            # 1순위: CSS 셀렉터로 찾기
             try:
                 button_element = driver.find_element(By.CSS_SELECTOR, "#lsRvsDocInfo")
                 if button_element:
@@ -1320,21 +1381,12 @@ class LawGoKrScraper(BaseScraper):
             except:
                 pass
             
-            # 방법 2: XPath로 찾기
-            if not button_element:
-                try:
-                    button_element = driver.find_element(By.XPATH, "/html/body/form[2]/div[1]/div[2]/div[1]/div[1]/a[2]")
-                    if button_element:
-                        print(f"  → 버튼 발견 (XPath)")
-                        button_clicked = True
-                except:
-                    pass
-            
-            # 방법 3: 다른 XPath 패턴 시도
+            # 2순위: XPath로 찾기
             if not button_element:
                 xpath_patterns = [
                     "//a[@id='lsRvsDocInfo']",
                     "//a[contains(@id, 'lsRvsDocInfo')]",
+                    "/html/body/form[2]/div[1]/div[2]/div[1]/div[1]/a[2]"
                 ]
                 for xpath in xpath_patterns:
                     try:
@@ -1393,11 +1445,11 @@ class LawGoKrScraper(BaseScraper):
             except:
                 print(f"  ⚠ 새 창 로드 대기 시간 초과 (계속 진행)")
             
-            # 부제목에서 시행일과 공포일 추출 (#rvsConTop > div)
+            # 부제목에서 시행일과 공포일 추출 (CSS Selector 우선, XPath 차순)
             try:
                 subtitle_element = None
                 
-                # CSS 셀렉터로 찾기
+                # 1순위: CSS 셀렉터로 찾기
                 try:
                     subtitle_element = driver.find_element(By.CSS_SELECTOR, "#rvsConTop > div")
                     if subtitle_element:
@@ -1405,7 +1457,7 @@ class LawGoKrScraper(BaseScraper):
                 except:
                     pass
                 
-                # XPath로 찾기
+                # 2순위: XPath로 찾기
                 if not subtitle_element:
                     try:
                         subtitle_element = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[1]/div")
@@ -1440,12 +1492,11 @@ class LawGoKrScraper(BaseScraper):
             except Exception as e:
                 print(f"  ⚠ 부제목에서 날짜 추출 중 오류: {e}")
             
-            # 새 창의 내용 추출 (#rvsDonRsnArea 영역만 추출)
+            # 새 창의 내용 추출 (CSS Selector 우선, XPath 차순)
             try:
-                # 방법 1: Selenium으로 직접 요소 찾기 (우선)
+                # 1순위: CSS 셀렉터로 찾기
                 content_element = None
                 
-                # CSS 셀렉터로 찾기
                 try:
                     content_element = WebDriverWait(driver, 3).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsDonRsnArea"))
@@ -1454,28 +1505,19 @@ class LawGoKrScraper(BaseScraper):
                 except:
                     pass
                 
-                # XPath로 찾기
-                if not content_element:
-                    try:
-                        content_element = WebDriverWait(driver, 3).until(
-                            EC.presence_of_element_located((By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]"))
-                        )
-                        print(f"  ✓ 개정이유 영역 발견 (XPath)")
-                    except:
-                        pass
-                
-                # 다른 XPath 패턴 시도
+                # 2순위: XPath로 찾기
                 if not content_element:
                     xpath_patterns = [
                         "//div[@id='rvsDonRsnArea']",
                         "//div[contains(@id, 'rvsDonRsnArea')]",
                         "/html/body/form[2]//div[@id='rvsDonRsnArea']",
+                        "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/div[1]"
                     ]
                     for xpath in xpath_patterns:
                         try:
                             content_element = driver.find_element(By.XPATH, xpath)
                             if content_element:
-                                print(f"  ✓ 개정이유 영역 발견 (XPath: {xpath})")
+                                print(f"  ✓ 개정이유 영역 발견 (XPath: {xpath[:50]}...)")
                                 break
                         except:
                             continue
@@ -1494,7 +1536,7 @@ class LawGoKrScraper(BaseScraper):
                         print(f"  → #rvsDonRsnArea가 비어있어 버튼 클릭 시도 중...")
                         load_button = None
                         
-                        # 방법 1: CSS 셀렉터로 찾기
+                        # 1순위: CSS 셀렉터로 찾기
                         try:
                             load_button = driver.find_element(By.CSS_SELECTOR, "#rvsConBody > p:nth-child(4) > span > a")
                             if load_button:
@@ -1502,16 +1544,7 @@ class LawGoKrScraper(BaseScraper):
                         except:
                             pass
                         
-                        # 방법 2: XPath로 찾기
-                        if not load_button:
-                            try:
-                                load_button = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/p[2]/span/a")
-                                if load_button:
-                                    print(f"  ✓ 개정이유 로드 버튼 발견 (XPath)")
-                            except:
-                                pass
-                        
-                        # 방법 3: 다른 패턴 시도
+                        # CSS 대체 패턴
                         if not load_button:
                             try:
                                 # #rvsConBody 내의 a 태그 찾기
@@ -1520,7 +1553,16 @@ class LawGoKrScraper(BaseScraper):
                                     buttons = rvs_con_body.find_elements(By.CSS_SELECTOR, "p span a, p a")
                                     if buttons:
                                         load_button = buttons[0]
-                                        print(f"  ✓ 개정이유 로드 버튼 발견 (대체 방법)")
+                                        print(f"  ✓ 개정이유 로드 버튼 발견 (CSS 대체 방법)")
+                            except:
+                                pass
+                        
+                        # 2순위: XPath로 찾기
+                        if not load_button:
+                            try:
+                                load_button = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/p[2]/span/a")
+                                if load_button:
+                                    print(f"  ✓ 개정이유 로드 버튼 발견 (XPath)")
                             except:
                                 pass
                         
@@ -1610,7 +1652,7 @@ class LawGoKrScraper(BaseScraper):
                             print(f"  → BeautifulSoup으로 추출한 내용이 비어있어 버튼 클릭 시도 중...")
                             load_button = None
                             
-                            # 방법 1: CSS 셀렉터로 찾기
+                            # 1순위: CSS 셀렉터로 찾기
                             try:
                                 load_button = driver.find_element(By.CSS_SELECTOR, "#rvsConBody > p:nth-child(4) > span > a")
                                 if load_button:
@@ -1618,16 +1660,7 @@ class LawGoKrScraper(BaseScraper):
                             except:
                                 pass
                             
-                            # 방법 2: XPath로 찾기
-                            if not load_button:
-                                try:
-                                    load_button = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/p[2]/span/a")
-                                    if load_button:
-                                        print(f"  ✓ 개정이유 로드 버튼 발견 (XPath)")
-                                except:
-                                    pass
-                            
-                            # 방법 3: 다른 패턴 시도
+                            # CSS 대체 패턴
                             if not load_button:
                                 try:
                                     rvs_con_body = driver.find_element(By.CSS_SELECTOR, "#rvsConBody")
@@ -1635,7 +1668,16 @@ class LawGoKrScraper(BaseScraper):
                                         buttons = rvs_con_body.find_elements(By.CSS_SELECTOR, "p span a, p a")
                                         if buttons:
                                             load_button = buttons[0]
-                                            print(f"  ✓ 개정이유 로드 버튼 발견 (대체 방법)")
+                                            print(f"  ✓ 개정이유 로드 버튼 발견 (CSS 대체 방법)")
+                                except:
+                                    pass
+                            
+                            # 2순위: XPath로 찾기
+                            if not load_button:
+                                try:
+                                    load_button = driver.find_element(By.XPATH, "/html/body/form[2]/div[2]/div[2]/div[6]/div/div/div[2]/div/p[2]/span/a")
+                                    if load_button:
+                                        print(f"  ✓ 개정이유 로드 버튼 발견 (XPath)")
                                 except:
                                     pass
                             
@@ -1687,7 +1729,7 @@ class LawGoKrScraper(BaseScraper):
                     print("  → rvsConScroll 영역에서 개정이유 추출 시도 중...")
                     adm_reason_element = None
                     
-                    # CSS 셀렉터 우선
+                    # 1순위: CSS 셀렉터
                     try:
                         adm_reason_element = driver.find_element(By.CSS_SELECTOR, "#rvsConScroll > div")
                         if adm_reason_element:
@@ -1695,7 +1737,7 @@ class LawGoKrScraper(BaseScraper):
                     except:
                         pass
                     
-                    # XPath 대체
+                    # 2순위: XPath
                     if not adm_reason_element:
                         try:
                             adm_reason_element = driver.find_element(By.XPATH, "/html/body/div[3]/div[2]/div[2]/div/div[2]/div[2]/div")
@@ -1726,12 +1768,12 @@ class LawGoKrScraper(BaseScraper):
                     import traceback
                     traceback.print_exc()
             
-            # 개정내용 추출 시도
+            # 개정내용 추출 시도 (CSS Selector 우선, XPath 차순)
             try:
                 print("  → 개정내용 추출 시도 중...")
                 revision_content_element = None
                 
-                # 방법 1: CSS 셀렉터로 찾기 (#rvsConBody > div:nth-child(9))
+                # 1순위: CSS 셀렉터로 찾기
                 try:
                     revision_content_element = WebDriverWait(driver, 2).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "#rvsConBody > div:nth-child(9)"))
@@ -1741,7 +1783,7 @@ class LawGoKrScraper(BaseScraper):
                 except:
                     pass
                 
-                # 방법 2: XPath로 찾기
+                # 2순위: XPath로 찾기
                 if not revision_content_element:
                     try:
                         revision_content_element = WebDriverWait(driver, 2).until(
@@ -1886,9 +1928,21 @@ class LawGoKrScraper(BaseScraper):
                 return cleaned
             return text.strip()
         
-        # 방법 1: 행정규칙 페이지 (감독규정)의 경우 우선 처리
+        # 방법 1: 행정규칙 페이지 (감독규정)의 경우 우선 처리 (CSS Selector 우선, XPath 차순)
         if is_adm_rul:
-            # 방법 1-1: Selenium driver를 사용하여 XPath로 직접 추출
+            # 1순위: CSS 선택자로 추출 (#conScroll > div.subtit2)
+            try:
+                element = soup.select_one('#conScroll > div.subtit2')
+                if element:
+                    department_raw = element.get_text(strip=True)
+                    if department_raw:
+                        department = clean_department_text(department_raw)
+                        print(f"  ✓ 행정규칙 페이지 CSS 선택자로 소관부서 추출: {department_raw} -> {department}")
+                        return department
+            except Exception as e:
+                print(f"  ⚠ 행정규칙 페이지 CSS 선택자로 소관부서 추출 실패: {e}")
+            
+            # 2순위: Selenium driver를 사용하여 XPath로 직접 추출
             if driver:
                 try:
                     # 행정규칙 페이지 XPath: /html/body/form[1]/div[1]/div[2]/div[4]/div/div/div/div[2]/div[1]
@@ -1901,120 +1955,9 @@ class LawGoKrScraper(BaseScraper):
                         return department
                 except Exception as e:
                     print(f"  ⚠ 행정규칙 페이지 XPath로 소관부서 추출 실패: {e}")
-            
-            # 방법 1-2: CSS 선택자로 추출 (#conScroll > div.subtit2)
-            try:
-                element = soup.select_one('#conScroll > div.subtit2')
-                if element:
-                    department_raw = element.get_text(strip=True)
-                    if department_raw:
-                        department = clean_department_text(department_raw)
-                        print(f"  ✓ 행정규칙 페이지 CSS 선택자로 소관부서 추출: {department_raw} -> {department}")
-                        return department
-            except Exception as e:
-                print(f"  ⚠ 행정규칙 페이지 CSS 선택자로 소관부서 추출 실패: {e}")
-            
-            # 방법 1-3: BeautifulSoup로 form[1] 경로 따라가기
-            try:
-                forms = soup.find_all('form')
-                if len(forms) >= 1:
-                    form1 = forms[0]  # 인덱스 0 = 첫 번째 form
-                    # 경로를 따라가기: div[1]/div[2]/div[4]/div/div/div/div[2]/div[1]
-                    current = form1
-                    divs = current.find_all('div', recursive=False)
-                    if divs:
-                        current = divs[0]  # div[1]
-                        divs = current.find_all('div', recursive=False)
-                        if len(divs) >= 2:
-                            current = divs[1]  # div[2]
-                            divs = current.find_all('div', recursive=False)
-                            if len(divs) >= 4:
-                                current = divs[3]  # div[4] (인덱스 3)
-                                # div/div/div/div[2]/div[1]
-                                target = current.select_one('div > div > div > div:nth-child(2) > div:nth-child(1)')
-                                if target:
-                                    department_raw = target.get_text(strip=True)
-                                    if department_raw:
-                                        department = clean_department_text(department_raw)
-                                        print(f"  ✓ 행정규칙 페이지 BeautifulSoup로 소관부서 추출: {department_raw} -> {department}")
-                                        return department
-            except Exception as e:
-                print(f"  ⚠ 행정규칙 페이지 BeautifulSoup로 소관부서 추출 실패: {e}")
         
-        # 방법 2: 일반 법령 페이지 (form[2] 사용)
-        if driver:
-            try:
-                # XPath: /html/body/form[2]/div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]
-                xpath = "/html/body/form[2]/div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]"
-                element = driver.find_element(By.XPATH, xpath)
-                department_raw = element.text.strip()
-                if department_raw:
-                    department = clean_department_text(department_raw)
-                    print(f"  ✓ XPath로 소관부서 추출: {department_raw} -> {department}")
-                    return department
-            except Exception as e:
-                print(f"  ⚠ XPath로 소관부서 추출 실패: {e}")
-                # 다른 XPath 패턴 시도
-                try:
-                    # 대체 XPath 패턴들
-                    alt_xpaths = [
-                        "/html/body/form[2]//div[6]//div[2]//p//a//span[1]",
-                        "//form[2]//div[6]//div[2]//p//a//span[1]",
-                        "//p//a//span[1]",
-                    ]
-                    for alt_xpath in alt_xpaths:
-                        try:
-                            element = driver.find_element(By.XPATH, alt_xpath)
-                            department_raw = element.text.strip()
-                            if department_raw:
-                                department = clean_department_text(department_raw)
-                                if department and len(department) < 50:  # 너무 긴 텍스트는 제외
-                                    print(f"  ✓ 대체 XPath로 소관부서 추출: {department_raw} -> {department}")
-                                    return department
-                        except:
-                            continue
-                except:
-                    pass
-        
-        # 방법 2: BeautifulSoup로 경로를 따라가서 추출
-        try:
-            # form[2] 찾기
-            forms = soup.find_all('form')
-            if len(forms) >= 2:
-                form2 = forms[1]  # 인덱스 1 = 두 번째 form
-                
-                # 경로를 따라가기: div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]
-                current = form2
-                
-                # div[1]
-                divs = current.find_all('div', recursive=False)
-                if divs:
-                    current = divs[0]
-                    # div[2]
-                    divs = current.find_all('div', recursive=False)
-                    if len(divs) >= 2:
-                        current = divs[1]
-                        # div[6]
-                        divs = current.find_all('div', recursive=False)
-                        if len(divs) >= 6:
-                            current = divs[5]  # 인덱스 5 = 6번째 div
-                            # div/div[1]/div/div/div[2]/div[1]/p/a/span[1]
-                            # 더 깊이 들어가기
-                            p_tag = current.select_one('div > div:nth-child(1) > div > div > div:nth-child(2) > div:nth-child(1) > p')
-                            if p_tag:
-                                a_tag = p_tag.find('a')
-                                if a_tag:
-                                    span_tag = a_tag.find('span')
-                                    if span_tag:
-                                        department_raw = span_tag.get_text(strip=True)
-                                        if department_raw:
-                                            department = clean_department_text(department_raw)
-                                            print(f"  ✓ BeautifulSoup로 소관부서 추출: {department_raw} -> {department}")
-                                            return department
-        except Exception as e:
-            print(f"  ⚠ BeautifulSoup로 소관부서 추출 실패: {e}")
-        
-        # 방법 3: CSS 선택자로 일반적인 패턴 찾기
+        # 방법 2: 일반 법령 페이지 (CSS Selector 우선, XPath 차순)
+        # 2-1: CSS 선택자로 일반적인 패턴 찾기
         try:
             # p > a > span[1] 패턴으로 찾기
             spans = soup.select('p > a > span:first-child')
@@ -2028,6 +1971,30 @@ class LawGoKrScraper(BaseScraper):
                         return department
         except Exception as e:
             print(f"  ⚠ CSS 선택자로 소관부서 추출 실패: {e}")
+        
+        # 2-2: Selenium driver로 XPath 시도
+        if driver:
+            try:
+                # XPath 패턴들
+                xpath_patterns = [
+                    "/html/body/form[2]/div[1]/div[2]/div[6]/div/div[1]/div/div/div[2]/div[1]/p/a/span[1]",
+                    "/html/body/form[2]//div[6]//div[2]//p//a//span[1]",
+                    "//form[2]//div[6]//div[2]//p//a//span[1]",
+                    "//p//a//span[1]",
+                ]
+                for xpath in xpath_patterns:
+                    try:
+                        element = driver.find_element(By.XPATH, xpath)
+                        department_raw = element.text.strip()
+                        if department_raw:
+                            department = clean_department_text(department_raw)
+                            if department and len(department) < 50:  # 너무 긴 텍스트는 제외
+                                print(f"  ✓ XPath로 소관부서 추출: {department_raw} -> {department}")
+                                return department
+                    except:
+                        continue
+            except Exception as e:
+                print(f"  ⚠ XPath로 소관부서 추출 실패: {e}")
         
         return department
     
@@ -2704,12 +2671,30 @@ def main():
                                     # JavaScript로 클릭 시도
                                     print(f"  → 법령 링크 클릭 중...")
                                     driver.execute_script("arguments[0].scrollIntoView(true);", target_anchor)
+                                    time.sleep(0.5)  # 스크롤 안정화
                                     driver.execute_script("arguments[0].click();", target_anchor)
                                     
-                                    # 상세 페이지 로드 대기
-                                    WebDriverWait(driver, 5).until(
-                                        EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view"))
-                                    )
+                                    # 상세 페이지 로드 대기 (더 구체적이고 긴 대기)
+                                    print(f"  → 상세 페이지 로딩 대기 중...")
+                                    try:
+                                        # 1. 먼저 #contentBody가 나타날 때까지 대기 (최대 10초)
+                                        WebDriverWait(driver, 10).until(
+                                            EC.presence_of_element_located((By.CSS_SELECTOR, "#contentBody"))
+                                        )
+                                        print(f"  ✓ #contentBody 로드 완료")
+                                    except:
+                                        # fallback: 다른 본문 영역 대기
+                                        try:
+                                            WebDriverWait(driver, 5).until(
+                                                EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts"))
+                                            )
+                                            print(f"  ✓ 본문 영역 로드 완료 (fallback)")
+                                        except:
+                                            print(f"  ⚠ 본문 영역 대기 시간 초과")
+                                    
+                                    # 추가 안정화 대기
+                                    time.sleep(1.5)
+                                    
                                     detail_soup = BeautifulSoup(driver.page_source, 'lxml')
                                     print(f"  ✓ 상세 페이지 로드 완료")
                                 else:
@@ -2720,7 +2705,24 @@ def main():
                                 traceback.print_exc()
                         else:
                             # 일반 링크인 경우 직접 접근
-                            detail_soup = crawler.fetch_page(law_link, use_selenium=True, driver=driver)
+                            driver.get(law_link)
+                            # 상세 페이지 로드 대기
+                            print(f"  → 상세 페이지 로딩 대기 중...")
+                            try:
+                                WebDriverWait(driver, 10).until(
+                                    EC.presence_of_element_located((By.CSS_SELECTOR, "#contentBody"))
+                                )
+                                print(f"  ✓ #contentBody 로드 완료")
+                            except:
+                                try:
+                                    WebDriverWait(driver, 5).until(
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts"))
+                                    )
+                                    print(f"  ✓ 본문 영역 로드 완료 (fallback)")
+                                except:
+                                    print(f"  ⚠ 본문 영역 대기 시간 초과")
+                            time.sleep(1.5)
+                            detail_soup = BeautifulSoup(driver.page_source, 'lxml')
                         
                         if detail_soup:
                             # 디버깅: 첫 번째 상세 페이지만 HTML 저장
@@ -2982,19 +2984,50 @@ def main():
                 law_link = item.get('link', '')
                 if law_link:
                     print(f"[{idx}/{len(all_results)}] {item.get('law_name', 'N/A')[:50]}... 스크래핑 중")
-                    detail_soup = crawler.fetch_page(law_link, use_selenium=True, driver=driver)
+                    
+                    # 상세 페이지로 이동
+                    driver.get(law_link)
+                    print(f"  → 상세 페이지 로딩 대기 중...")
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "#contentBody"))
+                        )
+                        print(f"  ✓ #contentBody 로드 완료")
+                    except:
+                        try:
+                            WebDriverWait(driver, 5).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts"))
+                            )
+                            print(f"  ✓ 본문 영역 로드 완료 (fallback)")
+                        except:
+                            print(f"  ⚠ 본문 영역 대기 시간 초과")
+                    time.sleep(1.5)
+                    detail_soup = BeautifulSoup(driver.page_source, 'lxml')
+                    
                     # 링크가 검색 URL로 보이는 등 상세로 이동하지 못한 경우, 목록 첫 행을 클릭하여 이동 시도
                     if detail_soup and first_page_url and ('lsSc.do' in law_link or not crawler.extract_law_detail(detail_soup)):
                         try:
+                            print(f"  → 검색 결과 페이지로 판단, 다시 시도 중...")
                             # 목록 페이지로 이동 후 첫 번째 결과 클릭
                             driver.get(first_page_url)
                             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")))
                             first_anchor = driver.find_element(By.CSS_SELECTOR, "#viewHeightDiv table tbody tr td.tl a")
                             driver.execute_script("arguments[0].click();", first_anchor)
-                            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent, #conts, .conts, #content, .content, .law_view")))
+                            time.sleep(1.0)
+                            # 상세 페이지 대기
+                            try:
+                                WebDriverWait(driver, 10).until(
+                                    EC.presence_of_element_located((By.CSS_SELECTOR, "#contentBody"))
+                                )
+                            except:
+                                WebDriverWait(driver, 5).until(
+                                    EC.presence_of_element_located((By.CSS_SELECTOR, "#pDetail, #lawContent, .lawContent"))
+                                )
+                            time.sleep(1.5)
                             detail_soup = BeautifulSoup(driver.page_source, 'lxml')
-                        except Exception as _:
-                            pass
+                            print(f"  ✓ 재시도 후 상세 페이지 로드 완료")
+                        except Exception as e:
+                            print(f"  ⚠ 재시도 실패: {e}")
                 if detail_soup:
                     law_content = crawler.extract_law_detail(detail_soup)
                     item['law_content'] = law_content
