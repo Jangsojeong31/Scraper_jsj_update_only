@@ -17,7 +17,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
+#from webdriver_manager.chrome import ChromeDriverManager
 
 # ==================================================
 # 프로젝트 루트 등록
@@ -30,6 +30,7 @@ if PROJECT_ROOT not in sys.path:
 from common.common_logger import get_logger
 from common.common_http import check_url_status
 from common.constants import URLStatus, LegalDocProvided
+from common.base_scraper import BaseScraper
 
 ORG_NAME = LegalDocProvided.FSC
 logger = get_logger("fsc_legnotice")
@@ -50,6 +51,13 @@ JSON_OUTPUT_TEMPLATE = os.path.join(OUTPUT_JSON_DIR, "fsc_legnotice_{timestamp}.
 # Chrome Driver 생성
 # ==================================================
 def create_driver():
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()
     chrome_options = Options()
     if HEADLESS:
         chrome_options.add_argument("--headless=new")
@@ -59,7 +67,8 @@ def create_driver():
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    return scraper._create_webdriver(chrome_options)
 
 # ==================================================
 # 상세 페이지 추출
@@ -196,86 +205,128 @@ def scrape_all(start_date=None, end_date=None):
 # -------------------------------------------------
 # Health Check 모드
 # -------------------------------------------------
-# ==================================================
-# Health Check (FSC 입법예고)
-# ==================================================
-def fsc_legnotice_health_check() -> dict:
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from typing import Dict
+import time
+from datetime import datetime
 
-    result = {
-        "org_name": ORG_NAME,
-        "target": "금융위원회 > 입법예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "search_page": {
-                "url": BASE_URL,
-                "success": False,
-                "message": ""
-            },
-            "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
-            },
-            "detail_page": {
-                "url": None,
-                "success": False,
-                "content_length": 0
-            }
-        },
-        "error": None
-    }
+from common.common_http import check_url_status
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
+
+def fsc_legnotice_health_check() -> Dict:
+    start_ts = time.perf_counter()
+
+    result = base_health_output(
+        auth_src="금융위원회-입법예고",
+        scraper_id="FSC_LEGNOTICE",
+        target_url=BASE_URL,
+    )
 
     driver = create_driver()
 
     try:
-        logger.info("[HEALTH] FSC 입법예고 Health Check 시작")
+        # ==================================================
+        # 1️⃣ HTTP 접근 체크
+        # ==================================================
+        http_result = check_url_status(BASE_URL)
+        url_status = http_result["status"]
 
-        # 1️⃣ 검색(목록) 페이지 접근
-        if check_url_status(BASE_URL)["status"] != URLStatus.OK:
-            result["checks"]["search_page"]["message"] = "검색 페이지 접근 실패"
-            return result
+        result["checks"]["http"] = {
+            "ok": url_status == URLStatus.OK,
+            "status_code": http_result.get("status_code"),
+            "verify_ssl": http_result.get("verify_ssl", True),
+        }
 
+        if url_status != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(url_status),
+                "입법예고 목록 페이지 접근 실패",
+                BASE_URL,
+            )
+
+        # ==================================================
+        # 2️⃣ 목록 페이지 체크
+        # ==================================================
         driver.get(BASE_URL)
+        items = extract_list(driver)
 
-        list_items = extract_list(driver)
-        if not list_items:
-            result["checks"]["search_page"]["message"] = "검색 페이지 로딩 실패 또는 목록 없음"
-            return result
+        if not items:
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "입법예고 목록 데이터 없음",
+                "div.board-wrap li",
+            )
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "검색 페이지 접근 성공"
+        first_item = items[0]
+        detail_url = first_item.get("detail_url")
 
-        # 2️⃣ 목록 1건 추출
-        first_item = list_items[0]
-        result["checks"]["list_page"]["success"] = True
-        result["checks"]["list_page"]["count"] = 1
-        result["checks"]["list_page"]["title"] = first_item["title"]
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(items),
+        }
 
-        # 3️⃣ 상세 페이지 접근
-        detail_url = first_item["detail_url"]
-        result["checks"]["detail_page"]["url"] = detail_url
+        if not detail_url:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락",
+                "a[href]",
+            )
 
-        detail_text = extract_detail(driver, detail_url)
-        if not detail_text:
-            result["error"] = "상세 페이지 본문 추출 실패"
-            return result
+        # ==================================================
+        # 3️⃣ 상세 페이지 체크
+        # ==================================================
+        content = extract_detail(driver, detail_url)
 
-        result["checks"]["detail_page"]["success"] = True
-        result["checks"]["detail_page"]["content_length"] = len(detail_text)
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 비어 있음",
+                "div.board-view-wrap div.cont",
+            )
 
+        result["checks"]["detail"] = {
+            "ok": True,
+            "url": detail_url,
+            "content_length": len(content),
+        }
+
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
-        return result
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except Exception as e:
-        result["error"] = str(e)
-        return result
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e),
+            ),
+        )
 
     finally:
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_ts) * 1000
+        )
         driver.quit()
-        logger.info("[HEALTH] 드라이버 종료")
 
+    return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
+    
 # ==================================================
 # CLI
 # ==================================================

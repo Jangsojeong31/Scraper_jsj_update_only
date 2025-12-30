@@ -791,135 +791,167 @@ def save_finlaw_results(records: List[Dict]):
             writer.writerow(csv_item)
     print(f"CSV 저장 완료: {csv_path}")
 
-def kfb_finlaw_health_check() -> Dict:
-    start_time = time.time()
+# =================================================
+# Health Check Function (추가)
+# =================================================
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
 
-    result: Dict = {
-        "org_name": "KFB",
-        "target": "은행연합회 > 공시·자료실 > 법규·규제 > 자율규제",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "elapsed": None,
-        "checks": {},
-        "error": None,
-    }
+def kfb_finlaw_health_check() -> Dict:
 
     scraper = KfbFinlawScraper()
     driver = None
 
+    result = base_health_output(
+        auth_src="은행연합회 > 공시·자료실 > 법규·규제 > 금융관련법규",
+        scraper_id="KFB_FINLAW",
+        target_url=scraper.LIST_URL,
+    )   
+
     try:
-        # ==================================================
-        # 1. Selenium 드라이버 생성
-        # ==================================================
-        t0 = time.time()
+        # 1. Selenium
         try:
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--lang=ko-KR")
-
-            driver = scraper._create_webdriver(chrome_options)
-
-            result["checks"]["selenium"] = {
-                "success": True,
-                "elapsed": round(time.time() - t0, 3),
-                "message": "Selenium 드라이버 생성 성공",
-            }
+            driver = scraper._create_webdriver(Options())
         except Exception as exc:
-            driver = None
-            result["checks"]["selenium"] = {
-                "success": False,
-                "elapsed": round(time.time() - t0, 3),
-                "message": f"Selenium 생성 실패: {exc}",
-            }
+            raise HealthCheckError(
+                HealthErrorType.DRIVER_ERROR,
+                "Selenium 드라이버 생성 실패",
+                str(exc),
+            )
 
-        # ==================================================
-        # 2. 검색 페이지 접근
-        # ==================================================
+        # ======================================================
+        # 0️⃣ HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(scraper.LIST_URL,
+                                       use_selenium=True,      # 핵심
+                                       allow_fallback=False,
+                                       )
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                scraper.LIST_URL,
+            )
+        
+        # 2. 목록 페이지 접근
         t0 = time.time()
-        soup = (
-            BeautifulSoup(driver.page_source, "lxml")
-            if driver and scraper._open_with_driver(driver, scraper.LIST_URL)
-            else scraper.fetch_page(scraper.LIST_URL)
-        )
+        if not scraper._open_with_driver(driver, scraper.LIST_URL):
+            raise HealthCheckError(
+                HealthErrorType.HTTP_ERROR,
+                "목록 페이지 접근 실패",
+                scraper.LIST_URL,
+            )
 
-        if not soup:
-            raise RuntimeError("검색 페이지 접근 실패")
-
-        result["checks"]["search_page"] = {
+        result["checks"]["search"] = {
             "success": True,
             "url": scraper.LIST_URL,
             "elapsed": round(time.time() - t0, 3),
         }
 
-        # ==================================================
-        # 3. 목록 1건 추출
-        # ==================================================
-        t0 = time.time()
+        soup = BeautifulSoup(driver.page_source, "lxml")
+
+        # 3. 목록 1건
         items = scraper.extract_table_data(soup)
         if not items:
-            raise RuntimeError("목록 추출 실패")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 없음",
+                "table",
+            )
 
         first = items[0]
-        result["checks"]["list_page"] = {
+
+        result["checks"]["list"] = {
             "success": True,
             "count": 1,
             "title": first.get("title", ""),
             "elapsed": round(time.time() - t0, 3),
         }
 
-        # ==================================================
-        # 4. 상세 페이지 접근
-        # ==================================================
-        detail_link = first.get("detail_link", "")
+        # 4. 상세 링크
+        detail_link = first.get("detail_link")
         if not detail_link:
-            raise RuntimeError("상세 링크 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 링크 누락",
+                first.get("title", ""),
+            )
 
-        t0 = time.time()
-        detail_soup = None
-        detail_error = None
-
-        if driver:
-            try:
-                detail_soup = scraper.fetch_detail_with_driver(driver, first, detail_link)
-            except Exception as exc:
-                detail_error = str(exc)
-
+        # 5. 상세 페이지
+        detail_soup = scraper.fetch_detail_with_driver(driver, first, detail_link)
         if not detail_soup:
-            if detail_link.lower().startswith("javascript"):
-                result["checks"]["detail_page"] = {
-                    "success": False,
-                    "url": detail_link,
-                    "elapsed": round(time.time() - t0, 3),
-                    "message": f"JavaScript 링크 처리 실패: {detail_error}",
-                }
-            else:
-                detail_soup = scraper.fetch_page(detail_link)
+            raise HealthCheckError(
+                HealthErrorType.HTTP_ERROR,
+                "상세 페이지 접근 실패",
+                detail_link,
+            )
 
-        if not detail_soup:
-            raise RuntimeError("상세 페이지 접근 실패")
-
-        result["checks"]["detail_page"] = {
+        result["checks"]["detail"] = {
             "success": True,
             "url": detail_link,
             "content_length": len(detail_soup.get_text(strip=True)),
             "elapsed": round(time.time() - t0, 3),
         }
 
+        # 6. 본문
+        detail_info = scraper.extract_detail_info(detail_soup)
+        if not detail_info.get("content"):
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "본문 내용 비어 있음",
+                detail_link,
+            )
+
+        result["checks"]["detail"] = {
+            "success": True,
+            "url": detail_link,
+            "content_length": len(detail_soup.get_text(strip=True)),
+            "elapsed": round(time.time() - t0, 3),
+        }
+
+        # ==================================================
+        # FINISH
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
 
+    except HealthCheckError as exc:
+        apply_health_error(result, exc)
+
     except Exception as exc:
-        result["status"] = "FAIL"
-        result["error"] = str(exc)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(exc),
+            ),
+        )
 
     finally:
         if driver:
             driver.quit()
-        result["elapsed"] = round(time.time() - start_time, 3)
 
     return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scraper = KfbFinlawScraper()
+    results = scraper.crawl_finlaw()
+    print(f"\n추출된 데이터: {len(results)}개")
+    save_finlaw_results(results)
 
 if __name__ == "__main__":
     import argparse

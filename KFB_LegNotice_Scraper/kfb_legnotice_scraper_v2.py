@@ -6,14 +6,6 @@ import sys
 import json
 import time
 import re
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import NoSuchElementException
 
 # ==================================================
 # 프로젝트 루트 등록
@@ -22,6 +14,17 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import NoSuchElementException
+#from webdriver_manager.chrome import ChromeDriverManager
+from common.base_scraper import BaseScraper
+
 
 from common.common_logger import get_logger
 
@@ -41,13 +44,20 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # WebDriver 생성
 # ==================================================
 def create_driver():
+    """
+    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
+    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
+    - 없으면 PATH에서 chromedriver 탐지
+    - SeleniumManager 우회 (인터넷 연결 불필요)
+    """    
+    scraper = BaseScraper()    
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--window-size=1920x1080")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
+#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return scraper._create_webdriver(options)
 # ==================================================
 # 의견청취기간 날짜 정제
 # ==================================================
@@ -210,98 +220,137 @@ def scrape_all(start_date=None, end_date=None):
 # ==================================================
 # Health Check (KFB 자율규제 제정·개정예고)
 # ==================================================
-def kfb_legnotice_health_check() -> dict:
-    check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from common.common_http import check_url_status
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.constants import URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
 
-    result = {
-        "org_name": ORG_NAME,
-        "target": "은행연합회 > 법규·규제 > 규제운영 > 자율규제 제정·개정예고",
-        "check_time": check_time,
-        "status": "FAIL",
-        "checks": {
-            "search_page": {
-                "url": LIST_URL,
-                "success": False,
-                "message": ""
-            },
-            "list_page": {
-                "success": False,
-                "count": 0,
-                "title": None
-            },
-            "detail_page": {
-                "url": None,
-                "success": False,
-                "content_length": 0
-            }
-        },
-        "error": None
-    }
+def kfb_legnotice_health_check() -> dict:
+    start_time = time.perf_counter()
+
+    result = base_health_output(
+        auth_src="은행연합회 > 법규·규제 > 규제운영 > 자율규제 제정·개정예고",
+        scraper_id="KFB_LEGNOTICE",
+        target_url=LIST_URL,
+    )   
 
     driver = create_driver()
 
     try:
-        logger.info("[HEALTH] KFB 자율규제 제정·개정예고 Health Check 시작")
 
-        # 1️⃣ 목록 페이지 접근
+        # ======================================================
+        # 0️⃣ HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(LIST_URL,
+                                       use_selenium=True,      # 핵심
+                                       allow_fallback=False,
+                                       )
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+                
+        # 1️⃣ 목록 페이지
         driver.get(LIST_URL)
         time.sleep(2)
 
+        t0 = time.time()
         rows = parse_list_rows(driver)
         if not rows:
-            result["checks"]["search_page"]["message"] = "목록 페이지 접근 실패 또는 공고 없음"
-            return result
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "목록 데이터 없음",
+                target="table.panListArea tr"
+            )
 
-        result["checks"]["search_page"]["success"] = True
-        result["checks"]["search_page"]["message"] = "목록 페이지 접근 성공"
-
-        # 2️⃣ 목록 1건 추출
-        first_row = rows[0]
-        cols = first_row.find_all("td")
+        cols = rows[0].find_all("td")
         if len(cols) < 4:
-            result["error"] = "목록 컬럼 파싱 실패"
-            return result
+            raise HealthCheckError(
+                HealthErrorType.PARSE_ERROR,
+                "목록 컬럼 파싱 실패",
+                target="table.panListArea td"
+            )
+
+        result["checks"]["list"] = {
+            "success": True,
+            "url": LIST_URL,
+            "elapsed": round(time.time() - t0, 3),
+        }
 
         link = cols[2].find("a")
         if not link:
-            result["error"] = "상세 링크 추출 실패"
-            return result
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 링크 없음",
+                target="cols[2] > a"
+            )
 
-        title = cols[2].get_text(strip=True)
-        href = link.get("href", "")
-        notice_idx = href.replace("Javascript:readRun(", "").replace(");", "")
+        notice_idx = link.get("href", "").replace("Javascript:readRun(", "").replace(");", "")
         detail_url = DETAIL_URL_TEMPLATE.format(idx=notice_idx)
 
-        result["checks"]["list_page"]["success"] = True
-        result["checks"]["list_page"]["count"] = 1
-        result["checks"]["list_page"]["title"] = title
-
-        # 3️⃣ 상세 페이지 접근
-        result["checks"]["detail_page"]["url"] = detail_url
+        # 2️⃣ 상세 페이지
         driver.get(detail_url)
         time.sleep(1)
 
-        detail_data = parse_detail_page(driver.page_source, detail_url)
-        content = detail_data.get("content")
+        detail = parse_detail_page(driver.page_source, detail_url)
+        if not detail.get("content"):
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 본문 비어 있음",
+                target=detail_url
+            )
 
-        if not content:
-            result["error"] = "상세 페이지 본문 추출 실패"
-            return result
 
-        result["checks"]["detail_page"]["success"] = True
-        result["checks"]["detail_page"]["content_length"] = len(content)
+        result["checks"]["detail"] = {
+            "success": True,
+            "url": detail_url,
+            "content_length": len(detail.get("content")),
+            "elapsed": round(time.time() - t0, 3),
+        }
 
+        # ==================================================
+        # FINISH
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
+
+        return result
+
+    except HealthCheckError as e:
+        apply_health_error(result, e)
         return result
 
     except Exception as e:
-        result["error"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e)
+            )
+        )
         return result
 
     finally:
+        result["elapsed"] = round(time.perf_counter() - start_time, 3)
         driver.quit()
-        logger.info("[HEALTH] 드라이버 종료")
 
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scrape_all()
+    
 # ==================================================
 # CLI 실행
 # ==================================================

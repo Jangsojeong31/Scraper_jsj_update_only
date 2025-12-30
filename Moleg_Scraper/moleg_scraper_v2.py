@@ -1,3 +1,5 @@
+# moleg_scraper_v2.py
+
 """
 법제처 입법예고 스크래퍼
 """
@@ -1101,6 +1103,13 @@ def main():
 from typing import Dict
 from datetime import datetime
 
+from common.health_schema import base_health_output
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_mapper import apply_health_error
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.constants import URLStatus
 
 def moleg_health_check() -> Dict:
     """
@@ -1110,17 +1119,23 @@ def moleg_health_check() -> Dict:
     BASE_URL = "https://www.moleg.go.kr"
     LIST_URL = "https://www.moleg.go.kr/lawinfo/molegMakingList.mo?mid=a10514020000"
 
-    result = {
-        "org_name": "MOLEG",
-        "target": "법제처 > 입법예고",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "list_page": {},
-            "detail_page": {}
-        },
-        "error": None
-    }
+    # result = {
+    #     "org_name": "MOLEG",
+    #     "target": "법제처 > 입법예고",
+    #     "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    #     "status": "FAIL",
+    #     "checks": {
+    #         "list_page": {},
+    #         "detail_page": {}
+    #     },
+    #     "error": None
+    # }
+
+    result = base_health_output(
+        auth_src="법제처 > 입법예고",
+        scraper_id="MOLEG_LEGNOTICE",
+        target_url=LIST_URL,
+    )
 
     scraper = None
 
@@ -1130,6 +1145,28 @@ def moleg_health_check() -> Dict:
         # ===============================
         scraper = MolegScraper(delay=0.5)
 
+        # ======================================================
+        # HTTP 접근성 사전 체크
+        # ======================================================
+        http_result = check_url_status(
+            LIST_URL,
+             use_selenium=True,
+             allow_fallback=False,
+        )
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status": http_result["status"].name,
+            "status_code": http_result["http_code"],
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "목록 페이지 HTTP 접근 실패",
+                target=LIST_URL,
+            )
+        
         # ===============================
         # 1. 목록 페이지 접근
         # ===============================
@@ -1196,17 +1233,33 @@ def moleg_health_check() -> Dict:
             "content_length": len(content)
         }
 
-        # ===============================
-        # 최종 성공
-        # ===============================
+        # ======================================================
+        # SUCCESS
+        # ======================================================
+        result["ok"] = True
         result["status"] = "OK"
         return result
 
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+        return result
+    
     except Exception as e:
-        result["error"] = str(e)
-        result["status"] = "FAIL"
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e)
+            )
+        )
         return result
 
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    main()
 
 if __name__ == "__main__":
     import json

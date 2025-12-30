@@ -2,6 +2,7 @@
 # 금융감독원-업무자료>금융감독법규>감독행정작용>감독행정작용 내역
 
 import os
+import sys
 import time
 import logging
 import json
@@ -15,6 +16,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 import pandas as pd
+
+# ==================================================
+# 프로젝트 루트 등록
+# ==================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 # 로그 설정 (한글 깨짐 방지)
 logging.basicConfig(
@@ -636,121 +645,173 @@ class FSSAdminScraper:
 # Health Check 모드
 # 금융감독원-업무자료>금융감독법규>감독행정작용>감독행정작용 내역
 # -------------------------------------------------
-def fss_admin_health_check() -> dict:
+from typing import Dict
+# import time
+# from datetime import datetime
+
+# from selenium.webdriver.common.by import By
+# from selenium.webdriver.support.ui import WebDriverWait
+# from selenium.webdriver.support import expected_conditions as EC
+
+from common.common_http import check_url_status, URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
+
+def fss_admin_health_check() -> Dict:
     """
     금융감독원 감독행정작용 Health Check
-    - 목록 접근
-    - 제목 클릭 상세 이동 가능 여부
-    - 첨부파일 다운로드 링크 존재 여부
-    출력 포맷: HealthResult 표준 구조
+    - HealthErrorType 명시적 raise 패턴
+    - 표준 Health Output Schema 사용
     """
 
-    from datetime import datetime
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
+    start_ts = time.perf_counter()
 
-    BASE_URL = (
+    LIST_URL = (
         "https://www.fss.or.kr/fss/job/admnstgudcDtls/"
         "list.do?menuNo=200494&pageIndex=1&searchRegn=&searchYear=&searchCecYn=T&searchWrd="
     )
 
-    result = {
-        "org_name": "FSS",
-        "target": "금융감독원 > 감독행정작용 내역",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {},
-        "error": None,
-    }
+    result = base_health_output(
+        auth_src="금융감독원-감독행정작용",
+        scraper_id="FSS_ADMIN",
+        target_url=LIST_URL,
+    )
 
     scraper = None
 
     try:
+        # ==================================================
+        # 1️⃣ HTTP 접근 체크
+        # ==================================================
+        http_result = check_url_status(LIST_URL)
+        url_status = http_result["status"]
+
+        result["checks"]["http"] = {
+            "ok": url_status == URLStatus.OK,
+            "status_code": http_result.get("status_code"),
+            "verify_ssl": http_result.get("verify_ssl", True),
+        }
+
+        if url_status != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(url_status),
+                "감독행정작용 목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+
+        # ==================================================
+        # 2️⃣ 목록 페이지 로딩
+        # ==================================================
         scraper = FSSAdminScraper()
         driver = scraper.driver
         wait = WebDriverWait(driver, 10)
 
-        # ==================================================
-        # 1. 목록 페이지 접근
-        # ==================================================
-        driver.get(BASE_URL)
+        driver.get(LIST_URL)
 
-        wait.until(
-            EC.presence_of_element_located(
+        rows = wait.until(
+            EC.presence_of_all_elements_located(
                 (By.CSS_SELECTOR, "div.bd-list.ovx table tbody tr")
             )
         )
 
-        result["checks"]["search_page"] = {
-            "url": BASE_URL,
-            "success": True,
-            "message": "목록 페이지 접근 성공",
+        if not rows:
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "감독행정작용 목록 데이터 없음",
+                "div.bd-list.ovx table tbody tr",
+            )
+
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(rows),
         }
 
         # ==================================================
-        # 2. 목록 1건 확인
+        # 3️⃣ 상세 페이지 접근
         # ==================================================
-        first_row = driver.find_element(
-            By.CSS_SELECTOR, "div.bd-list.ovx table tbody tr"
-        )
+        first_row = rows[0]
 
         title_el = first_row.find_element(
-            By.CSS_SELECTOR, "td.title a[href*='view.do']"
+            By.CSS_SELECTOR, "td.title a[href]"
         )
 
-        title_text = title_el.text.strip()
         detail_url = title_el.get_attribute("href")
-
-        result["checks"]["list_page"] = {
-            "success": True,
-            "count": 1,
-            "title": title_text,
-        }
+        title_text = title_el.text.strip()
 
         if not detail_url:
-            raise RuntimeError("상세 페이지 링크 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락",
+                "td.title a[href]",
+            )
 
-        # ==================================================
-        # 3. 상세 페이지 이동 가능 여부
-        # ==================================================
         driver.get(detail_url)
 
         wait.until(
             EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "div.contents, div.conts, body")
+                (By.CSS_SELECTOR, "body")
             )
         )
 
-        result["checks"]["detail_page"] = {
+        result["checks"]["detail"] = {
+            "ok": True,
             "url": detail_url,
-            "success": True,
-            "message": "상세 페이지 접근 성공",
+            "title": title_text,
         }
 
         # ==================================================
-        # 4. 첨부파일 다운로드 가능 여부
+        # 4️⃣ 첨부파일 링크 존재 여부 (있을 때만 생성)
         # ==================================================
         file_links = driver.find_elements(
-            By.CSS_SELECTOR,
-            "a[href*='hpdownload']"
+            By.CSS_SELECTOR, "a[href*='hpdownload']"
         )
 
-        result["checks"]["file_download"] = {
-            "success": len(file_links) > 0,
-            "file_count": len(file_links),
-        }
+        if file_links:
+            result["checks"]["file_download"] = {
+                "success": True,
+                "file_count": len(file_links),
+                "message": "첨부파일 링크 존재",
+            }
 
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
 
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+
     except Exception as e:
-        result["error"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e),
+            ),
+        )
 
     finally:
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_ts) * 1000
+        )
+
         if scraper and scraper.driver:
             scraper.driver.quit()
 
     return result
+
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scraper = FSSAdminScraper()
+    scraper.run()  # max_pages=None이면 자동으로 총 페이지 수 감지
 
 if __name__ == "__main__":
     import argparse

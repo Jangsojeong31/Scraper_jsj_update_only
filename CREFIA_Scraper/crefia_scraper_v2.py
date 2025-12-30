@@ -1,5 +1,7 @@
+# crefia_scraper_v2.py
+
 """
-여신금융협회 스크래퍼
+여신금융협회-정보센터>규제개선>자율규제 현황 스크래퍼
 """
 import sys
 from pathlib import Path
@@ -592,72 +594,97 @@ def save_crefia_results(records: List[Dict]):
 # ==================================================
 # Health Check
 # ==================================================
-from datetime import datetime
+# from datetime import datetime
 from urllib.parse import quote
+from time import perf_counter
+
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.constants import URLStatus
+
 
 def crefia_health_check(headless: bool = True) -> Dict:
     """
     여신금융협회 자율규제 현황 Health Check
-    - 목록 페이지 접근
-    - 목록 1건 추출
-    - 파일 다운로드 가능 여부 확인
+    - HTTP 접근
+    - 목록 1건 확인
+    - 파일 다운로드 가능 여부
     """
-    result = {
-        "org_name": "CREFIA",
-        "target": "여신금융협회 > 자율규제 현황",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {
-            "list_page": {
-                "url": CrefiaScraper.LIST_URL,
-                "success": False,
-                "message": ""
-            },
-            "list_item": {
-                "success": False,
-                "title": "",
-                "message": ""
-            },
-            "file_download": {
-                "success": False,
-                "file_name": "",
-                "message": ""
-            }
-        }
-    }
+
+    start_ts = perf_counter()
+
+    result = base_health_output(
+        auth_src="여신금융협회-자율규제",
+        scraper_id="CREFIA_SELF_REGULATION",
+        target_url=CrefiaScraper.LIST_URL,
+    )
 
     scraper = CrefiaScraper(clean_downloads=True)
     driver = None
 
     try:
+        # ==================================================
+        # 1️⃣ HTTP 접근 체크
+        # ==================================================
+        http_result = check_url_status(scraper.LIST_URL)
+
+        result["checks"]["http"] = {
+            "ok": http_result["status"] == URLStatus.OK,
+            "status_code": http_result["http_code"],
+            "verify_ssl": True,
+        }
+
+        if http_result["status"] != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                "자율규제 현황 목록 페이지 HTTP 접근 실패",
+                scraper.LIST_URL,
+            )
+
+        # ==================================================
+        # 2️⃣ 목록 1건 추출
+        # ==================================================
         driver = init_selenium(scraper.download_dir, headless=headless, scraper=scraper)
         driver.get(scraper.LIST_URL)
         time.sleep(3)
 
-        result["checks"]["list_page"]["success"] = True
-
         soup = BeautifulSoup(driver.page_source, "lxml")
-
-        # 1️⃣ 목록 1건 추출
         first_link = soup.select_one("div.list_box ul li a")
+
         if not first_link:
-            result["checks"]["list_item"]["message"] = "목록 항목을 찾을 수 없음"
-            return result
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "자율규제 현황 목록이 비어 있음",
+                "div.list_box ul li a",
+            )
 
         title = first_link.get_text(strip=True)
         onclick = first_link.get("onclick", "")
 
-        result["checks"]["list_item"]["success"] = True
-        result["checks"]["list_item"]["title"] = title
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": 1,
+            "title": title,
+        }
 
-        # 2️⃣ 다운로드 URL 구성
+        # ==================================================
+        # 3️⃣ 파일 다운로드 가능 여부
+        # ==================================================
         match = re.search(
             r"fn_downloadFile\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]",
-            onclick
+            onclick,
         )
+
         if not match:
-            result["checks"]["file_download"]["message"] = "onclick 파싱 실패"
-            return result
+            raise HealthCheckError(
+                HealthErrorType.NO_FILE_LINK,
+                "파일 다운로드 onclick 파싱 실패",
+                "a[onclick]",
+            )
 
         filename, file_type = match.groups()
         encoded_filename = quote(filename, encoding="utf-8")
@@ -669,24 +696,58 @@ def crefia_health_check(headless: bool = True) -> Dict:
             f"&keyNum=&date=&pFileEnc="
         )
 
-        # 3️⃣ 파일 다운로드 가능 여부 확인 (HEAD 요청)
         resp = requests.get(download_url, timeout=15)
 
-        if resp.status_code == 200 and len(resp.content) > 1024:
-            result["checks"]["file_download"]["success"] = True
-            result["checks"]["file_download"]["file_name"] = filename
-            result["status"] = "OK"
-        else:
-            result["checks"]["file_download"]["message"] = f"응답 이상 ({resp.status_code})"
+        if resp.status_code != 200 or len(resp.content) < 1024:
+            raise HealthCheckError(
+                HealthErrorType.FILE_DOWNLOAD_FAIL,
+                f"파일 다운로드 실패 ({resp.status_code})",
+                download_url,
+            )
+
+        # 첨부파일 있을 때만 생성
+        result["checks"]["file_download"] = {
+            "url": download_url,
+            "success": True,
+            "message": "첨부파일 다운로드 가능",
+        }
+
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
+        result["status"] = "OK"
+
+    except HealthCheckError as he:
+        apply_health_error(result, he)
 
     except Exception as e:
-        result["checks"]["list_page"]["message"] = str(e)
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e),
+            ),
+        )
 
     finally:
+        result["elapsed_ms"] = int((perf_counter() - start_ts) * 1000)
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
     return result
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    crawler = CrefiaScraper()
+    results = crawler.crawl_self_regulation_status()
+    print(f"\n추출된 데이터: {len(results)}개")
+    save_crefia_results(results)
 
 # ---------------- 실행 ----------------
 if __name__ == "__main__":

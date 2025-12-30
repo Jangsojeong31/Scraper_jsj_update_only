@@ -6,10 +6,11 @@ import requests
 from typing import List, Dict, Optional
 from datetime import datetime
 
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+#from webdriver_manager.chrome import ChromeDriverManager
 
 from common.constants import (
     URLStatus,
@@ -18,7 +19,7 @@ from common.constants import (
 
 # ✅ 공통 로거 사용
 from common.common_logger import get_logger
-
+from common.base_scraper import BaseScraper
 
 # ==================================================
 # Logger (공통)
@@ -182,6 +183,8 @@ def _selenium_fetch(url: str):
     start = time.time()
     logger.info("start", extra={"tag": "SEL"})
 
+    scraper = BaseScraper()
+
     options = Options()
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
@@ -189,10 +192,12 @@ def _selenium_fetch(url: str):
     options.add_argument("--disable-extensions")
     options.add_argument("--log-level=3")
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+#    driver = webdriver.Chrome(
+#        service=Service(ChromeDriverManager().install()),
+#        options=options
+#    )
+
+    driver = scraper._create_webdriver(options)
 
     try:
         driver.set_page_load_timeout(SELENIUM_TIMEOUT)

@@ -37,7 +37,8 @@ if str(project_root) not in sys.path:
 import os
 import json
 import csv
-import time
+#import time
+from time import time, sleep
 import re
 from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
@@ -507,7 +508,8 @@ class BokScraper(BaseScraper):
             
             try:
                 driver.get(url)
-                time.sleep(2)
+                # time.sleep(2)
+                sleep(2)
                 
                 # XPath로 소관부서 추출
                 try:
@@ -1022,7 +1024,8 @@ class BokScraper(BaseScraper):
                     driver.get(search_url)
                     
                     # 페이지 로딩 대기
-                    time.sleep(2)
+                    # time.sleep(2)
+                    sleep(2)
 
                     # 디버깅 HTML 저장 (첫 번째 검색만)
                     if idx == 1:
@@ -1189,7 +1192,8 @@ class BokScraper(BaseScraper):
                                     selected_item['element'].click()
                                     
                                     # 새 페이지 로딩 대기
-                                    time.sleep(2)
+                                    # time.sleep(2)
+                                    sleep(2)
                                     
                                     # 현재 URL 가져오기 (클릭 후 이동한 페이지)
                                     current_url = driver.current_url
@@ -1266,7 +1270,8 @@ class BokScraper(BaseScraper):
                     except Exception as e:
                         print(f"  ⚠ Driver 종료 중 오류: {e}")
                 
-                time.sleep(self.delay)
+                # time.sleep(self.delay)
+                sleep(self.delay)
             
         except Exception as e:
             print(f"✗ 스크래핑 중 오류 발생: {e}")
@@ -1444,61 +1449,76 @@ def save_bok_results(records: List[Dict], crawler: Optional[BokScraper] = None):
 # Health Check 모드
 # -------------------------------------------------
 # BokScraper 클래스 임포트 필요
-# from BOK_Scraper.bok_scraper_v2 import BokScraper
+from common.common_http import check_url_status
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
 
 def bok_law_regulations_health_check() -> Dict:
-    """
-    한국은행 법규정보 > 규정 헬스체크
-    첫 번째 검색 결과 클릭 → 상세 페이지 접근 → extract_regulation_detail() 호출까지 안전 처리
-    """
-    result: Dict = {
-        "org_name": "BOK",
-        "target": "한국은행 > 운영 및 법규 > 법규정보 > 규정",
-        "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "checks": {},
-        "error": None,
-    }
+    start_ts = time()
+
+    regulation_name = "한국은행 규정"
+    query_encoded = quote(regulation_name)
+
+    search_url = BokScraper.SEARCH_URL_TEMPLATE.format(query=query_encoded)
+
+    result = base_health_output(
+        auth_src="한국은행-규정",
+        scraper_id="BOK_LAW_REGULATIONS",
+        target_url=search_url,
+    )
 
     scraper = BokScraper()
     driver = None
 
     try:
-        # ----------------------------------
-        # 1. 검색 페이지 접근
-        # ----------------------------------
-        regulation_name = "한국은행 규정"
-        query_encoded = quote(regulation_name)
-        search_url = scraper.SEARCH_URL_TEMPLATE.format(query=query_encoded)
+        # ==================================================
+        # 1. HTTP 접근 체크 (common_http)
+        # ==================================================
+        http_result = check_url_status(search_url)
 
-        chrome_options = scraper._build_default_chrome_options()
-        driver = scraper._create_webdriver(chrome_options)
-        driver.get(search_url)
-        time.sleep(2)
-
-        result["checks"]["search_page"] = {
-            "url": search_url,
-            "success": True,
-            "message": "검색 페이지 접근 성공",
+        result["checks"]["http"] = {
+            "ok": http_result["status"].name == "OK",
+            "status_code": http_result["http_code"],
         }
 
-        # ----------------------------------
-        # 2. 검색 결과 목록 1건 확인
-        # ----------------------------------
+        if http_result["status"].name != "OK":
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(http_result["status"]),
+                f"검색 페이지 접근 실패 ({http_result['status'].name})",
+                search_url
+            )
+
+        # ==================================================
+        # 2. Selenium 접근
+        # ==================================================
+        driver = scraper._create_webdriver(
+            scraper._build_default_chrome_options()
+        )
+        driver.get(search_url)
+        sleep(2)
+
+        # ==================================================
+        # 3. 목록 확인
+        # ==================================================
         wait = WebDriverWait(driver, 10)
         list_items = []
-        list_selectors = [
-            "#frm > div.tsh-main > div.search-main > ul > li",
-            "div.search-main ul li",
+
+        selectors = [
+            "#frm div.search-main ul li",
             ".search-main ul li",
             "ul.search-list li",
-            ".bdLine.type4 ul li",
         ]
 
-        for selector in list_selectors:
+        for selector in selectors:
             try:
                 list_items = wait.until(
-                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                    EC.presence_of_all_elements_located(
+                        (By.CSS_SELECTOR, selector)
+                    )
                 )
                 if list_items:
                     break
@@ -1506,64 +1526,84 @@ def bok_law_regulations_health_check() -> Dict:
                 continue
 
         if not list_items:
-            raise RuntimeError("검색 결과 목록 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "검색 결과 목록 없음",
+                "search result list"
+            )
 
+        result["checks"]["list"] = {
+            "ok": True,
+            "count": len(list_items),
+        }
+
+        # ==================================================
+        # 4. 상세 페이지 접근
+        # ==================================================
         first_item = list_items[0]
-        link_elem = first_item.find_element(By.TAG_NAME, "a")
-        title = link_elem.text.strip()
+        link = first_item.find_element(By.TAG_NAME, "a")
+        detail_url = link.get_attribute("href")
 
-        result["checks"]["list_page"] = {
-            "success": True,
-            "count": 1,
-            "title": title,
-        }
+        if not detail_url:
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 획득 실패",
+                "detail link"
+            )
 
-        # ----------------------------------
-        # 3. 상세 페이지 접근 (안정 처리)
-        # ----------------------------------
-        href = link_elem.get_attribute("href")
-        if href:
-            detail_url = urljoin(scraper.BASE_URL, href)
-            driver.get(detail_url)
-            print(f"  → 상세 페이지 URL (href 직접 접근): {detail_url}")
-        else:
-            # 클릭 시 새 창 처리
-            original_window = driver.current_window_handle
-            link_elem.click()
-            time.sleep(1)
-            all_windows = driver.window_handles
-            if len(all_windows) > 1:
-                driver.switch_to.window(all_windows[-1])
-            WebDriverWait(driver, 10).until(lambda d: d.current_url != search_url)
-            detail_url = driver.current_url
-            print(f"  → 상세 페이지 URL (클릭 후 전환): {detail_url}")
+        driver.get(detail_url)
+        sleep(1)
 
-        if not detail_url or detail_url == search_url:
-            raise RuntimeError("상세 페이지 이동 실패")
+        detail_info = scraper.extract_regulation_detail(
+            detail_url,
+            regulation_name=regulation_name
+        )
 
-        # ----------------------------------
-        # 4. extract_regulation_detail() 호출
-        # ----------------------------------
-        detail_info = scraper.extract_regulation_detail(detail_url, regulation_name=regulation_name)
+        if not detail_info.get("content"):
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문 없음",
+                "detail content"
+            )
 
-        result["checks"]["detail_page"] = {
+        result["checks"]["detail"] = {
+            "ok": True,
             "url": detail_url,
-            "success": True,
-            "content_length": len(detail_info.get("content", "")),
-            "download_links": detail_info.get("download_links", []),
-            "file_names": detail_info.get("file_names", []),
-            "department": detail_info.get("department", ""),
-            "enactment_date": detail_info.get("enactment_date", ""),
-            "revision_date": detail_info.get("revision_date", ""),
+            "content_length": len(detail_info["content"]),
         }
 
+        # ==================================================
+        # 5. 첨부파일 (있을 때만 생성)
+        # ==================================================
+        download_links = detail_info.get("download_links") or []
+
+        if download_links:
+            result["checks"]["file_download"] = {
+                "url": download_links[0],
+                "success": True,
+                "message": "첨부파일 다운로드 가능",
+            }
+
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
 
-    except Exception as exc:
-        result["status"] = "FAIL"
-        result["error"] = str(exc)
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+
+    except Exception as e:
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNEXPECTED_ERROR,
+                str(e)
+            )
+        )
 
     finally:
+        result["elapsed_ms"] = int((time() - start_ts) * 1000)
         if driver:
             try:
                 driver.quit()
@@ -1572,6 +1612,16 @@ def bok_law_regulations_health_check() -> Dict:
 
     return result
 
+
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scraper = BokScraper()
+    results = scraper.crawl_regulations()
+
+    print(f"\n총 {len(results)}개의 법규정보를 수집했습니다.")
+    save_bok_results(results, crawler=scraper)
 
 if __name__ == "__main__":
     import argparse

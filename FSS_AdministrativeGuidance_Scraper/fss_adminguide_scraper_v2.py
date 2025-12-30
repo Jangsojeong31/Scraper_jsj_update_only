@@ -1,5 +1,6 @@
 # fss_adminguide_scraper_v2.py
-# 금융감독원-업무자료>금융감독법규>감독행정작용>감독행정작용 내역
+# 금융감독원-업무자료>금융감독법규>금융행정지도>행정지도 내역
+# 금융감독원-금융감독법규정보 >금융행정지도 >행정지도
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,6 +15,14 @@ import logging
 
 sys.stdout.reconfigure(encoding='utf-8')
 
+# ==================================================
+# 프로젝트 루트 등록
+# ==================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+    
 # 로그 설정 (한글 깨짐 방지)
 logging.basicConfig(
     level=logging.INFO,
@@ -1052,94 +1061,154 @@ class FSSAdministrativeGuidanceScraper:
             logger.debug(traceback.format_exc())
             traceback.print_exc()
 
-    # -------------------------------------------------
-    # Health Check 모드
-    # python bok_scraper_v2.py --check
-    # -------------------------------------------------
+# -------------------------------------------------
+# Health Check 모드
+# python fss_adminguide_scraper_v2.py --check
+# -------------------------------------------------
+from common.common_http import check_url_status, URLStatus
+from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_schema import base_health_output
+from common.health_mapper import apply_health_error
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+
 def fss_admin_guidance_health_check() -> dict:
     """
     금융감독원 행정지도 Health Check
-    scrape_all() 로직을 기반으로 최소 동작만 검증
+    - HealthErrorType 명시적 raise
+    - 표준 Health Output Schema 사용
     """
-    start_time = time.time()
 
-    result = {
-        "org_name": "FSS",
-        "target": "금융감독원 > 금융행정지도",
-        "check_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "FAIL",
-        "elapsed": None,
-        "checks": {},
-        "error": None,
-    }
+    start_ts = time.perf_counter()
+
+    LIST_URL = "https://www.fss.or.kr/fss/job/admnstgudc/list.do?menuNo=200492&pageIndex=1"
+
+    result = base_health_output(
+        auth_src="금융감독원-금융감독법규정보 >금융행정지도 >행정지도",
+        scraper_id="FSS_ADMIN_GUIDANCE",
+        target_url=LIST_URL,
+    )
+
+    scraper = FSSAdministrativeGuidanceScraper()
 
     try:
-        scraper = FSSAdministrativeGuidanceScraper()
-
         # ==================================================
-        # 1. 총 페이지 수 확인
+        # 1️⃣ HTTP 접근 체크
         # ==================================================
-        t0 = time.time()
-        total_pages = scraper.get_total_pages()
-        if not total_pages or total_pages <= 0:
-            raise RuntimeError("총 페이지 수 확인 실패")
+        http_result = check_url_status(LIST_URL)
+        url_status = http_result["status"]
 
-        result["checks"]["total_pages"] = {
-            "success": True,
-            "total_pages": total_pages,
-            "elapsed": round(time.time() - t0, 3),
+        result["checks"]["http"] = {
+            "ok": url_status == URLStatus.OK,
+            "status_code": http_result.get("status_code"),
+            "verify_ssl": http_result.get("verify_ssl", True),
         }
 
+        if url_status != URLStatus.OK:
+            raise HealthCheckError(
+                map_urlstatus_to_health_error(url_status),
+                "행정지도 목록 페이지 HTTP 접근 실패",
+                LIST_URL,
+            )
+
         # ==================================================
-        # 2. 목록 페이지 1건 추출 (scrape_list_page)
+        # 2️⃣ 목록 페이지 1건 추출
         # ==================================================
-        t0 = time.time()
         items = scraper.scrape_list_page(1)
+
         if not items:
-            raise RuntimeError("목록 페이지에서 항목 추출 실패")
+            raise HealthCheckError(
+                HealthErrorType.NO_LIST_DATA,
+                "행정지도 목록 데이터 없음",
+                "table > tr",
+            )
 
         first_item = items[0]
 
-        result["checks"]["list_page"] = {
-            "success": True,
-            "page": 1,
+        result["checks"]["list"] = {
+            "ok": True,
             "count": len(items),
-            "title": first_item.get("제목", ""),
-            "elapsed": round(time.time() - t0, 3),
         }
 
-        # ==================================================
-        # 3. 상세 페이지 접근 (get_detail_data)
-        # ==================================================
         detail_url = first_item.get("상세페이지URL")
         if not detail_url:
-            raise RuntimeError("상세페이지URL이 없음")
+            raise HealthCheckError(
+                HealthErrorType.NO_DETAIL_URL,
+                "상세 페이지 URL 누락",
+                "a[href]",
+            )
 
-        t0 = time.time()
+        # ==================================================
+        # 3️⃣ 상세 페이지 접근
+        # ==================================================
         detail_info = scraper.get_detail_data(detail_url)
-        if not detail_info:
-            raise RuntimeError("상세 페이지 접근 실패")
 
-        content = detail_info.get("상세본문내용", "")
+        content = detail_info.get("상세본문내용", "").strip()
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "상세 페이지 본문이 비어 있음",
+                "상세본문내용",
+            )
 
-        result["checks"]["detail_page"] = {
-            "success": True,
+        result["checks"]["detail"] = {
+            "ok": True,
             "url": detail_url,
             "content_length": len(content),
-            "elapsed": round(time.time() - t0, 3),
         }
 
+        # ==================================================
+        # 4️⃣ 첨부파일 존재 여부 (있을 때만 체크)
+        # ==================================================
+        file_links = detail_info.get("첨부파일링크", "")
+        if file_links:
+            result["checks"]["file_download"] = {
+                "success": True,
+                "message": "첨부파일 링크 존재",
+            }
+
+        # ==================================================
+        # SUCCESS
+        # ==================================================
+        result["ok"] = True
         result["status"] = "OK"
 
-    except Exception as exc:
-        result["status"] = "FAIL"
-        result["error"] = str(exc)
+    except HealthCheckError as he:
+        apply_health_error(result, he)
+
+    except Exception as e:
+        apply_health_error(
+            result,
+            HealthCheckError(
+                HealthErrorType.UNKNOWN,
+                str(e),
+            ),
+        )
 
     finally:
-        result["elapsed"] = round(time.time() - start_time, 3)
+        result["elapsed_ms"] = int(
+            (time.perf_counter() - start_ts) * 1000
+        )
 
     return result
 
+# ==================================================
+# scheduler call
+# ==================================================
+def run():
+    scraper = FSSAdministrativeGuidanceScraper()
+    results = scraper.scrape_all()
+    scraper.save_results()
+    
+    logger.info("=" * 60)
+    logger.info("스크래핑 완료!")
+    logger.info(f"총 {len(results)}개 데이터 수집")
+    logger.info("=" * 60)
+    
+    print("\n" + "=" * 60)
+    print("스크래핑 완료!")
+    print(f"총 {len(results)}개 데이터 수집")
+    print("=" * 60)
 
 if __name__ == "__main__":
     import argparse
