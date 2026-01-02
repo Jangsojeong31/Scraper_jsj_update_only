@@ -1269,22 +1269,38 @@ class LawGoKrScraper(BaseScraper):
             # 전체 텍스트 추출 (개행 유지)
             content = content_div.get_text(separator='\n', strip=True)
             
-            # 검증: 검색 결과 페이지의 메뉴 텍스트가 포함되어 있는지 확인
-            invalid_indicators = [
-                '본문 바로가기',
-                '이 누리집은 대한민국 공식 전자정부',
-                '마우스 입력기',
-                '법령검색 방법 상세내용',
-                '정렬분류 선택',
-                '소관부처 선택'
-            ]
+            # 검증 1: 본문 시작 부분 확인 (처음 200자)
+            if content:
+                content_start = content[:200] if len(content) > 200 else content
+                invalid_start_indicators = ['본문 바로가기', '이 누리집은 대한민국 공식 전자정부', '법제처 국가법령정보센터 로고']
+                has_invalid_start = any(indicator in content_start for indicator in invalid_start_indicators)
+                
+                if has_invalid_start:
+                    print(f"  ⚠ 본문 시작 부분에 불필요한 내용 발견 (검색 페이지로 판단)")
+                    print(f"  → 본문 내용을 비웁니다")
+                    content = ""
             
-            # 여러 지표가 포함되어 있으면 잘못된 페이지로 판단
-            invalid_count = sum(1 for indicator in invalid_indicators if indicator in content)
-            if invalid_count >= 3:
-                print(f"  ⚠ 추출된 본문이 검색 결과 페이지로 보입니다 (지표 {invalid_count}개 발견)")
-                print(f"  → 본문 내용을 비웁니다")
-                content = ""
+            # 검증 2: 전체 내용에서 여러 지표 확인 (시작 부분 검증을 통과한 경우에만)
+            if content:
+                invalid_indicators = [
+                    '본문 바로가기',
+                    '이 누리집은 대한민국 공식 전자정부',
+                    '마우스 입력기',
+                    '법령검색 방법 상세내용',
+                    '정렬분류 선택',
+                    '소관부처 선택',
+                    '법제처 국가법령정보센터 로고',
+                    '검색기록 열기',
+                    '행정규칙 검색결과 목록',
+                    '법령 검색결과 목록'
+                ]
+                
+                # 여러 지표가 포함되어 있으면 잘못된 페이지로 판단
+                invalid_count = sum(1 for indicator in invalid_indicators if indicator in content)
+                if invalid_count >= 3:
+                    print(f"  ⚠ 추출된 본문이 검색 결과 페이지로 보입니다 (지표 {invalid_count}개 발견)")
+                    print(f"  → 본문 내용을 비웁니다")
+                    content = ""
         
         # 내용이 없으면 본문 영역 전체에서 추출
         if not content:
@@ -1294,6 +1310,36 @@ class LawGoKrScraper(BaseScraper):
                 for element in body.find_all(['script', 'style', 'nav', 'header', 'footer']):
                     element.decompose()
                 content = body.get_text(separator='\n', strip=True)
+                
+                # body에서 추출한 경우에도 검증 (검색 페이지 내용인지 확인)
+                if content:
+                    # 본문 시작 부분 확인 (처음 200자)
+                    content_start = content[:200] if len(content) > 200 else content
+                    invalid_start_indicators = ['본문 바로가기', '이 누리집은 대한민국 공식 전자정부', '법제처 국가법령정보센터 로고']
+                    has_invalid_start = any(indicator in content_start for indicator in invalid_start_indicators)
+                    
+                    if has_invalid_start:
+                        print(f"  ⚠ body 추출 내용이 검색 페이지로 판단됨 (시작 부분에 불필요한 내용 발견)")
+                        content = ""
+                    else:
+                        # 전체 내용에서 여러 지표 확인
+                        invalid_indicators = [
+                            '본문 바로가기',
+                            '이 누리집은 대한민국 공식 전자정부',
+                            '마우스 입력기',
+                            '법령검색 방법 상세내용',
+                            '정렬분류 선택',
+                            '소관부처 선택',
+                            '법제처 국가법령정보센터 로고',
+                            '검색기록 열기',
+                            '행정규칙 검색결과 목록',
+                            '법령 검색결과 목록'
+                        ]
+                        
+                        invalid_count = sum(1 for indicator in invalid_indicators if indicator in content)
+                        if invalid_count >= 3:
+                            print(f"  ⚠ body 추출 내용이 검색 페이지로 판단됨 (지표 {invalid_count}개 발견)")
+                            content = ""
         
         # \r\n을 \n으로 통일하고, \r만 있는 경우도 \n으로 변환
         import re
@@ -2374,6 +2420,10 @@ class LawGoKrScraper(BaseScraper):
 def main():
     """메인 함수 - 국가법령정보센터 검색 결과 스크래핑 (모든 페이지)"""
     import argparse
+    import sys
+    import atexit
+    from datetime import datetime
+    
     parser = argparse.ArgumentParser(description='국가법령정보센터 법령 검색 스크래퍼')
     parser.add_argument('--query', '-q', type=str, default='', help='법령명 키워드 (예: 환경)')
     parser.add_argument('--limit', type=int, default=0, help='검색 목록에서 가져올 개수 제한 (0=전체)')
@@ -2389,6 +2439,46 @@ def main():
     no_download = args.no_download
 
     crawler = LawGoKrScraper(delay=1.0)
+    
+    # 로그 파일 설정 (콘솔과 파일에 동시 출력)
+    class TeeOutput:
+        """콘솔과 파일에 동시에 출력하는 클래스"""
+        def __init__(self, file_obj, console_obj):
+            self.file = file_obj
+            self.console = console_obj
+        
+        def write(self, message):
+            self.console.write(message)
+            if self.file:
+                self.file.write(message)
+                self.file.flush()
+        
+        def flush(self):
+            self.console.flush()
+            if self.file:
+                self.file.flush()
+    
+    # 원래의 stdout/stderr 저장
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    # 로그 파일 닫기 함수 (프로그램 종료 시 호출)
+    def close_log_file():
+        if crawler.log_file:
+            # 종료 메시지 출력
+            print(f"=== 로그 종료: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+            # stdout/stderr 복원
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            # 로그 파일 닫기
+            crawler.log_file.close()
+    
+    # 로그 파일이 열려있으면 Tee 출력으로 변경
+    if crawler.log_file:
+        sys.stdout = TeeOutput(crawler.log_file, original_stdout)
+        sys.stderr = TeeOutput(crawler.log_file, original_stderr)
+        # 프로그램 종료 시 로그 파일 닫기
+        atexit.register(close_log_file)
     
     # 스크래퍼 시작 시 current를 previous로 백업 (이전 실행 결과를 이전 버전으로)
     crawler._backup_current_to_previous()
@@ -2821,13 +2911,39 @@ def main():
                                     target_item['file_name'] = downloaded_file_path.get('file_name', '')
                                     
                                     file_path = downloaded_file_path['file_path']
-                                    if file_path.lower().endswith('.pdf'):
-                                        print(f"  → PDF 내용 추출 중...")
-                                        pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
-                                        if pdf_content:
-                                            # PDF 내용이 있으면 본문으로 사용
-                                            target_item['law_content'] = pdf_content
-                                            print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
+                                    
+                                    # 본문이 비어있을 때 파일에서 내용 추출
+                                    if not law_content or len(law_content.strip()) < 100:
+                                        print(f"  → 본문이 비어있어 파일에서 내용 추출 시도 중...")
+                                        file_ext = file_path.lower()
+                                        
+                                        extracted_content = ""
+                                        if file_ext.endswith('.pdf'):
+                                            print(f"  → PDF 내용 추출 중...")
+                                            extracted_content = crawler.file_extractor.extract_pdf_content(file_path)
+                                            if extracted_content:
+                                                target_item['law_content'] = extracted_content
+                                                print(f"  ✓ PDF에서 {len(extracted_content)}자 추출 완료")
+                                        elif file_ext.endswith('.hwp') or file_ext.endswith('.hwp5'):
+                                            print(f"  → HWP 내용 추출 중...")
+                                            extracted_content = crawler.file_extractor.extract_hwp_content(file_path)
+                                            if extracted_content:
+                                                target_item['law_content'] = extracted_content
+                                                print(f"  ✓ HWP에서 {len(extracted_content)}자 추출 완료")
+                                        else:
+                                            print(f"  ⚠ 지원하지 않는 파일 형식: {file_ext}")
+                                        
+                                        if not extracted_content:
+                                            print(f"  ⚠ 파일에서 내용 추출 실패")
+                                    else:
+                                        # 본문이 이미 있는 경우, PDF인 경우에만 파일에서도 추출 (기존 동작 유지)
+                                        if file_path.lower().endswith('.pdf'):
+                                            print(f"  → PDF 내용 추출 중...")
+                                            pdf_content = crawler.file_extractor.extract_pdf_content(file_path)
+                                            if pdf_content:
+                                                # PDF 내용이 있으면 본문으로 사용
+                                                target_item['law_content'] = pdf_content
+                                                print(f"  ✓ PDF에서 {len(pdf_content)}자 추출 완료")
                                 else:
                                     # Selenium 다운로드 실패
                                     target_item['file_download_link'] = ''
