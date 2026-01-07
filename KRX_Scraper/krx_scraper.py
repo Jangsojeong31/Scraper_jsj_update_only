@@ -14,6 +14,7 @@ from selenium.common.exceptions import (
     ElementClickInterceptedException,
     NoSuchElementException,
     TimeoutException,
+    UnexpectedAlertPresentException,
 )
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -51,6 +52,7 @@ from common.file_comparator import FileComparator  # noqa: E402  pylint: disable
 class KrxScraper(BaseScraper):
     """한국거래소 - KRX법무포탈 스크래퍼"""
     
+    SOURCE_CODE = "KRX"  # 출처 코드
     BASE_URL = "https://rule.krx.co.kr"
     MAIN_URL = f"{BASE_URL}/out/index.do"
     SEARCH_URL = f"{BASE_URL}/web/search.do"
@@ -74,6 +76,18 @@ class KrxScraper(BaseScraper):
         self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
         # 본문 전체 가져오기 플래그
         self.content_all = content_all
+        
+        # API 클라이언트 초기화 (환경변수에서)
+        try:
+            from common.regulation_api_client import RegulationAPIClient
+            self.api_client = RegulationAPIClient()
+            print(f"✓ API 클라이언트 초기화 완료")
+        except (ValueError, Exception) as e:
+            print(f"⚠ API 클라이언트 초기화 실패 (CSV 사용): {e}")
+            self.api_client = None
+        
+        # 목록 로드 (API 우선, 실패 시 CSV 폴백)
+        self.target_laws = self._load_target_laws()
     
     def _backup_current_to_previous(self) -> None:
         """스크래퍼 시작 시 current 디렉토리를 previous로 백업
@@ -193,24 +207,76 @@ class KrxScraper(BaseScraper):
         self._save_outputs(results, meta)
         return results
     
-    def _load_filter_keywords(self) -> List[str]:
-        """input/list.csv에서 규정명을 읽어 필터 키워드 목록을 작성"""
+    def _load_target_laws(self) -> List[Dict]:
+        """API 또는 CSV에서 스크래핑 대상 규정명을 로드한다.
+        API 우선 시도, 실패 시 CSV 폴백
+        """
+        # API 사용 가능하면 API에서 가져오기
+        if self.api_client:
+            try:
+                print(f"✓ API에서 법규 목록 가져오는 중... (출처: {self.SOURCE_CODE})")
+                regulations = self.api_client.get_regulations(srce_cd=self.SOURCE_CODE)
+                
+                # 기존 형식으로 변환
+                targets = []
+                for reg in regulations:
+                    regu_nm = reg.get('reguNm', '').strip()
+                    dvcd = reg.get('dvcd', '').strip()
+                    outs_regu_pk = reg.get('outsReguPk', '')
+                    
+                    if not regu_nm:
+                        continue
+                    
+                    targets.append({
+                        'law_name': regu_nm,
+                        'category': dvcd,
+                        'outsReguPk': outs_regu_pk  # API 업데이트용 ID
+                    })
+                
+                print(f"✓ API에서 {len(targets)}개의 법규를 가져왔습니다.")
+                return targets
+                
+            except Exception as e:
+                print(f"⚠ API 로드 실패, CSV로 폴백: {e}")
+                # 폴백: CSV 사용
+        
+        # CSV 로드 (API가 없거나 실패한 경우)
         csv_path = self.base_dir / self.RELATIVE_LIST_PATH
+        print(f"✓ CSV에서 법규 목록 가져오는 중... ({csv_path})")
+        targets = self._load_target_laws_from_csv(csv_path)
+        if targets:
+            print(f"✓ CSV에서 {len(targets)}개의 대상 규정을 불러왔습니다: {csv_path}")
+        return targets
+    
+    def _load_target_laws_from_csv(self, csv_path: Path) -> List[Dict]:
+        """CSV 파일에서 스크래핑 대상 규정명을 로드한다."""
         if not csv_path.exists():
             print(f"⚠ 필터 CSV 파일이 존재하지 않습니다: {csv_path}")
             return []
         
-        keywords = []
+        targets = []
         with open(csv_path, "r", encoding="utf-8") as csvfile:
             reader = csv.DictReader(csvfile)
             if "법령명" not in reader.fieldnames:
                 print("⚠ CSV 파일에 '법령명' 컬럼이 필요합니다.")
                 return []
             for row in reader:
-                keyword = (row.get("법령명") or "").strip()
-                if keyword:
-                    keywords.append(keyword)
-        print(f"CSV에서 {len(keywords)}개의 키워드를 불러왔습니다.")
+                law_name = (row.get("법령명") or "").strip()
+                category = (row.get("구분") or "").strip()
+                if law_name:
+                    targets.append({
+                        'law_name': law_name,
+                        'category': category
+                    })
+        return targets
+    
+    def _load_filter_keywords(self) -> List[str]:
+        """필터 키워드 목록 반환 (하위 호환성)"""
+        keywords = []
+        for target in self.target_laws:
+            law_name = target.get('law_name', '')
+            if law_name:
+                keywords.append(law_name)
         return keywords
     
     def _open_main_page(self, driver, wait) -> None:
@@ -265,6 +331,35 @@ class KrxScraper(BaseScraper):
             print(f"  ⚠ iframe 전환 실패: {e}")
             # 예외 발생 시에도 계속 진행
     
+    def _handle_alert_if_present(self, driver) -> bool:
+        """Alert가 있으면 처리하고 True 반환, 없으면 False 반환
+        Args:
+            driver: WebDriver 인스턴스
+        Returns:
+            Alert가 있었으면 True, 없었으면 False
+        """
+        try:
+            alert = driver.switch_to.alert
+            alert_text = alert.text
+            print(f"  → Alert 감지: {alert_text}")
+            alert.accept()  # Alert 확인
+            print(f"  ✓ Alert 처리 완료")
+            return True
+        except UnexpectedAlertPresentException:
+            try:
+                alert = driver.switch_to.alert
+                alert_text = alert.text
+                print(f"  → Alert 감지 (UnexpectedAlertPresentException): {alert_text}")
+                alert.accept()
+                print(f"  ✓ Alert 처리 완료")
+                return True
+            except Exception as e:
+                print(f"  ⚠ Alert 처리 실패: {e}")
+                return False
+        except Exception:
+            # Alert가 없는 경우 (정상)
+            return False
+    
     def _search_keyword_and_collect(self, driver, wait, keyword: str) -> List[Dict]:
         """키워드 검색 후 목록을 추출"""
         print(f"\n▶ 검색 키워드: {keyword}")
@@ -313,11 +408,38 @@ class KrxScraper(BaseScraper):
                 if matches:
                     gbn, pk1, pk2 = matches[0]
                     print(f"  → goToView 호출: gbn={gbn}, pk1={pk1}, pk2={pk2}")
-                    # JavaScript로 goToView 함수 직접 호출
-                    driver.execute_script(f"goToView('{gbn}', '{pk1}', '{pk2}');")
+                    # iframe에서 나와서 상위 창에서 goToView 호출 (함수가 상위 창에 정의되어 있음)
+                    driver.switch_to.default_content()
+                    try:
+                        # JavaScript로 goToView 함수 직접 호출
+                        driver.execute_script(f"goToView('{gbn}', '{pk1}', '{pk2}');")
+                    except Exception as e:
+                        # 예외 메시지만 간단하게 출력 (스택트레이스 제외)
+                        error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                        print(f"  ⚠ goToView 호출 실패: {error_msg}")
+                        # 폴백: 요소 직접 클릭
+                        driver.switch_to.frame("workPage")
+                        driver.execute_script("arguments[0].scrollIntoView(true);", title_el)
+                        try:
+                            title_el.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", title_el)
                 else:
                     # 정규식으로 파싱 실패 시 onclick 직접 실행
-                    driver.execute_script(onclick)
+                    driver.switch_to.default_content()
+                    try:
+                        driver.execute_script(onclick)
+                    except Exception as e:
+                        # 예외 메시지만 간단하게 출력 (스택트레이스 제외)
+                        error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                        print(f"  ⚠ onclick 실행 실패: {error_msg}")
+                        # 폴백: 요소 직접 클릭
+                        driver.switch_to.frame("workPage")
+                        driver.execute_script("arguments[0].scrollIntoView(true);", title_el)
+                        try:
+                            title_el.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", title_el)
             else:
                 # onclick이 없으면 일반 클릭
                 driver.execute_script("arguments[0].scrollIntoView(true);", title_el)
@@ -332,6 +454,34 @@ class KrxScraper(BaseScraper):
             # iframe에서 나와서 새 창 확인
             driver.switch_to.default_content()
             detail_text, download_link, file_name, revision_reason, promulgation_date, enforcement_date, revision_content = self._extract_detail(driver, wait, current_handles_before, keyword)
+            
+            # API 업데이트 (개정정보가 있는 경우)
+            if self.api_client and (revision_reason or revision_content):
+                # target_laws에서 해당 규정의 outsReguPk 찾기
+                outs_regu_pk = None
+                for target in self.target_laws:
+                    if target.get('law_name') == keyword:
+                        outs_regu_pk = target.get('outsReguPk')
+                        break
+                
+                if outs_regu_pk:
+                    update_data = {
+                        'revision_reason': revision_reason or '',
+                        'revision_content': revision_content or '',
+                        'revision_date': '',  # KRX는 revision_date를 별도로 추출하지 않음
+                    }
+                    
+                    success = self.api_client.update_regulation(
+                        regulation_id=outs_regu_pk,
+                        data=update_data
+                    )
+                    
+                    if success:
+                        print(f"  ✓ API 업데이트 완료: {outs_regu_pk}")
+                    else:
+                        print(f"  ⚠ API 업데이트 실패: {outs_regu_pk}")
+                else:
+                    print(f"  ⚠ API 업데이트 스킵: outsReguPk를 찾을 수 없음 (키워드: {keyword})")
             
             # KFB_Scraper와 동일한 컬럼 구조로 매핑
             record = {
@@ -352,10 +502,14 @@ class KrxScraper(BaseScraper):
             print(f" - [0] {record['규정명']} (제·개정 {doc_type})")
             results.append(record)
         except Exception as exc:
-            print(f"  ⚠ 첫 번째 항목 처리 중 오류 발생: {exc}")
+            # 예외 메시지만 간단하게 출력 (스택트레이스 제외)
+            error_msg = str(exc).split('\n')[0] if '\n' in str(exc) else str(exc)
+            print(f"  ⚠ 첫 번째 항목 처리 중 오류 발생: {error_msg}")
         finally:
             # 상세 팝업 후 iframe 컨텍스트 복원 (안전하게 처리)
             try:
+                # Alert가 있을 수 있으므로 먼저 처리
+                self._handle_alert_if_present(driver)
                 # 유효한 창이 있는지 확인
                 if driver.window_handles:
                     # 첫 번째 창으로 전환
@@ -363,6 +517,11 @@ class KrxScraper(BaseScraper):
                     self._switch_to_results_frame(driver, wait)
             except Exception as e:
                 print(f"  ⚠ iframe 컨텍스트 복원 실패: {e}")
+                # 예외 발생 시에도 Alert 처리 시도
+                try:
+                    self._handle_alert_if_present(driver)
+                except Exception:
+                    pass
         return results
 
     def _extract_detail(self, driver, wait, existing_handles: set = None, keyword: str = "") -> Tuple[str, str, str, str, str, str, str]:
@@ -575,13 +734,18 @@ class KrxScraper(BaseScraper):
                             driver.execute_script("arguments[0].click();", revision_button)
                             time.sleep(3)  # 파일 다운로드 대기
                             print(f"  ✓ 버튼 클릭 완료")
+                            # Alert가 발생할 수 있으므로 처리
+                            self._handle_alert_if_present(driver)
                         except Exception as e:
                             print(f"  ⚠ 버튼 클릭 실패: {e}")
                             try:
                                 revision_button.click()
                                 time.sleep(3)
-                            except:
-                                pass
+                                # Alert 처리
+                                self._handle_alert_if_present(driver)
+                            except Exception as alert_e:
+                                # Alert가 발생했을 수도 있음
+                                self._handle_alert_if_present(driver)
                         
                         # 다운로드된 파일 찾기
                         files_after = set(self.current_dir.glob("*"))
@@ -644,12 +808,21 @@ class KrxScraper(BaseScraper):
                 try:
                     # 현재 상세 페이지 창이 활성화되어 있는지 확인
                     if driver.current_window_handle == new_handle:
+                        # Alert가 있을 수 있으므로 먼저 처리
+                        self._handle_alert_if_present(driver)
                         driver.close()
                     elif new_handle in driver.window_handles:
                         driver.switch_to.window(new_handle)
+                        # Alert가 있을 수 있으므로 먼저 처리
+                        self._handle_alert_if_present(driver)
                         driver.close()
                 except Exception as e:
                     print(f"  ⚠ 상세 페이지 창 닫기 실패: {e}")
+                    # 예외 발생 시에도 Alert 처리 시도
+                    try:
+                        self._handle_alert_if_present(driver)
+                    except Exception:
+                        pass
                 
                 # 원래 창(current_handle)으로 안전하게 전환
                 try:
@@ -671,12 +844,19 @@ class KrxScraper(BaseScraper):
         
         # 예외 발생 시 원래 창으로 복귀 시도
         try:
+            # Alert가 있을 수 있으므로 먼저 처리
+            self._handle_alert_if_present(driver)
             if current_handle in driver.window_handles:
                 driver.switch_to.window(current_handle)
             elif driver.window_handles:
                 driver.switch_to.window(driver.window_handles[0])
         except Exception as e:
             print(f"  ⚠ 창 복귀 실패: {e}")
+            # 예외 발생 시에도 Alert 처리 시도
+            try:
+                self._handle_alert_if_present(driver)
+            except Exception:
+                pass
         
         return (content, download_link, file_name, revision_reason, promulgation_date, enforcement_date, revision_content)
     

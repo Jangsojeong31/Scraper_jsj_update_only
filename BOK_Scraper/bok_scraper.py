@@ -46,6 +46,7 @@ from common.file_comparator import FileComparator
 class BokScraper(BaseScraper):
     """한국은행 스크래퍼 - CSV 목록 기반으로 법규 정보 수집"""
     
+    SOURCE_CODE = "BOK"  # 출처 코드
     BASE_URL = "https://www.bok.or.kr"
     # 검색 URL 템플릿 (검색어를 파라미터로 받음)
     SEARCH_URL_TEMPLATE = "https://www.bok.or.kr/portal/search/search/main.do?menuNo=201693&query={query}"
@@ -66,15 +67,61 @@ class BokScraper(BaseScraper):
         self.file_extractor = FileExtractor(download_dir=str(self.current_dir), session=self.session)
         # 파일 비교기 초기화
         self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
-        # CSV에서 대상 규정 목록 로드
+        
+        # API 클라이언트 초기화 (환경변수에서)
+        try:
+            from common.regulation_api_client import RegulationAPIClient
+            self.api_client = RegulationAPIClient()
+            print(f"✓ API 클라이언트 초기화 완료")
+        except (ValueError, Exception) as e:
+            print(f"⚠ API 클라이언트 초기화 실패 (CSV 사용): {e}")
+            self.api_client = None
+        
+        # 목록 로드 (API 우선, 실패 시 CSV 폴백)
         self.csv_path = csv_path or self.DEFAULT_CSV_PATH
-        self.target_laws = self._load_target_laws(self.csv_path)
-        if self.target_laws:
-            print(f"✓ CSV에서 {len(self.target_laws)}개의 대상 규정을 불러왔습니다: {self.csv_path}")
-        else:
-            print("⚠ 대상 CSV를 찾지 못했거나 비어 있습니다. 전체 목록을 대상으로 진행합니다.")
+        self.target_laws = self._load_target_laws()
     
-    def _load_target_laws(self, csv_path: str) -> List[Dict]:
+    def _load_target_laws(self) -> List[Dict]:
+        """API 또는 CSV에서 스크래핑 대상 규정명을 로드한다.
+        API 우선 시도, 실패 시 CSV 폴백
+        """
+        # API 사용 가능하면 API에서 가져오기
+        if self.api_client:
+            try:
+                print(f"✓ API에서 법규 목록 가져오는 중... (출처: {self.SOURCE_CODE})")
+                regulations = self.api_client.get_regulations(srce_cd=self.SOURCE_CODE)
+                
+                # 기존 형식으로 변환
+                targets = []
+                for reg in regulations:
+                    regu_nm = reg.get('reguNm', '').strip()
+                    dvcd = reg.get('dvcd', '').strip()
+                    outs_regu_pk = reg.get('outsReguPk', '')
+                    
+                    if not regu_nm:
+                        continue
+                    
+                    targets.append({
+                        'law_name': regu_nm,
+                        'category': dvcd,
+                        'outsReguPk': outs_regu_pk  # API 업데이트용 ID
+                    })
+                
+                print(f"✓ API에서 {len(targets)}개의 법규를 가져왔습니다.")
+                return targets
+                
+            except Exception as e:
+                print(f"⚠ API 로드 실패, CSV로 폴백: {e}")
+                # 폴백: CSV 사용
+        
+        # CSV 로드 (API가 없거나 실패한 경우)
+        print(f"✓ CSV에서 법규 목록 가져오는 중... ({self.csv_path})")
+        targets = self._load_target_laws_from_csv(self.csv_path)
+        if targets:
+            print(f"✓ CSV에서 {len(targets)}개의 대상 규정을 불러왔습니다: {self.csv_path}")
+        return targets
+    
+    def _load_target_laws_from_csv(self, csv_path: str) -> List[Dict]:
         """CSV 파일에서 스크래핑 대상 규정명을 로드한다."""
         if not csv_path:
             return []

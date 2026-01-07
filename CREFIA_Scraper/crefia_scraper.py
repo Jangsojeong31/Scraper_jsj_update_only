@@ -85,6 +85,7 @@ def init_selenium(download_dir: str, headless: bool = False, scraper=None) -> we
 class CrefiaScraper(BaseScraper):
     """여신금융협회 스크래퍼"""
     
+    SOURCE_CODE = "CFA"  # 출처 코드 (CREFIA → CFA)
     BASE_URL = "https://www.crefia.or.kr"
     LIST_URL = "https://www.crefia.or.kr/portal/infocenter/regulation/selfRegulation.xx"
     
@@ -117,10 +118,59 @@ class CrefiaScraper(BaseScraper):
         self.cleanup_downloads = cleanup_downloads
         self.clean_downloads = clean_downloads
         
+        # API 클라이언트 초기화 (환경변수에서)
+        try:
+            from common.regulation_api_client import RegulationAPIClient
+            self.api_client = RegulationAPIClient()
+            print(f"✓ API 클라이언트 초기화 완료")
+        except (ValueError, Exception) as e:
+            print(f"⚠ API 클라이언트 초기화 실패 (CSV 사용): {e}")
+            self.api_client = None
+        
+        # 목록 로드 (API 우선, 실패 시 전체 목록 사용)
+        self.target_laws = self._load_target_laws()
+        
         if self.clean_downloads:
             self._clean_downloads_folder()
         
         print("다운로드 폴더 내용:", os.listdir(self.current_dir))
+    
+    def _load_target_laws(self) -> List[Dict]:
+        """API에서 스크래핑 대상 규정명을 로드한다.
+        API 우선 시도, 실패 시 빈 리스트 반환 (전체 목록 사용)
+        """
+        # API 사용 가능하면 API에서 가져오기
+        if self.api_client:
+            try:
+                print(f"✓ API에서 법규 목록 가져오는 중... (출처: {self.SOURCE_CODE})")
+                regulations = self.api_client.get_regulations(srce_cd=self.SOURCE_CODE)
+                
+                # 기존 형식으로 변환
+                targets = []
+                for reg in regulations:
+                    regu_nm = reg.get('reguNm', '').strip()
+                    dvcd = reg.get('dvcd', '').strip()
+                    outs_regu_pk = reg.get('outsReguPk', '')
+                    
+                    if not regu_nm:
+                        continue
+                    
+                    targets.append({
+                        'law_name': regu_nm,
+                        'category': dvcd,
+                        'outsReguPk': outs_regu_pk  # API 업데이트용 ID
+                    })
+                
+                print(f"✓ API에서 {len(targets)}개의 법규를 가져왔습니다.")
+                return targets
+                
+            except Exception as e:
+                print(f"⚠ API 로드 실패, 전체 목록 사용: {e}")
+                # 폴백: 빈 리스트 반환 (전체 목록 사용)
+        
+        # API가 없거나 실패한 경우 빈 리스트 반환 (전체 목록 사용)
+        print(f"✓ 전체 목록을 대상으로 진행합니다.")
+        return []
     
     def _clean_downloads_folder(self):
         """downloads 폴더의 모든 파일 삭제 (current 디렉토리만)"""

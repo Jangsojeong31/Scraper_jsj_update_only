@@ -45,6 +45,7 @@ from common.file_extractor import FileExtractor
 class LawGoKrScraper(BaseScraper):
     """법제처 - 국가법령정보센터 스크래퍼"""
     
+    SOURCE_CODE = "LAW"  # 출처 코드
     # CSV 파일 경로 (기본값)
     DEFAULT_CSV_PATH = "Law_Scraper/input/list.csv"
     
@@ -70,8 +71,18 @@ class LawGoKrScraper(BaseScraper):
         # 파일 비교기 초기화
         self.file_comparator = FileComparator(base_dir=str(self.output_dir / "downloads"))
         
-        # CSV 파일에서 법령명과 구분 정보 읽기
-        self.law_items = self._load_target_laws_from_csv(csv_path or self.DEFAULT_CSV_PATH)
+        # API 클라이언트 초기화 (환경변수에서)
+        try:
+            from common.regulation_api_client import RegulationAPIClient
+            self.api_client = RegulationAPIClient()
+            print(f"✓ API 클라이언트 초기화 완료")
+        except (ValueError, Exception) as e:
+            print(f"⚠ API 클라이언트 초기화 실패 (CSV 사용): {e}")
+            self.api_client = None
+        
+        # 목록 로드 (API 우선, 실패 시 CSV 폴백)
+        self.csv_path = csv_path or self.DEFAULT_CSV_PATH
+        self.law_items = self._load_target_laws()
         self.law_name_lookup = {
             item.get('법령명', '').strip()
             for item in self.law_items
@@ -93,6 +104,58 @@ class LawGoKrScraper(BaseScraper):
         # 한글 괄호와 영문 괄호 모두 처리
         cleaned = re.sub(r'[\(（].*?[\)）]', '', text)
         return cleaned.strip()
+    
+    def _load_target_laws(self) -> List[Dict]:
+        """API 또는 CSV에서 스크래핑 대상 법령명을 로드한다.
+        API 우선 시도, 실패 시 CSV 폴백
+        """
+        # API 사용 가능하면 API에서 가져오기
+        if self.api_client:
+            try:
+                print(f"✓ API에서 법규 목록 가져오는 중... (출처: {self.SOURCE_CODE})")
+                regulations = self.api_client.get_regulations(srce_cd=self.SOURCE_CODE)
+                
+                # 기존 형식으로 변환
+                targets = []
+                for reg in regulations:
+                    regu_nm = reg.get('reguNm', '').strip()
+                    dvcd = reg.get('dvcd', '').strip()
+                    outs_regu_pk = reg.get('outsReguPk', '')
+                    
+                    if not regu_nm:
+                        continue
+                    
+                    # 검색 URL 매핑
+                    search_urls = {
+                        '법령': 'https://www.law.go.kr/lsSc.do?menuId=1&subMenuId=15&tabMenuId=81&query=',
+                        '감독규정': 'https://www.law.go.kr/admRulSc.do?menuId=5&subMenuId=41&tabMenuId=183&query=',
+                    }
+                    search_url = search_urls.get(dvcd, search_urls['법령'])
+                    
+                    # 검색 키워드 생성 (괄호 제거)
+                    search_keyword = self._remove_parentheses(regu_nm)
+                    
+                    targets.append({
+                        '법령명': regu_nm,
+                        '검색_키워드': search_keyword,
+                        '구분': dvcd,
+                        '검색_URL': search_url,
+                        'outsReguPk': outs_regu_pk  # API 업데이트용 ID
+                    })
+                
+                print(f"✓ API에서 {len(targets)}개의 법규를 가져왔습니다.")
+                return targets
+                
+            except Exception as e:
+                print(f"⚠ API 로드 실패, CSV로 폴백: {e}")
+                # 폴백: CSV 사용
+        
+        # CSV 로드 (API가 없거나 실패한 경우)
+        print(f"✓ CSV에서 법규 목록 가져오는 중... ({self.csv_path})")
+        targets = self._load_target_laws_from_csv(self.csv_path)
+        if targets:
+            print(f"✓ CSV에서 {len(targets)}개의 대상 규정을 불러왔습니다: {self.csv_path}")
+        return targets
     
     def _load_target_laws_from_csv(self, csv_path: str) -> List[Dict]:
         """
@@ -123,12 +186,7 @@ class LawGoKrScraper(BaseScraper):
         
         if not csv_file.exists():
             print(f"⚠ CSV 파일을 찾을 수 없습니다: {csv_file}")
-            print(f"  기본값을 사용합니다: 예금자보호법, 국세징수법, 부가가치세법")
-            return [
-                {'법령명': '예금자보호법', '검색_키워드': '예금자보호법', '구분': '법령', '검색_URL': search_urls['법령']},
-                {'법령명': '국세징수법', '검색_키워드': '국세징수법', '구분': '법령', '검색_URL': search_urls['법령']},
-                {'법령명': '부가가치세법', '검색_키워드': '부가가치세법', '구분': '법령', '검색_URL': search_urls['법령']},
-            ]
+            return []
         
         target_laws = []
         try:
@@ -162,20 +220,10 @@ class LawGoKrScraper(BaseScraper):
                 print(f"  구분별 통계: {', '.join([f'{k}: {v}개' for k, v in division_counts.items()])}")
             else:
                 print(f"⚠ CSV 파일이 비어있습니다: {csv_file}")
-                print(f"  기본값을 사용합니다: 예금자보호법, 국세징수법, 부가가치세법")
-                return [
-                    {'법령명': '예금자보호법', '검색_키워드': '예금자보호법', '구분': '법령', '검색_URL': search_urls['법령']},
-                    {'법령명': '국세징수법', '검색_키워드': '국세징수법', '구분': '법령', '검색_URL': search_urls['법령']},
-                    {'법령명': '부가가치세법', '검색_키워드': '부가가치세법', '구분': '법령', '검색_URL': search_urls['법령']},
-                ]
+                return []
         except Exception as e:
             print(f"⚠ CSV 파일 읽기 실패: {csv_file} - {e}")
-            print(f"  기본값을 사용합니다: 예금자보호법, 국세징수법, 부가가치세법")
-            return [
-                {'법령명': '예금자보호법', '검색_키워드': '예금자보호법', '구분': '법령', '검색_URL': search_urls['법령']},
-                {'법령명': '국세징수법', '검색_키워드': '국세징수법', '구분': '법령', '검색_URL': search_urls['법령']},
-                {'법령명': '부가가치세법', '검색_키워드': '부가가치세법', '구분': '법령', '검색_URL': search_urls['법령']},
-            ]
+            return []
         
         return target_laws
     
@@ -2984,6 +3032,37 @@ def main():
                                             revision_reason_len = len(target_item.get('revision_reason', ''))
                                             revision_content_len = len(target_item.get('revision_content', ''))
                                             print(f"  ✓ 새 창 내용 추출 완료 (개정이유: {revision_reason_len}자, 개정내용: {revision_content_len}자, 시행일: {new_window_data.get('enforcement_date', '없음')}, 공포일: {new_window_data.get('promulgation_date', '없음')})")
+                                            
+                                            # API 업데이트
+                                            if crawler.api_client:
+                                                # law_items에서 해당 법령의 outsReguPk 찾기
+                                                law_name = target_item.get('법령명', '') or target_item.get('law_name', '')
+                                                outs_regu_pk = None
+                                                
+                                                # law_items에서 매칭되는 항목 찾기
+                                                for law_item in crawler.law_items:
+                                                    if law_item.get('법령명', '') == law_name:
+                                                        outs_regu_pk = law_item.get('outsReguPk')
+                                                        break
+                                                
+                                                if outs_regu_pk:
+                                                    update_data = {
+                                                        'revision_reason': target_item.get('revision_reason', ''),
+                                                        'revision_content': target_item.get('revision_content', ''),
+                                                        'revision_date': target_item.get('최근_개정일', '') or target_item.get('revision_date', ''),
+                                                    }
+                                                    
+                                                    success = crawler.api_client.update_regulation(
+                                                        regulation_id=outs_regu_pk,
+                                                        data=update_data
+                                                    )
+                                                    
+                                                    if success:
+                                                        print(f"  ✓ API 업데이트 완료: {outs_regu_pk}")
+                                                    else:
+                                                        print(f"  ⚠ API 업데이트 실패: {outs_regu_pk}")
+                                                else:
+                                                    print(f"  ⚠ API 업데이트 스킵: outsReguPk를 찾을 수 없음")
                                         else:
                                             target_item['revision_reason'] = ''
                                             target_item['revision_content'] = ''

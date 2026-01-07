@@ -8,6 +8,8 @@ import zipfile
 import shutil
 import tempfile
 import re
+import warnings
+import logging
 from typing import Optional, Tuple
 from bs4 import BeautifulSoup
 
@@ -286,27 +288,37 @@ class FileExtractor:
         
         # pdfplumber 우선 시도 (더 정확함)
         if PDFPLUMBER_AVAILABLE and pdfplumber:
+            # pdfminer의 FontBBox 경고 억제
+            # pdfminer의 로깅 레벨 조정
+            pdfminer_logger = logging.getLogger('pdfminer')
+            original_level = pdfminer_logger.level
+            pdfminer_logger.setLevel(logging.ERROR)  # ERROR 이상만 출력
+            
             try:
                 print(f"  pdfplumber 사용 가능, 추출 시도 중...")
-                with pdfplumber.open(filepath) as pdf:
-                    total_pages = len(pdf.pages)
-                    pages_to_extract = min(max_pages, total_pages) if max_pages > 0 else total_pages
-                    
-                    if max_pages > 0 and total_pages > max_pages:
-                        print(f"  → 총 {total_pages}페이지 중 처음 {pages_to_extract}페이지만 추출")
-                    
-                    pages_text = []
-                    for i, page in enumerate(pdf.pages):
-                        if max_pages > 0 and i >= max_pages:
-                            break
-                        try:
-                            page_text = page.extract_text()
-                            if page_text:
-                                pages_text.append(page_text)
-                        except Exception as e:
-                            print(f"  ⚠ 페이지 {i+1} 추출 중 오류 (건너뜀): {e}")
-                            continue
-                    content = '\n\n'.join(pages_text)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', message='.*FontBBox.*')
+                    warnings.filterwarnings('ignore', message='.*cannot be parsed as 4 floats.*')
+                    warnings.filterwarnings('ignore', category=UserWarning)
+                    with pdfplumber.open(filepath) as pdf:
+                        total_pages = len(pdf.pages)
+                        pages_to_extract = min(max_pages, total_pages) if max_pages > 0 else total_pages
+                        
+                        if max_pages > 0 and total_pages > max_pages:
+                            print(f"  → 총 {total_pages}페이지 중 처음 {pages_to_extract}페이지만 추출")
+                        
+                        pages_text = []
+                        for i, page in enumerate(pdf.pages):
+                            if max_pages > 0 and i >= max_pages:
+                                break
+                            try:
+                                page_text = page.extract_text()
+                                if page_text:
+                                    pages_text.append(page_text)
+                            except Exception as e:
+                                print(f"  ⚠ 페이지 {i+1} 추출 중 오류 (건너뜀): {e}")
+                                continue
+                        content = '\n\n'.join(pages_text)
                 if content and content.strip():
                     print(f"  ✓ pdfplumber로 {len(content)}자 추출 완료")
                 else:
@@ -315,6 +327,9 @@ class FileExtractor:
             except Exception as e:
                 print(f"  ✗ pdfplumber 추출 실패: {e}")
                 content = ""
+            finally:
+                # 로깅 레벨 복원
+                pdfminer_logger.setLevel(original_level)
         
         # pdfplumber가 실패하면 PyPDF2 시도
         if not content and PYPDF2_AVAILABLE and PyPDF2:

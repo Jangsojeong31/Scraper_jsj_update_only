@@ -51,6 +51,7 @@ from common.file_comparator import FileComparator
 class KofiaScraper(BaseScraper):
     """금융투자협회 - 법규정보시스템 스크래퍼"""
     
+    SOURCE_CODE = "KFA"  # 출처 코드 (KOFIA → KFA)
     BASE_URL = "https://law.kofia.or.kr"
     LIST_URL = "https://law.kofia.or.kr/service/law/lawCurrentMain.do"
     DEFAULT_CSV_PATH = "KOFIA_Scraper/input/list.csv"
@@ -77,8 +78,18 @@ class KofiaScraper(BaseScraper):
         # 하위 호환성을 위해 기존 download_dir도 유지
         self.download_dir = str(self.downloads_dir)
         
+        # API 클라이언트 초기화 (환경변수에서)
+        try:
+            from common.regulation_api_client import RegulationAPIClient
+            self.api_client = RegulationAPIClient()
+            print(f"✓ API 클라이언트 초기화 완료")
+        except (ValueError, Exception) as e:
+            print(f"⚠ API 클라이언트 초기화 실패 (CSV 사용): {e}")
+            self.api_client = None
+        
+        # 목록 로드 (API 우선, 실패 시 CSV 폴백)
         self.csv_path = csv_path or self.DEFAULT_CSV_PATH
-        self.target_laws = self._load_target_laws(self.csv_path)
+        self.target_laws = self._load_target_laws()
         self.target_lookup = {
             self._normalize_title(item["law_name"]): item
             for item in self.target_laws
@@ -302,7 +313,47 @@ class KofiaScraper(BaseScraper):
     # ------------------------------------------------------------------
     # CSV 대상 규정 로드 및 필터링
     # ------------------------------------------------------------------
-    def _load_target_laws(self, csv_path: str) -> List[Dict]:
+    def _load_target_laws(self) -> List[Dict]:
+        """API 또는 CSV에서 스크래핑 대상 규정명을 로드한다.
+        API 우선 시도, 실패 시 CSV 폴백
+        """
+        # API 사용 가능하면 API에서 가져오기
+        if self.api_client:
+            try:
+                print(f"✓ API에서 법규 목록 가져오는 중... (출처: {self.SOURCE_CODE})")
+                regulations = self.api_client.get_regulations(srce_cd=self.SOURCE_CODE)
+                
+                # 기존 형식으로 변환
+                targets = []
+                for reg in regulations:
+                    regu_nm = reg.get('reguNm', '').strip()
+                    dvcd = reg.get('dvcd', '').strip()
+                    outs_regu_pk = reg.get('outsReguPk', '')
+                    
+                    if not regu_nm:
+                        continue
+                    
+                    targets.append({
+                        'law_name': regu_nm,
+                        'category': dvcd,
+                        'outsReguPk': outs_regu_pk  # API 업데이트용 ID
+                    })
+                
+                print(f"✓ API에서 {len(targets)}개의 법규를 가져왔습니다.")
+                return targets
+                
+            except Exception as e:
+                print(f"⚠ API 로드 실패, CSV로 폴백: {e}")
+                # 폴백: CSV 사용
+        
+        # CSV 로드 (API가 없거나 실패한 경우)
+        print(f"✓ CSV에서 법규 목록 가져오는 중... ({self.csv_path})")
+        targets = self._load_target_laws_from_csv(self.csv_path)
+        if targets:
+            print(f"✓ CSV에서 {len(targets)}개의 대상 규정을 불러왔습니다: {self.csv_path}")
+        return targets
+    
+    def _load_target_laws_from_csv(self, csv_path: str) -> List[Dict]:
         """
         CSV 파일에서 스크래핑 대상 규정명을 로드한다.
         기대 컬럼: 구분, 법령명
@@ -1312,6 +1363,37 @@ class KofiaScraper(BaseScraper):
                                 revision_info.update(extracted_info)
                                 
                                 print(f"  ✓ 개정정보 추출: 개정이유={len(revision_info.get('revision_reason', ''))}자, 개정내용={len(revision_info.get('revision_content', ''))}자, 시행일={revision_info.get('enforcement_date', '')}, 공포일={revision_info.get('promulgation_date', '')}")
+                                
+                                # API 업데이트
+                                if self.api_client:
+                                    # target_laws에서 해당 규정의 outsReguPk 찾기
+                                    regulation_name = item.get('title', '') or item.get('regulation_name', '')
+                                    outs_regu_pk = None
+                                    
+                                    # target_laws에서 매칭되는 항목 찾기
+                                    for target in self.target_laws:
+                                        if target.get('law_name') == regulation_name:
+                                            outs_regu_pk = target.get('outsReguPk')
+                                            break
+                                    
+                                    if outs_regu_pk:
+                                        update_data = {
+                                            'revision_reason': revision_info.get('revision_reason', ''),
+                                            'revision_content': revision_info.get('revision_content', ''),
+                                            'revision_date': item.get('revision_date', '') or item.get('최근_개정일', ''),
+                                        }
+                                        
+                                        success = self.api_client.update_regulation(
+                                            regulation_id=outs_regu_pk,
+                                            data=update_data
+                                        )
+                                        
+                                        if success:
+                                            print(f"  ✓ API 업데이트 완료: {outs_regu_pk}")
+                                        else:
+                                            print(f"  ⚠ API 업데이트 실패: {outs_regu_pk}")
+                                    else:
+                                        print(f"  ⚠ API 업데이트 스킵: outsReguPk를 찾을 수 없음")
                             else:
                                 print(f"  ⚠ 파일 내용 추출 실패")
                         else:
