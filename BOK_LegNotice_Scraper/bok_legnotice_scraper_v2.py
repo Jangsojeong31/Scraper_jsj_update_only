@@ -1,63 +1,61 @@
-# bok_legnotice_scraper.py
+# bok_legnotice_scraper_v2.py
 # BOK 규정예고 / Selenium 기반 스크래퍼
-# 페이지네이션 반복 + 상세 페이지 병렬 크롤링 + 드라이버 풀 사용 (메모리 최적화)
-# 한국은행-운영 및 법규→ 법규정보→ 규정 예고
+# 데이터 있음 / 없음 완전 분기 처리 버전
 
 import os
 import sys
 import json
 import argparse
-from time import time, sleep
+from time import time
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 from queue import Queue
 from threading import Thread
 
-from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-# from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import NoSuchElementException
 
 # ==================================================
-# 프로젝트 루트 경로 등록
+# 프로젝트 루트 등록
 # ==================================================
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# ==================================================
+# 공통 모듈
+# ==================================================
 from common.common_logger import get_logger
 from common.common_http import check_url_status
 from common.constants import URLStatus, LegalDocProvided
 from common.base_scraper import BaseScraper
 
+from common.health_schema import base_health_output
+from common.health_exception import HealthCheckError
+from common.health_error_type import HealthErrorType
+from common.health_mapper import apply_health_error, map_url_status_to_health_error
+
 # ==================================================
 # 설정
 # ==================================================
-logger = get_logger("bok_search")
+logger = get_logger("bok_legnotice")
 ORG_NAME = LegalDocProvided.BOK
-POOL_SIZE = 3  # 재사용할 드라이버 수
 
 BASE_URL = "https://www.bok.or.kr"
 LIST_URL = "https://www.bok.or.kr/portal/singl/law/listBbs.do?bbsSe=rule&menuNo=200203"
-
 OUTPUT_DIR = os.path.join(CURRENT_DIR, "output", "json")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+POOL_SIZE = int(os.getenv("BOK_DRIVER_POOL_SIZE", "3"))
+
 # ==================================================
-# 드라이버 생성
+# WebDriver 생성
 # ==================================================
 def create_driver():
-    """
-    폐쇄망 환경 대응: BaseScraper의 _create_webdriver 사용
-    - 환경변수 SELENIUM_DRIVER_PATH에 chromedriver 경로 설정 시 해당 경로 사용
-    - 없으면 PATH에서 chromedriver 탐지
-    - SeleniumManager 우회 (인터넷 연결 불필요)
-    """    
     scraper = BaseScraper()
     options = Options()
     options.add_argument("--headless=new")
@@ -65,8 +63,8 @@ def create_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-#    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return scraper._create_webdriver(options)
+
 # ==================================================
 # 날짜 처리
 # ==================================================
@@ -77,87 +75,95 @@ def resolve_search_dates(start_date=None, end_date=None):
     return start_dt, end_dt
 
 # ==================================================
-# 검색 적용 (폼 submit)
+# 검색 적용 (데이터 있음/없음 분기)
 # ==================================================
 def apply_date_search(driver, start_date=None, end_date=None):
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30)
     sdate, edate = resolve_search_dates(start_date, end_date)
+
     logger.info(f"[SCRAPE] 검색 날짜 설정: {sdate} ~ {edate}")
 
-    sdate_input = wait.until(EC.presence_of_element_located((By.ID, "sdate")))
-    driver.execute_script("arguments[0].value = arguments[1];", sdate_input, sdate.strftime("%Y-%m-%d"))
+    wait.until(EC.presence_of_element_located((By.ID, "sdate")))
 
-    edate_input = wait.until(EC.presence_of_element_located((By.ID, "edate")))
-    driver.execute_script("arguments[0].value = arguments[1];", edate_input, edate.strftime("%Y-%m-%d"))
+    driver.execute_script(
+        "document.getElementById('sdate').value = arguments[0];",
+        sdate.strftime("%Y-%m-%d"),
+    )
+    driver.execute_script(
+        "document.getElementById('edate').value = arguments[0];",
+        edate.strftime("%Y-%m-%d"),
+    )
+    driver.execute_script("document.getElementById('pageIndex').value = '1';")
+    driver.execute_script("document.getElementById('schFrom').submit();")
 
-    page_index_input = driver.find_element(By.ID, "pageIndex")
-    driver.execute_script("arguments[0].value = '1';", page_index_input)
+    # ✅ 결과 있음 OR 결과 없음 → 검색 완료
+    def search_finished(d):
+        if d.find_elements(By.CSS_SELECTOR, "div.bdLine.type2.type3 ul > li"):
+            return True
+        if d.find_elements(By.CSS_SELECTOR, "div.bdLine.type2 .i-no-data"):
+            return True
+        return False
 
-    search_form = driver.find_element(By.ID, "schFrom")
-    driver.execute_script("arguments[0].submit();", search_form)
-
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.bdLine.type2.type3 ul li")))
+    wait.until(search_finished)
 
 # ==================================================
 # 목록 파싱
 # ==================================================
 def parse_list(driver):
-    items = []
     rows = driver.find_elements(By.CSS_SELECTOR, "div.bdLine.type2.type3 ul > li")
+
+    if not rows:
+        return []
+
+    items = []
     for row in rows:
         try:
             title = row.find_element(By.CSS_SELECTOR, ".titlesub").text.strip()
             date = row.find_element(By.CSS_SELECTOR, ".date").text.strip()
             a = row.find_element(By.TAG_NAME, "a")
+
             items.append({
                 "org_name": ORG_NAME,
                 "title": title,
                 "date": date,
-                "detail_url": urljoin(BASE_URL, a.get_attribute("href"))
+                "detail_url": urljoin(BASE_URL, a.get_attribute("href")),
             })
         except Exception:
             continue
-    logger.info(f"[SCRAPE] 목록 수집: {len(items)}건")
+
     return items
 
 # ==================================================
-# 상세 페이지 크롤링 (공유 드라이버)
+# 상세 페이지 워커
 # ==================================================
 def scrape_detail_worker(queue, results, driver_pool, start_dt, end_dt):
     while True:
         try:
             item = queue.get(block=False)
-        except:
+        except Exception:
             break
+
         driver = driver_pool.get()
         try:
-            logger.info(f"[CHECK] {item['detail_url']}")
             driver.get(item["detail_url"])
-            WebDriverWait(driver, 10).until(
+
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "div.dbdata"))
             )
-            logger.info("[REQ] 200 OK")
 
             dbdata_div = driver.find_element(By.CSS_SELECTOR, "div.dbdata")
-            exclude_divs = dbdata_div.find_elements(By.CSS_SELECTOR, "#hwpEditorBoardContent")
-            for ex in exclude_divs:
-                driver.execute_script("arguments[0].parentNode.removeChild(arguments[0]);", ex)
             paragraphs = dbdata_div.find_elements(By.XPATH, ".//p|.//div")
-            content = "\n".join([p.text.strip() for p in paragraphs if p.text.strip()])
-            item["content"] = content
+            item["content"] = "\n".join(p.text.strip() for p in paragraphs if p.text.strip())
 
-            # 날짜 필터링
-            item_date = datetime.strptime(item["date"], "%Y.%m.%d").date()
-            if not (start_dt <= item_date <= end_dt):
-                logger.info(f"[SCRAPE] [{item['title']}] 날짜 범위 외 공고 스킵: {item['date']}")
-            else:
+            item_date = datetime.strptime(item["date"], "%Y-%m-%d").date()
+            if start_dt <= item_date <= end_dt:
                 results.append(item)
-                logger.info(f"[SCRAPE] [{item['title']}] 상세 수집 완료")
 
         except Exception as e:
             item["content"] = ""
             results.append(item)
-            logger.warning(f"[SCRAPE] 상세 페이지 크롤 실패: {item['title']} / {e}")
+            logger.warning(f"[SCRAPE] 상세 실패: {item['title']} / {e}")
+
         finally:
             driver_pool.put(driver)
             queue.task_done()
@@ -167,90 +173,108 @@ def scrape_detail_worker(queue, results, driver_pool, start_dt, end_dt):
 # ==================================================
 def scrape_all(start_date=None, end_date=None):
     main_driver = create_driver()
+    driver_pool = None
     all_results = []
+
     start_dt, end_dt = resolve_search_dates(start_date, end_date)
 
     try:
-        logger.info(f"[SCRAPE] BOK 검색 스크래핑 시작 (기간: {start_dt} ~ {end_dt})")
+        logger.info(f"[SCRAPE] BOK 규정예고 시작 ({start_dt} ~ {end_dt})")
 
         if check_url_status(LIST_URL)["status"] != URLStatus.OK:
             raise RuntimeError("LIST_URL 접근 실패")
 
         main_driver.get(LIST_URL)
-        WebDriverWait(main_driver, 20).until(EC.presence_of_element_located((By.ID, "sdate")))
         apply_date_search(main_driver, start_date, end_date)
 
-        # 드라이버 풀 생성
         driver_pool = Queue()
         for _ in range(POOL_SIZE):
             driver_pool.put(create_driver())
 
         page_number = 1
         while True:
-            logger.info(f"[SCRAPE] 현재 페이지: {page_number}")
-            results = parse_list(main_driver)
-            if not results:
-                logger.info("[SCRAPE] 검색 결과 없음 또는 마지막 페이지 → 종료")
+            items = parse_list(main_driver)
+            logger.info(f"[SCRAPE] 페이지 {page_number} / 목록 {len(items)}건")
+
+            if not items:
                 break
 
-            # 큐에 항목 넣고 스레드 시작
             queue = Queue()
-            for item in results:
+            for item in items:
                 queue.put(item)
 
             threads = []
             for _ in range(POOL_SIZE):
-                t = Thread(target=scrape_detail_worker, args=(queue, all_results, driver_pool, start_dt, end_dt))
+                t = Thread(
+                    target=scrape_detail_worker,
+                    args=(queue, all_results, driver_pool, start_dt, end_dt),
+                    daemon=True,
+                )
                 t.start()
                 threads.append(t)
 
             for t in threads:
                 t.join()
 
-            # 다음 페이지 이동
             try:
                 next_page = main_driver.find_element(By.LINK_TEXT, str(page_number + 1))
                 main_driver.execute_script("arguments[0].click();", next_page)
-                WebDriverWait(main_driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.bdLine.type2.type3 ul li"))
+
+                WebDriverWait(main_driver, 20).until(
+                    lambda d: (
+                        d.find_elements(By.CSS_SELECTOR, "div.bdLine.type2.type3 ul > li")
+                        or d.find_elements(By.CSS_SELECTOR, "div.bdLine.type2 .i-no-data")
+                    )
                 )
+
                 page_number += 1
             except NoSuchElementException:
-                logger.info("[SCRAPE] 마지막 페이지 도달")
                 break
 
-        # JSON 저장
         output_path = os.path.join(
-            OUTPUT_DIR, f"bok_search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            OUTPUT_DIR,
+            f"bok_search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         )
+
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(all_results, f, ensure_ascii=False, indent=2)
-        logger.info(f"[SCRAPE] 총 {len(all_results)}건 저장 완료: {output_path}")
+
+        logger.info(f"[SCRAPE] 저장 완료: {len(all_results)}건")
 
     finally:
-        # 드라이버 풀 종료
-        while not driver_pool.empty():
-            driver_pool.get().quit()
-        main_driver.quit()
+        if driver_pool:
+            while not driver_pool.empty():
+                try:
+                    driver_pool.get().quit()
+                except Exception:
+                    pass
+
+        try:
+            main_driver.quit()
+        except Exception:
+            pass
+
         logger.info("[SCRAPE] 드라이버 종료")
 
 # ==================================================
 # Health Check
 # ==================================================
 from common.common_http import check_url_status
-from common.url_health_mapper import map_urlstatus_to_health_error
+from common.health_mapper import map_url_status_to_health_error
 from common.health_schema import base_health_output
 from common.health_mapper import apply_health_error
 
 from common.health_exception import HealthCheckError
 from common.health_error_type import HealthErrorType
 
+# ==================================================
+# Health Check
+# ==================================================
 def bok_legnotice_health_check() -> dict:
     """
     BOK 규정예고 Health Check
-    - HTTP 접근
-    - 목록 1건 확인
-    - 상세 페이지 접근
+    - common_http 결과를 그대로 사용
+    - NetworkState 재판별 금지
     """
 
     start_ts = time()
@@ -265,22 +289,29 @@ def bok_legnotice_health_check() -> dict:
 
     try:
         # ==================================================
-        # 1️⃣ HTTP 체크 (항상 생성)
+        # HTTP / Network 체크
         # ==================================================
-        http_result = check_url_status(LIST_URL)
+        # def check_url_status(
+        #     url: str,
+        #     timeout: int = REQUEST_TIMEOUT,
+        #     use_selenium: bool = False,
+        #     allow_fallback: bool = True           
+        http_result = check_url_status(LIST_URL,allow_fallback=True,)
+        url_status = http_result["status"]
 
         result["checks"]["http"] = {
-            "ok": http_result["status"] == URLStatus.OK,
+            "ok": url_status == URLStatus.OK,
             "status_code": http_result["http_code"],
-            "verify_ssl": True,
-        }
+            "engine": http_result["engine"],
+            "verify_ssl": http_result.get("verify_ssl", True),
+        } 
 
-        if http_result["status"] != URLStatus.OK:
+        if url_status != URLStatus.OK:
             raise HealthCheckError(
-                map_urlstatus_to_health_error(http_result["status"]),
-                "목록 페이지 HTTP 접근 실패",
-                LIST_URL,
-            )
+                error_type=map_url_status_to_health_error(http_result["status"]),
+                message=http_result["error"] or http_result["status"].name,
+                target=LIST_URL,
+            )  
 
         # ==================================================
         # 2️⃣ 목록 접근
@@ -303,8 +334,6 @@ def bok_legnotice_health_check() -> dict:
                 "div.bdLine.type2.type3 ul > li",
             )
 
-        first_item = items[0]
-
         result["checks"]["list"] = {
             "ok": True,
             "count": len(items),
@@ -313,12 +342,13 @@ def bok_legnotice_health_check() -> dict:
         # ==================================================
         # 3️⃣ 상세 페이지 접근
         # ==================================================
+        first_item = items[0]
         detail_url = first_item.get("detail_url")
 
         if not detail_url:
             raise HealthCheckError(
                 HealthErrorType.NO_DETAIL_URL,
-                "상세 페이지 URL 누락",
+                "상세 URL 누락",
                 "a[href]",
             )
 
@@ -328,17 +358,21 @@ def bok_legnotice_health_check() -> dict:
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dbdata"))
         )
 
+        content = driver.find_element(By.CSS_SELECTOR, "div.dbdata").text.strip()
+
+        if not content:
+            raise HealthCheckError(
+                HealthErrorType.CONTENT_EMPTY,
+                "본문 비어 있음",
+                "div.dbdata",
+            )
+
         result["checks"]["detail"] = {
             "ok": True,
             "url": detail_url,
-            "content_length": len(
-                driver.find_element(By.CSS_SELECTOR, "div.dbdata").text.strip()
-            ),
+            "content_length": len(content),
         }
 
-        # ==================================================
-        # SUCCESS
-        # ==================================================
         result["ok"] = True
         result["status"] = "OK"
 
@@ -355,14 +389,18 @@ def bok_legnotice_health_check() -> dict:
             ),
         )
 
-    except Exception as e:
-        apply_health_error(
-            result,
-            HealthCheckError(
-                HealthErrorType.UNEXPECTED_ERROR,
-                str(e),
-            ),
-        )
+        return result   #여기서 끝
+    # except Exception as e:
+    #     # print(f"⚠ Exception 결과 {result}")
+    #     # print(f"⚠ Exception 결과 {e}")
+    #     apply_health_error(
+    #         result,
+    #         HealthCheckError(
+    #             HealthErrorType.UNEXPECTED_ERROR,
+    #             "UNKNOWN",
+    #             str(e),
+    #         ),
+    #     )
 
     finally:
         result["elapsed_ms"] = int((time() - start_ts) * 1000)
