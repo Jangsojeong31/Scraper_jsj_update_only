@@ -1552,7 +1552,7 @@ from common.constants import URLStatus
 from common.url_health_mapper import map_urlstatus_to_health_error
 from common.base_scraper import BaseScraper
 from KoFIU_Scraper.extractor.pdf_extractor import PDFExtractor
-from KoFIU_Scraper.extractor.ocr_extractor import OCRExtractor
+# from KoFIU_Scraper.extractor.ocr_extractor import OCRExtractor
 
 def kofiu_health_check() -> Dict:
 
