@@ -462,7 +462,37 @@ class FSSScraperV2:
         # 변환 실패 시 원본 반환 (경고는 나중에 처리)
         return date_str
 
-    def scrape_all(self, limit=None, after_date=None, sdate='', edate=''):
+    def _load_archive_urls(self, archive_path):
+        """
+        archive JSON에서 atchFileUrl(파일다운로드URL) 집합 로드.
+        목록의 상세페이지URL과 비교하여 중복 건너뛰기용.
+        
+        Args:
+            archive_path: archive JSON 파일 경로 (str 또는 Path)
+            
+        Returns:
+            set: 비어 있지 않은 URL 문자열 집합 (없거나 오류 시 빈 set)
+        """
+        urls = set()
+        path = Path(archive_path) if archive_path else None
+        if not path or not path.exists():
+            return urls
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                return urls
+            for row in data:
+                url = (row.get('atchFileUrl') or row.get('파일다운로드URL', '') or '').strip()
+                if url:
+                    urls.add(url)
+            if urls:
+                print(f"  archive 기준 URL {len(urls)}개 로드 (중복 체크용)")
+        except Exception as e:
+            print(f"  archive 로드 실패 (중복 체크 생략): {e}")
+        return urls
+
+    def scrape_all(self, limit=None, after_date=None, sdate='', edate='', archive_path=None):
         """
         전체 페이지 스크래핑
         
@@ -471,6 +501,7 @@ class FSSScraperV2:
             after_date: 이 날짜 이후 항목만 수집 (YYYY-MM-DD 또는 YYYY.MM.DD 형식)
             sdate: 검색 시작일 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식 지원)
             edate: 검색 종료일 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식 지원)
+            archive_path: archive JSON 경로. 목록의 상세페이지URL이 archive의 atchFileUrl에 있으면 스킵 (None이면 script_dir/archive/fss_sanc_result.json 사용)
         """
         # 날짜 형식 정규화 (YYYY-MM-DD로 통일)
         sdate_normalized = self.normalize_date_format(sdate) if sdate else ''
@@ -558,17 +589,30 @@ class FSSScraperV2:
 
         print(f"\n총 {len(all_items)}개 항목 수집 완료")
 
+        # archive 기준 중복 체크: 목록의 상세페이지URL vs archive의 atchFileUrl
+        if archive_path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            archive_path = os.path.join(script_dir, 'archive', 'fss_sanc_result.json')
+        archive_urls = self._load_archive_urls(archive_path)
+
         print("\n상세 정보 및 첨부파일 추출 시작...")
-        
+        skip_count = 0
+
         for idx, item in enumerate(all_items, 1):
             link_text = item.pop('_link_text', '')
             institution_from_list = item.get('제재대상기관', '')
-            
+            detail_url = item.get('상세페이지URL', '')
+
+            # 목록의 detail_url이 archive의 atchFileUrl에 있으면 이미 수집된 항목으로 스킵
+            if detail_url and detail_url in archive_urls:
+                skip_count += 1
+                continue
+
             print(f"\n[{idx}/{len(all_items)}] {institution_from_list or link_text or 'N/A'} 처리 중...")
-            
-            if item.get('상세페이지URL'):
+
+            if detail_url:
                 attachment_content, doc_type, file_download_url, file_name = self.extract_attachment_content(
-                    item['상세페이지URL'], 
+                    detail_url,
                     link_text
                 )
                 item['제재조치내용'] = attachment_content
@@ -668,6 +712,9 @@ class FSSScraperV2:
 
             self.results.append(item)
             time.sleep(1)
+
+        if skip_count > 0:
+            print(f"\n  총 {skip_count}개 건너뜀 (archive 중복)")
 
         # 리소스 정리
         self.close()
@@ -1070,7 +1117,9 @@ if __name__ == "__main__":
                         help=f'검색 종료일 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, 기본값: {default_edate})')
     parser.add_argument('--output', type=str, default='fss_sanc_result.json',
                         help='출력 파일명 (기본값: fss_sanc_result.json)')
-    
+    parser.add_argument('--archive', type=str, default=None,
+                        help='archive JSON 경로. 목록 상세페이지URL이 archive atchFileUrl에 있으면 스킵 (기본: ./archive/fss_sanc_result.json)')
+
     parser.add_argument(
         "--check",
         action="store_true",
@@ -1090,10 +1139,11 @@ if __name__ == "__main__":
     
     scraper = FSSScraperV2()
     results = scraper.scrape_all(
-        limit=args.limit, 
+        limit=args.limit,
         after_date=args.after,
         sdate=args.sdate,
-        edate=args.edate
+        edate=args.edate,
+        archive_path=args.archive
     )
     scraper.save_results(filename=args.output)
 

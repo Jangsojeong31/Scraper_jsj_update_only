@@ -339,7 +339,8 @@ def main() -> None:
             scraper_args.extend(['--edate', edate])
             if args.after:
                 scraper_args.extend(['--after', args.after])
-            run_step('fss_sanctions_scraper.py', '1. 목록 및 PDF 스크래핑', scraper_args if scraper_args else None)
+            scraper_args.extend(['--archive', str(archive_path)])
+            run_step('fss_sanctions_scraper.py', '1. 목록 및 PDF 스크래핑', scraper_args)
             
             # OCR 후처리 실행
             if json_path.exists():
