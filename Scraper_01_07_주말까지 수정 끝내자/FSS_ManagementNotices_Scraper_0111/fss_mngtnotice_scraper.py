@@ -44,6 +44,14 @@ from extract_metadata import (
     format_date_to_iso
 )
 
+# OCR 후처리 (API 전송 전 적용용)
+try:
+    from post_process_ocr import process_ocr_text, remove_all_whitespace, clean_content_symbols
+except ImportError:
+    process_ocr_text = lambda t, preserve_spacing=False: t or ''
+    remove_all_whitespace = lambda t: t if t is not None else ''
+    clean_content_symbols = lambda t: t or ''
+
 # OCR 전용 extract_metadata 모듈 import
 try:
     from extract_metadata_ocr import (
@@ -489,7 +497,7 @@ class FSSManagementNoticesScraperV2:
         첨부파일 내용 추출 (FileExtractor 사용)
         
         Returns:
-            tuple: (추출된 내용, 문서유형, 파일다운로드URL, 파일명)
+            tuple: (추출된 내용, 문서유형, 파일다운로드URL, 파일명, 파일경로 또는 None)
         """
         try:
             # PDF URL인 경우 직접 다운로드
@@ -533,19 +541,13 @@ class FSSManagementNoticesScraperV2:
                         else:
                             print(f"  ✗ OCR 사용 불가 (is_available() = False)")
                     
-                    # 임시 파일 삭제
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
-                    
                     if content and content.strip():
                         print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                        return content, doc_type, file_url, filename
+                        return content, doc_type, file_url, filename, file_path
                     else:
-                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', file_url, filename
+                        return "[PDF 파일이지만 텍스트 추출 실패]", 'PDF-OCR필요', file_url, filename, file_path
                 else:
-                    return "[파일 다운로드 실패]", '오류', file_url, filename
+                    return "[파일 다운로드 실패]", '오류', file_url, filename, None
             
             # 일반 페이지에서 첨부파일 링크 찾기
             response = self.get_page(detail_url)
@@ -619,33 +621,22 @@ class FSSManagementNoticesScraperV2:
                                 else:
                                     print(f"  ✗ OCR 사용 불가 (ocr_available = False)")
                             
-                            # 임시 파일 삭제
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
-                            
                             if content and content.strip():
                                 print(f"  ✓ PDF 내용 추출 완료 ({len(content)}자)")
-                                return content, doc_type, file_url, filename
+                                return content, doc_type, file_url, filename, file_path
                             else:
-                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url, filename
+                                return f"[PDF 파일이지만 텍스트 추출 실패: {filename}]", 'PDF-OCR필요', file_url, filename, file_path
                         else:
-                            # 임시 파일 삭제
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
-                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_url, filename
+                            return f"[{os.path.splitext(file_path)[1]} 파일은 현재 지원되지 않습니다: {filename}]", '기타첨부파일', file_url, filename, file_path
                     break
             
-            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', '', ''
+            return "[첨부파일을 찾을 수 없습니다]", '첨부없음', '', '', None
             
         except Exception as e:
             print(f"  첨부파일 추출 중 오류: {e}")
             import traceback
             traceback.print_exc()
-            return f"[오류: {str(e)}]", '오류', '', ''
+            return f"[오류: {str(e)}]", '오류', '', '', None
     
     def scrape_list_page(self, page_index, sdate='', edate=''):
         """목록 페이지 스크래핑"""
@@ -740,7 +731,7 @@ class FSSManagementNoticesScraperV2:
         # 변환 실패 시 원본 반환 (경고는 나중에 처리)
         return date_str
     
-    def scrape_all(self, limit=None, after_date=None, sdate='', edate='', archive_path=None):
+    def scrape_all(self, limit=None, after_date=None, sdate='', edate='', archive_path=None, skip_archive_check=False):
         """
         전체 페이지 스크래핑
         
@@ -750,6 +741,7 @@ class FSSManagementNoticesScraperV2:
             sdate: 검색 시작일 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식 지원)
             edate: 검색 종료일 (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식 지원)
             archive_path: archive JSON 경로. 목록의 상세페이지URL이 archive의 atchFileUrl에 있으면 스킵 (None이면 script_dir/archive/fss_mngnt_result.json 사용)
+            skip_archive_check: True면 archive 로드·중복 체크 생략 (전체 수집)
         """
         # 날짜 형식 정규화 (YYYY-MM-DD로 통일)
         sdate_normalized = self.normalize_date_format(sdate) if sdate else ''
@@ -837,11 +829,15 @@ class FSSManagementNoticesScraperV2:
         
         print(f"\n총 {len(all_items)}개 항목 수집 완료")
         
-        # archive 기준 중복 체크: 목록의 상세페이지URL vs archive의 atchFileUrl
-        if archive_path is None:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            archive_path = os.path.join(script_dir, 'archive', 'fss_mngnt_result.json')
-        archive_urls = self._load_archive_urls(archive_path)
+        # archive 기준 중복 체크: 목록의 상세페이지URL vs archive의 atchFileUrl (skip_archive_check=True면 생략)
+        if skip_archive_check:
+            archive_urls = set()
+            print("\n  (archive 중복 체크 없음)")
+        else:
+            if archive_path is None:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                archive_path = os.path.join(script_dir, 'archive', 'fss_mngnt_result.json')
+            archive_urls = self._load_archive_urls(archive_path)
         
         print("\n상세 정보 및 첨부파일 추출 시작...")
         skip_count = 0
@@ -859,9 +855,10 @@ class FSSManagementNoticesScraperV2:
                 continue
             
             print(f"\n[{idx}/{len(all_items)}] {institution_from_list or link_text or 'N/A'} 처리 중...")
+            file_path = None
             
             if detail_url:
-                attachment_content, doc_type, file_download_url, file_name = self.extract_attachment_content(
+                attachment_content, doc_type, file_download_url, file_name, file_path = self.extract_attachment_content(
                     detail_url,
                     link_text
                 )
@@ -950,6 +947,45 @@ class FSSManagementNoticesScraperV2:
             if '업종' not in item:
                 item['업종'] = '기타'
             
+            # 파일 1건 처리 직후: 사건별 분리 → OCR 후처리(해당 시) → API 전달 형태 출력 → 임시 파일 삭제
+            rows = self._split_one_item(item)
+            if item.get('OCR추출여부') == '예':
+                # item 필드 갱신 (save_results 시 _split_incidents와 일치)
+                snct = item.get('제재내용', '') or ''
+                if snct:
+                    item['제재내용'] = process_ocr_text(snct, preserve_spacing=True)
+                for i in range(1, len([k for k in item.keys() if k.startswith('제목')]) + 1):
+                    tit = item.get(f'제목{i}', '') or ''
+                    cntn = item.get(f'내용{i}', '') or ''
+                    if tit:
+                        item[f'제목{i}'] = remove_all_whitespace(process_ocr_text(tit, preserve_spacing=True))
+                    if cntn:
+                        item[f'내용{i}'] = clean_content_symbols(process_ocr_text(cntn, preserve_spacing=True))
+                # 행별 필드도 동일 적용
+                for row in rows:
+                    if row.get('제재내용'):
+                        row['제재내용'] = process_ocr_text(row['제재내용'], preserve_spacing=True)
+                    if row.get('제목'):
+                        row['제목'] = remove_all_whitespace(process_ocr_text(row['제목'], preserve_spacing=True))
+                    if row.get('내용'):
+                        row['내용'] = clean_content_symbols(process_ocr_text(row['내용'], preserve_spacing=True))
+            # API 전송 예정 데이터 형태 콘솔 출력 (실제 호출 없음)
+            api_payload = {
+                'file': {
+                    'path': file_path,
+                    'filename': item.get('파일명', ''),
+                    'url': item.get('파일다운로드URL', ''),
+                },
+                'incidents_count': len(rows),
+                'incidents': rows,
+            }
+            print("  [API 전달 형태] (전체 JSON)")
+            print(json.dumps(api_payload, ensure_ascii=False, indent=2))
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
             self.results.append(item)
             time.sleep(1)
         
@@ -1109,65 +1145,48 @@ class FSSManagementNoticesScraperV2:
         예: 제목1, 내용1, 제목2, 내용2 -> 두 개의 별도 행으로 분리
         """
         split_results = []
-        
         for item in self.results:
-            # 기본 필드 추출 (줄바꿈 정리 적용)
-            # 제재조치일 포맷팅 (목록에서 추출한 값이 우선, 없으면 PDF에서 추출한 값)
-            sanction_date = item.get('제재조치일', item.get('제재조치요구일', ''))
-            if sanction_date:
-                # format_date_to_iso 함수로 YYYY-MM-DD 형식으로 변환
-                sanction_date = format_date_to_iso(sanction_date)
-            
-            # 제재내용: 후처리 적용
-            raw_sanction_content = item.get('제재내용', '')
-            if raw_sanction_content:
-                cleaned_sanction_content = self._clean_content(raw_sanction_content)
-                processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
-            else:
-                processed_sanction_content = ''
-            
-            base_data = {
-                '구분': '경영유의',  # ManagementNotices 전용
-                '출처': '금융감독원',
-                '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
-                '업종': item.get('업종', '기타'),
-                '제재조치일': sanction_date,
-                '제재내용': processed_sanction_content,  # 후처리 적용
-                '파일다운로드URL': item.get('파일다운로드URL', ''),
-                '파일명': item.get('파일명', ''),
-                'OCR추출여부': item.get('OCR추출여부', '아니오')
-            }
-            
-            # 사건 수 확인
-            incident_count = len([k for k in item.keys() if k.startswith('제목')])
-            
-            if incident_count == 0:
-                # 사건이 없는 경우 기본 데이터만 저장
-                split_results.append({
-                    **base_data,
-                    '제목': '',
-                    '내용': ''
-                })
-            else:
-                # 각 사건을 별도 행으로 분리
-                for i in range(1, incident_count + 1):
-                    title = item.get(f'제목{i}', '')
-                    raw_content = item.get(f'내용{i}', '')
-                    
-                    # 내용: 후처리 적용
-                    if raw_content:
-                        cleaned_content = self._clean_content(raw_content)
-                        processed_content = self._post_process_content(cleaned_content)
-                    else:
-                        processed_content = ''
-                    
-                    split_results.append({
-                        **base_data,
-                        '제목': title,
-                        '내용': processed_content  # 후처리 적용
-                    })
-        
+            split_results.extend(self._split_one_item(item))
         return split_results
+
+    def _split_one_item(self, item):
+        """항목 하나를 사건별 행 리스트로 분리 (후처리 적용). 파일 1건 처리 직후 API 전송용으로 사용."""
+        rows = []
+        # 기본 필드 추출 (줄바꿈 정리 적용)
+        sanction_date = item.get('제재조치일', item.get('제재조치요구일', ''))
+        if sanction_date:
+            sanction_date = format_date_to_iso(sanction_date)
+        raw_sanction_content = item.get('제재내용', '')
+        if raw_sanction_content:
+            cleaned_sanction_content = self._clean_content(raw_sanction_content)
+            processed_sanction_content = self._post_process_sanction_content(cleaned_sanction_content)
+        else:
+            processed_sanction_content = ''
+        base_data = {
+            '구분': '경영유의',
+            '출처': '금융감독원',
+            '금융회사명': item.get('금융회사명', item.get('제재대상기관', '')),
+            '업종': item.get('업종', '기타'),
+            '제재조치일': sanction_date,
+            '제재내용': processed_sanction_content,
+            '파일다운로드URL': item.get('파일다운로드URL', ''),
+            '파일명': item.get('파일명', ''),
+            'OCR추출여부': item.get('OCR추출여부', '아니오')
+        }
+        incident_count = len([k for k in item.keys() if k.startswith('제목')])
+        if incident_count == 0:
+            rows.append({ **base_data, '제목': '', '내용': '' })
+        else:
+            for i in range(1, incident_count + 1):
+                title = item.get(f'제목{i}', '')
+                raw_content = item.get(f'내용{i}', '')
+                if raw_content:
+                    cleaned_content = self._clean_content(raw_content)
+                    processed_content = self._post_process_content(cleaned_content)
+                else:
+                    processed_content = ''
+                rows.append({ **base_data, '제목': title, '내용': processed_content })
+        return rows
     
     def save_results(self, filename='fss_mngnt_result.json'):
         """결과 저장 (JSON, CSV) - output 폴더에 저장"""
@@ -1305,7 +1324,7 @@ def fss_mngtnotice_check() -> dict:
         # 3️⃣ 파일 다운로드 및 PDF/OCR 파싱
         # ===============================
         # fss_scraper_v2.py는 4개 값을 반환하므로 filename도 받음 (사용하지 않지만 unpacking 오류 방지)
-        content, doc_type, file_url, filename = scraper.extract_attachment_content(detail_url, first.get('_link_text', ''))
+        content, doc_type, file_url, filename, _ = scraper.extract_attachment_content(detail_url, first.get('_link_text', ''))
 
         # 파일 다운로드 체크
         if file_url:
@@ -1384,6 +1403,7 @@ if __name__ == "__main__":
     parser.add_argument('--after', type=str, default=None, help='이 날짜 이후 항목만 수집 (형식: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD)')
     parser.add_argument('--output', type=str, default='fss_mngnt_result.json', help='출력 파일명 (기본: fss_mngnt_result.json)')
     parser.add_argument('--archive', type=str, default=None, help='archive JSON 경로. 목록 상세페이지URL이 archive atchFileUrl에 있으면 스킵 (기본: ./archive/fss_mngnt_result.json)')
+    parser.add_argument('--no-archive', action='store_true', help='archive 중복 체크 없이 전체 수집')
     
     parser.add_argument(
         '--check',
@@ -1407,7 +1427,8 @@ if __name__ == "__main__":
         after_date=args.after,
         sdate=args.sdate,
         edate=args.edate,
-        archive_path=args.archive
+        archive_path=args.archive,
+        skip_archive_check=args.no_archive
     )
     scraper.save_results(filename=args.output)
     
