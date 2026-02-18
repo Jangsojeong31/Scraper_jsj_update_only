@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Output files (스크래핑 결과물)
+**/output/
+**/output/**/*.csv
+**/output/**/*.json
+**/output/**/*.xlsx
+**/output/**/*.xls
+
+# Input files (민감한 데이터가 있을 수 있음)
+**/input/*.csv
+**/input/*.xlsx
+**/input/*.xls
+**/input/*.txt
+
+# Excel files
+*.xlsx
+*.xls
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+run.log
+reprocess.log
+
+# Temporary files
+*.tmp
+*.temp
+temp_*.py
+temp.zip
+html_snippet.txt
+
+# 스크래핑 결과 파일들 (JSON, CSV)
+*_results.json
+*_results.csv
+results.json
+results.csv
+results.xlsx
+inspection_results*.json
+inspection_results*.csv
+
+# 다운로드된 파일들
+**/downloads/
+**/debug/
+
+# 백업 파일들
+**/backups/
+*_backup.json
+*_backup.csv
+
+# 임시 스크립트 파일들
+restore_*.py
+restore_*.bat
+
+# 테스트/임시 파일들
+inner.hwp
+run_with_timer.py
+
+# OCR 관련 파일들
+*.traineddata
+

@@ -1,0 +1,25 @@
+# Scraper 프로젝트 통합 requirements.txt
+# 설치 방법: pip3 install -r requirements.txt
+
+# 웹 스크래핑
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+selenium==4.15.2
+
+# 파일 처리
+openpyxl==3.1.2
+pandas>=2.0.0
+olefile==0.46
+pyhwp>=0.1b15
+six>=1.16.0
+
+# PDF 처리 (기존 FSS 스크래퍼용)
+pdfplumber==0.11.8
+PyPDF2==3.0.1
+PyMuPDF
+
+# OCR 처리 (기존 FSS 스크래퍼용)
+pytesseract
+Pillow==12.0.0
+

@@ -1,0 +1,6 @@
+새로운 스크랩핑 폴더를 하나 생성할꺼야 "감독행적작용" 이고,
+대상 사이트 : https://www.fss.or.kr/fss/job/admnstgudcDtls/list.do?menuNo=200494&pageIndex=1&searchRegn=&searchYear=&searchCecYn=T&searchWrd=
+관리번호, 제목, 소관부서, 시행일, 시행여부, 첨부파일 이름, 첨부파일 링크, 제목 눌러서 들어가서 상세내용, 상세내용 내에서는 시행일, 담당부서, 담당팀, 담당자, 자료문의 이렇게 스크랩 해줘
+위까지의 프롬프트는 별도로 감독행정작용 내역.txt 파일로도 저장해줘
+실행 진행결과는 세부적으로 run.log 파일로 남겨주고 로그내용은 한글이 안깨지게 처리해줘
+스크랩핑 결과값은 csv와 json 파일로 각각 저장해줘

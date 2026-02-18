@@ -1,0 +1,46 @@
+# 은행연합회 규제심의위원회 결과 스크래퍼
+
+은행연합회의 규제심의위원회 결과 정보를 수집하는 스크래퍼입니다.
+
+## 개요
+
+**URL**: https://www.kfb.or.kr/publicdata/reform_result.php
+
+은행연합회 규제심의위원회 결과로 의사록 파일 등을 수집합니다.
+
+## 실행 방법
+
+```bash
+# 프로젝트 루트에서 실행
+python3 KFB_Committee_Scraper/kfb_committee_scraper.py
+
+# 또는 KFB_Committee_Scraper 디렉토리에서 실행
+cd KFB_Committee_Scraper
+python3 kfb_committee_scraper.py
+```
+
+## 옵션
+
+- `--limit`: 수집할 최대 건수 지정 (기본 0, 전체)
+- `--no-download`: 상세 페이지 첨부 파일 다운로드 생략
+
+## 출력 파일
+
+- `output/kfb_committee.json`: JSON 형식 결과
+- `output/kfb_committee.csv`: CSV 형식 결과
+
+## 수집 정보
+
+- 번호
+- 제목
+- 상세 링크
+- 등록일
+- 첨부파일 정보 (의사록 등)
+- 첨부파일 다운로드
+
+## 참고사항
+
+- Selenium을 사용하여 JavaScript로 동적 로드되는 페이지를 처리합니다.
+- 첨부파일은 `output/downloads/` 디렉토리에 저장됩니다.
+- ChromeDriver가 필요합니다.
+
